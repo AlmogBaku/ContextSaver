@@ -87,7 +87,7 @@ export type State = {
   steerDraft: string | null        // the field's current text (kept in state so redraws never wipe it)
   notes: string[]                  // one-shot texts: drained into the next tool result or prompt
   standing: string[]               // texts re-sent with every prompt this session
-  judge: { lastAtTokens: number; lastAtTurn: number; running: boolean; spent: number; backoff: number; error: string | null; focus: string | null }
+  judge: { lastAtTokens: number; lastAtTurn: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null }
   paneOpen: boolean
   autoOpened: boolean              // the pane auto-opened once this session (like /diff on the first edit)
   columns: number | null           // last band width seen (e.props.bodyColumns), for the auto-open decision
@@ -96,7 +96,7 @@ export type State = {
 
 export const initialState = (cwd: string, window: number): State => ({
   cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, usageSamples: [], overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [],
-  judge: { lastAtTokens: 0, lastAtTurn: 0, running: false, spent: 0, backoff: 1, error: null, focus: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
+  judge: { lastAtTokens: 0, lastAtTurn: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
 export type Action =
@@ -138,5 +138,28 @@ export type Actions = {
   tryOnce(a: Artifact): void
   skip(a: Artifact): void
 }
-export type BandProps = { ui: Ui; state: State; site: Site; actions: Actions }
-export type PaneProps = { ui: Ui; state: State; artifacts: Artifact[]; site: Site; placement: 'dock' | 'inline'; actions: Actions }
+/** View models: computed by patterns.ts from State, rendered by ui.tsx. Keeps the UI free of state logic. */
+export type Header = {
+  percent: number | null            // context used, 0..100
+  spark: number[]                   // percent per recent turn, for the sparkline
+  tokensToCompaction: number | null // exact: threshold - tokens
+  turnsToCompaction: number | null  // estimate at the recent pace
+  judgeRuns: number
+  judgeShare: number                // judge tokens as a percentage of session tokens, 1 decimal
+  judgeRunning: boolean
+  savedPct: number
+  savedMs: number
+}
+export type DecidedRow = { patternId: string; choice: Choice; kind: string; savedPct: number | null; ignored: number }
+export type PaneModel = {
+  header: Header
+  wasters: Card[]                   // undecided patterns, newest first
+  expanded: string | null
+  steering: string | null
+  steerDraft: string | null
+  decided: DecidedRow[]             // newest first
+  artifacts: Artifact[]
+}
+export type BandModel = { percent: number | null; tokensToCompaction: number | null; fresh: number; savedPct: number; paneOpen: boolean }
+export type BandProps = { ui: Ui; model: BandModel; site: Site; actions: Actions }
+export type PaneProps = { ui: Ui; model: PaneModel; site: Site; placement: 'dock' | 'inline'; actions: Actions }
