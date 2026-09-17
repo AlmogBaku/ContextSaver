@@ -5,6 +5,7 @@ import { twoWasters } from './two-wasters'
 const seated: Card = {
   patternId: 'execution:recheck',
   n: 1,
+  category: 'execution',
   kind: 'Claude keeps re-running the type-check with nothing changed since the last one',
   stats: '2× · ~2% of context · 6s · turns 15–17',
   why: 'the check ran twice in a row with no edited path between the two runs',

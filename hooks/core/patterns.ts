@@ -188,12 +188,16 @@ const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>
     judge: {
       lastAtTokens: total,
       lastAtTurn: state.turn,
+      lastAtSeq: state.judge.lastAtSeq,
+      lastAtMs: state.judge.lastAtMs,
       running: false,
       runs: state.judge.runs + 1,
       spent,
       backoff: spent > JUDGE_BUDGET_SHARE * total ? Math.min(state.judge.backoff * 2, JUDGE_MAX_BACKOFF) : state.judge.backoff,
       error: a.error,
       focus: a.focus,
+      time: a.time,
+      context: a.context,
       last: { returned: a.returned, kept: a.kept, dropped: [...a.dropped] },
     },
   }
@@ -233,7 +237,7 @@ export const reduce = (state: State, action: Action): State => {
     case 'decide':
       return applyDecide(state, action.patternId, action.choice, action.text)
     case 'judge.start':
-      return { ...state, judge: { ...state.judge, running: true } }
+      return { ...state, judge: { ...state.judge, running: true, lastAtMs: action.now, lastAtSeq: action.seq } }
     case 'judge.done':
       return applyJudgeDone(state, action)
     case 'notes.drained':
@@ -317,6 +321,7 @@ export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap
   return {
     patternId: p.id,
     n,
+    category: p.category,
     kind: p.ignored > 0 ? `ignored · ${p.kind}` : p.kind,
     stats: statsOf(p, state, rows),
     why: p.why,
@@ -333,6 +338,11 @@ const headerOf = (state: State): Header => ({
   percent: state.usage.percent ?? null,
   tokensToCompaction: tokensToCompaction(state),
   turnsToCompaction: turnsToCompaction(state),
+  trend: [],
+  time: null,
+  context: null,
+  judgeTime: null,
+  judgeContext: null,
   judgeRuns: state.judge.runs,
   judgeTokens: state.judge.spent,
   judgeShare: judgeShare(state),
@@ -386,6 +396,7 @@ export const bandModel = (state: State): BandModel => ({
   fresh: state.cards.length,
   savedPct: pctOf(state.saved.chars, state.usage.window),
   paneOpen: state.paneOpen,
+  checking: state.judge.running,
 })
 
 const isFilled = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0

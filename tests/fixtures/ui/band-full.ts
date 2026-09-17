@@ -7,4 +7,5 @@ export const bandFull: BandModel = {
   fresh: 2,
   savedPct: 3,
   paneOpen: false,
+  checking: false,
 }

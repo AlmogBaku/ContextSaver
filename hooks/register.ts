@@ -11,7 +11,7 @@ import {
   AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, MAX_PATTERNS, PANE_ID, PANE_INLINE_ROWS,
   PANE_TITLE, PLUGIN_NAME, initialState,
 } from './core/types'
-import type { Action, Actions, Artifact, Choice, State } from './core/types'
+import type { Action, Actions, Artifact, Choice, State, Ui } from './core/types'
 import type { Host } from './host'
 import { Band, Pane } from './ui'
 
@@ -92,14 +92,16 @@ export function register(on: On): void {
 
   // A run that reported nothing: a cold snapshot, a refusal, or a failure of ours.
   const judgedNothing = (error: string): Action => ({
-    type: 'judge.done', patterns: state.patterns, fresh: [], recurred: [], focus: null, spent: 0, error,
+    type: 'judge.done', patterns: state.patterns, fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error,
     returned: 0, kept: 0, dropped: [],
   })
 
   async function runJudge(): Promise<void> {
     const engine = host
     if (engine === null || state.judge.running) return
-    dispatch({ type: 'judge.start' })
+    const seq = state.seq
+    const now = await engine.now()
+    dispatch({ type: 'judge.start', now, seq })
     let reply: ModelForkResult | null = null
     let failed: string | null = null
     try {
@@ -119,7 +121,7 @@ export function register(on: On): void {
       const kept = findings.length - merged.evicted.length
       dispatch({
         type: 'judge.done', patterns: merged.patterns, fresh: merged.fresh, recurred: merged.recurred, focus,
-        spent: costOf(reply.usage), error: null, returned, kept, dropped: reasons,
+        time: null, context: null, spent: costOf(reply.usage), error: null, returned, kept, dropped: reasons,
       })
       try {
         if (isDebug) {
@@ -371,6 +373,7 @@ export function register(on: On): void {
           answerChars: e.answer.length,
           answerHead: e.answer.slice(0, ANSWER_HEAD),
           aborted: e.isAborted,
+          context: null,
         },
       })
       const seen = await engine.usage()
@@ -416,9 +419,9 @@ export function register(on: On): void {
     // Drawn once: a band we cannot build answers with what is beneath it, never with a second dispatch.
     const below: RenderElement = await next(e)
     try {
-      const { Box, Text, Button, Input } = $.ui.resolve(e)
+      const { Box, Text, Button, Input, Raster } = $.ui.resolve(e) as unknown as Ui
       const band = Band({
-        ui: { Box, Text, Button, Input },
+        ui: { Box, Text, Button, Input, Raster },
         model: bandModel(state),
         site: { bodyColumns: e.props.bodyColumns, maxRows: e.props.maxRows },
         actions,
@@ -432,9 +435,9 @@ export function register(on: On): void {
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, ($, e, next) => {
     try {
       if (host === null || e.surface === 'mobile') return next(e)
-      const { Box, Text, Button, Input } = $.ui.resolve(e)
+      const { Box, Text, Button, Input, Raster } = $.ui.resolve(e) as unknown as Ui
       return Pane({
-        ui: { Box, Text, Button, Input },
+        ui: { Box, Text, Button, Input, Raster },
         model: paneModel(state, propose(state)),
         site: { bodyColumns: e.props.bodyColumns, maxRows: e.props.scroll.bodyRows },
         placement: e.props.placement,
@@ -481,7 +484,7 @@ export function register(on: On): void {
         const patterns = demoPatterns(state.turn)
         const fresh = patterns.filter(p => p.decision === null).map(p => p.id)
         dispatch({
-          type: 'judge.done', patterns, fresh, recurred: [], focus: null, spent: 0, error: null,
+          type: 'judge.done', patterns, fresh, recurred: [], focus: null, time: null, context: null, spent: 0, error: null,
           returned: patterns.length, kept: patterns.length, dropped: [],
         })
         await openPane()

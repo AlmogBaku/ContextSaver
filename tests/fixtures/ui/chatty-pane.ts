@@ -9,6 +9,7 @@ export const chattyPane: PaneModel = {
     {
       patternId: 'communication:restates-plan-each-turn',
       n: 1,
+      category: 'communication',
       kind: 'Claude keeps restating the plan in turns that make no tool call',
       stats: '2× · turns 14–15',
       why: 'turns 14 and 15 made no call and restated the plan already agreed',

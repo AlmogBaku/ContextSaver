@@ -6,6 +6,11 @@ export const twoWasters: PaneModel = {
     percent: 64,
     tokensToCompaction: 41_000,
     turnsToCompaction: 6,
+    trend: [],
+    time: null,
+    context: null,
+    judgeTime: null,
+    judgeContext: null,
     judgeRuns: 2,
     judgeTokens: 7_400,
     judgeShare: 1.2,
@@ -17,6 +22,7 @@ export const twoWasters: PaneModel = {
     {
       patternId: 'execution:full-suite',
       n: 1,
+      category: 'execution',
       kind: 'Claude keeps running the whole bun test suite after every single-file edit',
       stats: '3× · ~9% of context · 3m 12s · turns 5–8',
       why: 'ran in full 3× while only src/auth.ts changed between runs; the user asked for a fix, not full verification',
@@ -31,6 +37,7 @@ export const twoWasters: PaneModel = {
     {
       patternId: 'reading:api-logs',
       n: 2,
+      category: 'reading',
       kind: 'Claude keeps reading 2000 lines of api logs instead of grepping for the error',
       stats: '2× · ~20% of context · 8s · turns 11–13',
       why: 'read the whole log twice when one grep would have shown the traceback',

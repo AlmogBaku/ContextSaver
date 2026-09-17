@@ -7,4 +7,5 @@ export const bandQuiet: BandModel = {
   fresh: 0,
   savedPct: 0,
   paneOpen: true,
+  checking: false,
 }
