@@ -328,6 +328,25 @@ describe('patterns', () => {
       .toMatchObject({ time: null, context: null, lastAtSeq: 0, lastAtMs: 0 })
   })
 
+  // A plugin loaded into a session with history arms one check (§6). A run that answered spends the
+  // arming; a cold snapshot or a refusal leaves it standing, so the audit is retried instead of lost.
+  test('check.arm waits for a judge run that answered', async () => {
+    const done = (error: string | null): Action => ({
+      type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null,
+      spent: 0, error, returned: 0, kept: 0, dropped: [], usage: null,
+    })
+    expect(seedState().pendingCheck, 'a session with no history to audit arms nothing').toBe(false)
+    const armed = reduce(seedState({ turn: 4, seq: 12 }), { type: 'check.arm' })
+    expect(armed.pendingCheck).toBe(true)
+    const started = reduce(armed, { type: 'judge.start', now: 1_700_000_000_000, seq: 12 })
+    expect(started.pendingCheck, 'a run under way is not yet an answer').toBe(true)
+    const cold = reduce(started, done('cold snapshot'))
+    expect(cold.pendingCheck, 'a run that reported nothing leaves the check for the next opportunity').toBe(true)
+    const answered = reduce(cold, done(null))
+    expect(answered.pendingCheck, 'a run that answered audited the session').toBe(false)
+    expect(reduce(armed, { type: 'reset' }).pendingCheck, 'and a cleared session has no history to audit').toBe(false)
+  })
+
   test('judge.done drops a card whose pattern the registry no longer carries', async () => {
     const state = seedState({ turn: 9, patterns: [suitePattern], cards: [suitePattern.id] })
     const pruned = reduce(state, { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })

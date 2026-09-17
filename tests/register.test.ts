@@ -1,3 +1,4 @@
+import type { ModelForkResult, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -39,11 +40,16 @@ const RESTATES_FINDING = rawFinding({
   est_tokens_per_turn: 800,
 })
 
-// The transcript of a session joined late with a long history: a whole row gate's worth of finished calls.
-const LONG_TRANSCRIPT = Array.from({ length: JUDGE_MIN_NEW_ROWS }, (_, at) => [
-  prompt(`step ${at + 1}`),
-  assistant([bashUse({ tool_use_id: `u-${at + 1}` })]),
-]).flat()
+// The transcript of a session joined late: one prompt and one finished `bun test` per step already run.
+const transcriptOf = (steps: number): SessionMessage[] =>
+  Array.from({ length: steps }, (_, at) => [
+    prompt(`step ${at + 1}`),
+    assistant([bashUse({ tool_use_id: `u-${at + 1}` })]),
+  ]).flat()
+
+// A long history: a whole row gate's worth of finished calls. A history worth judging: past the row floor.
+const LONG_TRANSCRIPT = transcriptOf(JUDGE_MIN_NEW_ROWS)
+const JOINED_CALLS = 12
 
 // Everything a plugin tree draws, flattened to the strings a person would read.
 const textOf = (value: unknown): string => {
@@ -589,11 +595,12 @@ describe('register', () => {
     expect(forks, 'the rows are there, the five minutes are not').toBe(0)
   })
 
-  // A session joined late adopts hundreds of rows: they are history, not new work, so they are no cadence
-  // either — and the very first tool call of that session must not fork the judge on a ledger of them.
+  // A session joined late adopts hundreds of rows: they are history, not new work, so the cadence counts
+  // from where the history ended, and the one run of that first tool call is the check the load armed.
   test('the rows a joined session adopted are not counted as new work', async ($, on) => {
     const world = startsSaver(on)
     let forks = 0
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
     on('session.messages', () => ({ value: LONG_TRANSCRIPT }))
     on('tool.call', () => bashAnswer(OUT_CHARS))
     on('model.fork', () => {
@@ -602,14 +609,135 @@ describe('register', () => {
     })
 
     await $.session.start(SESSION)
+
+    expect((await $.command.run(saverRun('debug'))).text, 'the cadence counts from where the history ended')
+      .toContain(`/ row ${JUDGE_MIN_NEW_ROWS} /`)
+
     await $.turn.start({ text: 'carry on', turnId: 'later' })
     await world.clock.advance(JUDGE_MIN_GAP_MS)
     await $.tool.call({ tool: 'Bash', command: 'bun test' })
     await world.clock.settle()
 
-    expect(forks, 'the adopted rows judge nothing by themselves').toBe(0)
-    expect((await $.command.run(saverRun('debug'))).text, 'the cadence counts from where the history ended')
-      .toContain(`/ row ${JUDGE_MIN_NEW_ROWS} /`)
+    expect(forks, 'one run over that history, not one per lane').toBe(1)
+    expect(world.logs.join(' '), 'and it is the armed check: the adopted rows are no cadence of their own')
+      .toContain('· from load')
+  })
+
+  // A plugin loaded into a session that already did work must audit it without being asked. `$.model.fork`
+  // is null on a cold snapshot (d.ts 2019-2034), so the check is armed at load and fired warm.
+  test('a session the plugin joined late is audited at the first warm opportunity', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return { value: forkAnswer(SUITE_REPLY) }
+    })
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await $.ui.render(bandRender(80))
+
+    expect(forks, 'nothing is forked at load: the snapshot is cold there').toBe(0)
+    expect(world.logs.at(-1)).toBe(`ContextSaver armed a check over ${JOINED_CALLS} adopted rows`)
+
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'the first warm opportunity runs it, once, whatever the cadence says').toBe(1)
+    expect(world.toasts, 'and it answers like the check nobody had to type').toEqual(['ContextSaver: 1 new waster'])
+    expect(world.opened.map(pane => pane.id), 'the person is owed the finding, so 80 columns is wide enough')
+      .toEqual(['saver'])
+
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'the run that answered spent the arming').toBe(1)
+  })
+
+  test('a session the plugin joined with too little history to judge arms nothing', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    on('session.messages', () => ({ value: joinedTranscript }))   // three calls: under JUDGE_MIN_ROWS
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return { value: forkAnswer(SUITE_REPLY) }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'three rows are no ledger to judge: the session keeps today\'s cadence').toBe(0)
+    expect(world.toasts).toEqual([])
+  })
+
+  // The snapshot can still be cold at the first opportunity, and a run that reported nothing is no audit:
+  // the arming survives it, so the next opportunity retries and only a run that answered spends it.
+  test('an armed check the fork answered cold retries at the next opportunity', async ($, on) => {
+    const world = startsSaver(on)
+    const replies: (ModelForkResult | null)[] = [null, forkAnswer(SUITE_REPLY)]
+    let forks = 0
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return { value: replies.shift() ?? null }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'the first opportunity forked').toBe(1)
+    expect(world.toasts, 'a cold snapshot says nothing: it is retried, not failed').toEqual([])
+
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'the arming survived the cold fork').toBe(2)
+    expect(world.toasts, 'and the run that answered is the one that speaks').toEqual(['ContextSaver: 1 new waster'])
+
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'two forks in all: the reply spent the arming').toBe(2)
+  })
+
+  test('a check typed while the armed run is in flight is answered by that run', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    let release = (): void => undefined
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return new Promise(resolve => {
+        release = () => resolve({ value: forkAnswer(SUITE_REPLY) })
+      })
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+
+    expect((await $.command.run(saverRun('check'))).text, 'the armed run already going is the one that answers')
+      .toBe('ContextSaver: already checking')
+
+    release()
+    await world.clock.settle()
+
+    expect(forks, 'the ask forked nothing of its own').toBe(1)
+    expect(world.toasts).toEqual(['ContextSaver: 1 new waster'])
   })
 
   test('a check the user asked for says what it found and opens the pane at any width', async ($, on) => {

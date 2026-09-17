@@ -223,6 +223,8 @@ const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>
       context: a.context,
       last: { returned: a.returned, kept: a.kept, dropped: [...a.dropped], usage: a.usage },
     },
+    // Only a run that answered spends the arming: a cold snapshot or a refusal leaves it for the next opportunity.
+    pendingCheck: a.error === null ? false : state.pendingCheck,
   }
 }
 
@@ -266,6 +268,8 @@ export const reduce = (state: State, action: Action): State => {
       return { ...state, judge: { ...state.judge, running: true, lastAtMs: action.now, lastAtSeq: action.seq } }
     case 'judge.done':
       return applyJudgeDone(state, action)
+    case 'check.arm':
+      return { ...state, pendingCheck: true }
     case 'notes.drained':
       return { ...state, notes: [] }
     case 'standing.add':

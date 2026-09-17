@@ -92,7 +92,9 @@ what it does.
 For you, it goes like this.
 
 1. **You work exactly as you do now.** Install it and forget it. No config, no prompts, no
-   interruptions. It watches quietly and says nothing.
+   interruptions. It watches quietly and says nothing. Load it into a session that has already done
+   work and it reads that work out of the transcript and audits it at the next opportunity — its first
+   tool call or turn end — so you never have to ask for the check you already wanted.
 2. **It waits for a habit, not a spike.** One big command is not a problem. The same pointless command
    for the third time is. Only behaviours that already repeated ever reach you.
 3. **It answers "what took so long".** The header says where the wall-clock and the window went in one

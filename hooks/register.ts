@@ -8,8 +8,8 @@ import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry
 import { appendedTo, bulletOnly, mergeSettings, propose } from './core/rules'
 import { collapseWs, duration, fit, instructionOf, pctOf } from './core/text'
 import {
-  AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, MAX_PATTERNS, PANE_ID, PANE_INLINE_ROWS,
-  PANE_TITLE, PLUGIN_NAME, initialState,
+  AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, JUDGE_MIN_ROWS, MAX_PATTERNS, PANE_ID,
+  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, initialState,
 } from './core/types'
 import type { Action, Actions, Artifact, Choice, State, Ui } from './core/types'
 import type { Host } from './host'
@@ -24,8 +24,12 @@ const ANSWER_HEAD = 100   // characters of the turn's answer kept as an evidence
 const CARD_KIND = 60      // characters of a card's behaviour quoted back in a command's reply
 const DEMO_CONTEXT = [120_000, 190_000, 250_000, 320_000]   // `/saver demo`: the window filling up to the sample's own 32%, so the trend draws
 
-// What set one judge run going, as the debug log names it: the mid-turn cadence, the turn's end, or the person.
-type JudgeReason = 'tool.call' | 'turn.complete' | '/saver check'
+// What set one judge run going, as the debug log names it: the mid-turn cadence, the turn's end, the
+// person, or a check armed at load over a transcript this plugin joined late.
+type JudgeReason = 'tool.call' | 'turn.complete' | '/saver check' | 'load'
+
+// The lanes the run answers out loud: the check the person typed, and the one the load armed for them.
+const REQUESTED: readonly JudgeReason[] = ['/saver check', 'load']
 
 /**
  * Registers ContextSaver: the ledger of every tool call, the judge that names wasteful
@@ -123,11 +127,15 @@ export function register(on: On): void {
   })
 
   // A run the person asked for answers them, whatever it found: silence is what a check must never be.
-  const failedToast = (requested: boolean, reason: string): void => {
-    if (requested || asked) host?.toast(`ContextSaver: check failed — ${reason}`)
+  // An armed check is the exception: its arming survived, so the next opportunity retries it and a
+  // toast per retry would be noise about a run nobody asked for — unless someone asked mid-run.
+  const failedToast = (reason: JudgeReason, failure: string): void => {
+    if (reason === 'load' && !asked) return
+    if (REQUESTED.includes(reason) || asked) host?.toast(`ContextSaver: check failed — ${failure}`)
   }
 
-  const judgeOnce = async (engine: Host, requested: boolean, reason: JudgeReason): Promise<void> => {
+  const judgeOnce = async (engine: Host, reason: JudgeReason): Promise<void> => {
+    const requested = REQUESTED.includes(reason)
     const seq = state.seq
     const now = await engine.now()
     dispatch({ type: 'judge.start', now, seq })
@@ -140,7 +148,7 @@ export function register(on: On): void {
     }
     if (reply === null) {
       dispatch(judgedNothing(failed ?? 'cold snapshot'))
-      failedToast(requested, failed ?? 'cold snapshot')
+      failedToast(reason, failed ?? 'cold snapshot')
       return
     }
     try {
@@ -174,29 +182,35 @@ export function register(on: On): void {
     } catch (err) {
       // Whatever went wrong, the run is over: `running` may never stay true.
       dispatch(judgedNothing(messageOf(err)))
-      failedToast(requested, messageOf(err))
+      failedToast(reason, messageOf(err))
     }
   }
 
   /**
    * Judges the session once, if no run is already in flight.
    *
-   * @param requested true when the person asked for this run (`Check now`, `/saver check`), which is
-   *   answered with a toast and opens the pane wherever it can be drawn; a cadence run stays quiet
-   *   and keeps the once-a-session, wide-terminal rule for opening itself — unless someone asks while
-   *   it is in flight, in which case that run answers them.
-   * @param reason what set this run going, for the debug log: the mid-turn cadence, the turn's end, or the person.
+   * @param reason what set this run going: the mid-turn cadence, the turn's end, the person, or the
+   *   check a load armed. The two REQUESTED lanes are answered with a toast and open the pane wherever
+   *   it can be drawn; a cadence run stays quiet and keeps the once-a-session, wide-terminal rule for
+   *   opening itself — unless someone asks while it is in flight, in which case that run answers them.
    */
-  async function runJudge(requested: boolean, reason: JudgeReason): Promise<void> {
+  async function runJudge(reason: JudgeReason): Promise<void> {
     const engine = host
     if (engine === null || forking || state.judge.running) return
     forking = true
     try {
-      await judgeOnce(engine, requested, reason)
+      await judgeOnce(engine, reason)
     } finally {
       forking = false
       asked = false
     }
+  }
+
+  // The opportunities a run can start at: a check armed at load goes first and consults no gate — the
+  // cadence counts new work, and a session joined late has all of its work behind it — else the cadence.
+  const judgeAt = (now: number, cadence: JudgeReason): void => {
+    if (state.pendingCheck && !state.judge.running) void runJudge('load').catch(() => undefined)
+    else if (shouldRun(state, now)) void runJudge(cadence).catch(() => undefined)
   }
 
   const checkNow = (): string => {
@@ -205,7 +219,7 @@ export function register(on: On): void {
       asked = true
       return ALREADY_TEXT
     }
-    void runJudge(true, '/saver check').catch(() => undefined)
+    void runJudge('/saver check').catch(() => undefined)
     return CHECKING_TEXT
   }
 
@@ -382,6 +396,11 @@ export function register(on: On): void {
       if (adopted.length === 0) return next(e)
       dispatch({ type: 'adopt', rows: adopted })
       if (isDebug) engine.log(`ContextSaver adopted ${adopted.length} rows from the transcript · /saver check judges them now`)
+      // A fork here would answer null (the snapshot is cold at load, d.ts 2019-2034), so the check is
+      // armed and fires at the first warm opportunity. Too few rows to judge: a fresh session, nothing armed.
+      if (state.rows.length < JUDGE_MIN_ROWS) return next(e)
+      dispatch({ type: 'check.arm' })
+      if (isDebug) engine.log(`ContextSaver armed a check over ${state.rows.length} adopted rows`)
       return next(e)
     } catch {
       return next(e)
@@ -414,7 +433,7 @@ export function register(on: On): void {
       const row = state.rows[state.rows.length - 1]
       if (isDebug && row !== undefined) engine.log(`ContextSaver row r${row.seq} ${row.tool} ${row.key} ${row.ms}ms ${row.chars}ch`)
       // One agentic turn can run for hours, so the cadence is judged here too, not only between turns.
-      if (shouldRun(state, ended)) void runJudge(false, 'tool.call').catch(() => undefined)
+      judgeAt(ended, 'tool.call')
       const pending = state.notes
       if (pending.length === 0 || result.deny !== undefined) return result
       dispatch({ type: 'notes.drained' })
@@ -450,7 +469,7 @@ export function register(on: On): void {
         },
       })
       if (seen !== null) dispatch({ type: 'usage', usage: { window: seen.context.window, tokens: seen.context.tokens, percent: seen.context.percent }, now })
-      if (shouldRun(state, now)) void runJudge(false, 'turn.complete').catch(() => undefined)
+      judgeAt(now, 'turn.complete')
       return next(e)
     } catch {
       return next(e)

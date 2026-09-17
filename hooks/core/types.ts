@@ -127,6 +127,7 @@ export type State = {
   standing: string[]               // texts re-sent with every prompt this session
   written: string[]                // `${patternId}:${kind}` of artifacts written, tried or skipped this session; propose() omits them
   judge: { lastAtTokens: number; lastAtTurn: number; lastAtSeq: number; lastAtMs: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null; time: string | null; context: string | null; last: JudgeRun | null }   // lastAtSeq/lastAtMs: the mid-turn cadence; time/context: the judge's one-line explanations of where they went
+  pendingCheck: boolean            // a check armed at load and not yet answered: a plugin that joined a session with history audits it at the first warm opportunity (§6)
   paneOpen: boolean
   autoOpened: boolean              // the pane auto-opened once this session (like /diff on the first edit)
   columns: number | null           // last band width seen (e.props.bodyColumns), for the auto-open decision
@@ -135,7 +136,7 @@ export type State = {
 
 export const initialState = (cwd: string, window: number): State => ({
   cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
-  judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
+  judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null }, pendingCheck: false, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
 export type Action =
@@ -152,6 +153,7 @@ export type Action =
   | { type: 'decide'; patternId: string; choice: Choice; text?: string }   // text required for steer
   | { type: 'judge.start'; now: number; seq: number }        // when and at which ledger row the run began, for the mid-turn cadence
   | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; time: string | null; context: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
+  | { type: 'check.arm' }                                      // the ledger a session.start adopted already passes the row floor: judge it at the first warm opportunity
   | { type: 'notes.drained' }
   | { type: 'standing.add'; text: string }
   | { type: 'artifact.done'; patternId: string; kind: ArtifactKind; written: boolean }   // written: true once the rule is handled — written, tried or skipped — and recorded in state.written
