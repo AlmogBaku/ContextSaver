@@ -1,0 +1,448 @@
+import { baseline, costOf, rowsOf } from './evidence'
+import { duration, instructionOf, killPrompt, median, pctOf } from './text'
+import { ALTERNATIVE_MAX, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, ROW_CAP, SETTLE_TURNS, initialState } from './types'
+import type {
+  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Header, PaneModel,
+  Pattern, Proposal, Row, Signature, State, StoredPattern, TurnStat,
+} from './types'
+
+// §9.12 wants constants in types.ts; these three stay local because types.ts is frozen for this package.
+const SAMPLE_CAP = 30          // usage samples kept (State.usageSamples: "last 30")
+const DEBUG_MAX_LINES = 40     // debugDump ceiling (section 5.2)
+const DEBUG_MAX_PATTERNS = 20  // pattern lines before the "more" line
+
+type Decided = Pattern & { decision: Choice }
+type Settle = { pattern: Pattern; ms: number; chars: number; requeue: string | null }
+
+const isSent = (c: Choice | null): boolean => c === 'steer' || c === 'kill'
+
+const isDecided = (p: Pattern): p is Decided => p.decision !== null
+
+const pushUnique = (xs: readonly string[], x: string): string[] => (xs.includes(x) ? [...xs] : [...xs, x])
+
+const queueCard = (cards: readonly string[], id: string): string[] => (cards.includes(id) ? [...cards] : [id, ...cards])
+
+const patternById = (patterns: readonly Pattern[], id: string): Pattern | undefined => patterns.find(p => p.id === id)
+
+const signatureHit = (p: Pattern, row: Pick<Row, 'tool' | 'key'>): boolean =>
+  p.signature !== null && p.signature.tool === row.tool && p.signature.key === row.key
+
+const classOfPattern = (state: State, p: Pattern): CommandClass | null => rowsOf(state, p)[0]?.cls ?? null
+
+const turnHandle = (handle: string): number | null => {
+  const n = /^turn:(\d+)$/.exec(handle)?.[1]
+  return n === undefined ? null : Number(n)
+}
+
+const turnsCited = (p: Pattern, state: State): number[] => {
+  const fromHandles = p.hits.map(turnHandle).filter((n): n is number => n !== null)
+  return [...rowsOf(state, p).map(r => r.turn), ...fromHandles].sort((a, b) => a - b)
+}
+
+const newTokens = (t: TurnStat): number => t.input + t.output + t.cacheCreate
+
+/** Sums every new (non-cache-read) token this session's turns reported. */
+export const totalTokens = (state: State): number => state.turns.reduce((n, t) => n + newTokens(t), 0)
+
+/** Tokens left before auto-compaction; null while the session's token count is unknown. */
+export const tokensToCompaction = (state: State): number | null => {
+  const tokens = state.usage.tokens
+  if (tokens === undefined) return null
+  return (state.usage.compactAt ?? Math.round(state.usage.window * 0.9)) - tokens
+}
+
+/** Turns left before compaction at the recent pace; null under three turns or a zero median. */
+export const turnsToCompaction = (state: State): number | null => {
+  const left = tokensToCompaction(state)
+  if (left === null || state.turns.length < 3) return null
+  const perTurn = median(state.turns.slice(-5).map(newTokens))
+  return perTurn === 0 ? null : Math.round(left / perTurn)
+}
+
+const applySettlements = (state: State, list: readonly Settle[]): Pick<State, 'patterns' | 'cards' | 'saved'> => ({
+  patterns: list.map(s => s.pattern),
+  cards: list.reduce<string[]>((cards, s) => (s.requeue === null ? cards : queueCard(cards, s.requeue)), [...state.cards]),
+  saved: {
+    ms: list.reduce((ms, s) => ms + s.ms, state.saved.ms),
+    chars: list.reduce((chars, s) => chars + s.chars, state.saved.chars),
+  },
+})
+
+const settleWithRow = (state: State, p: Pattern, row: Omit<Row, 'seq'>): Settle => {
+  const grown: Pattern = signatureHit(p, row) ? { ...p, hits: pushUnique(p.hits, row.id) } : p
+  const still = { pattern: grown, ms: 0, chars: 0, requeue: null }
+  if (row.agent !== 'main' || p.openedAtTurn === null || !isSent(p.decision)) return still
+  // D4: every ignored instruction brings the card back, so the user can Keep or say something else.
+  if (p.signature !== null && row.key === p.signature.key) {
+    return { pattern: { ...grown, ignored: p.ignored + 1, openedAtTurn: null }, ms: 0, chars: 0, requeue: p.id }
+  }
+  if (row.cls !== classOfPattern(state, p)) return still
+  const base = baseline(state, p)
+  return {
+    pattern: { ...grown, openedAtTurn: null },
+    ms: Math.max(0, base.ms - row.ms),
+    chars: Math.max(0, base.chars - row.chars),
+    requeue: null,
+  }
+}
+
+const settleAtTurn = (state: State, p: Pattern): Settle => {
+  // D4: an ignored instruction saves nothing, so a behavioural pattern accrues only while it is still believed.
+  const accrued = p.signature === null && isSent(p.decision) && p.ignored === 0 ? (p.estTokensPerTurn ?? 0) * 4 : 0
+  if (p.openedAtTurn === null || state.turn - p.openedAtTurn < SETTLE_TURNS) {
+    return { pattern: p, ms: 0, chars: accrued, requeue: null }
+  }
+  const base = baseline(state, p)
+  return { pattern: { ...p, openedAtTurn: null }, ms: base.ms, chars: base.chars + accrued, requeue: null }
+}
+
+const applyRow = (state: State, row: Omit<Row, 'seq'>): State => {
+  const seq = state.seq + 1
+  return {
+    ...state,
+    seq,
+    rows: [...state.rows, { ...row, seq }].slice(-ROW_CAP),
+    ...applySettlements(state, state.patterns.map(p => settleWithRow(state, p, row))),
+  }
+}
+
+const applyTurnComplete = (state: State, stat: Omit<TurnStat, 'turn' | 'calls'>): State => ({
+  ...state,
+  turns: [...state.turns, { ...stat, turn: state.turn, calls: state.rows.filter(r => r.turn === state.turn).length }],
+  ...applySettlements(state, state.patterns.map(p => settleAtTurn(state, p))),
+})
+
+// Present values win; `window`/`compactAt` sticky (§5.2, widened so a partial usage dispatch never blanks the header).
+const applyUsage = (state: State, usage: State['usage']): State => {
+  const merged = {
+    window: usage.window || state.usage.window,
+    compactAt: usage.compactAt ?? state.usage.compactAt,
+    tokens: usage.tokens ?? state.usage.tokens,
+    percent: usage.percent ?? state.usage.percent,
+  }
+  const percent = usage.percent
+  const samples = percent === undefined
+    ? state.usageSamples
+    : [...state.usageSamples.filter(s => s.turn !== state.turn), { turn: state.turn, percent }].slice(-SAMPLE_CAP)
+  return { ...state, usage: merged, usageSamples: samples }
+}
+
+const applyDecide = (state: State, id: string, choice: Choice, text: string | undefined): State => {
+  const p = patternById(state.patterns, id)
+  if (p === undefined) return state
+  const instruction = choice === 'kill' ? killPrompt(p) : (text ?? '')
+  if (choice !== 'keep' && instruction.trim() === '') return state
+  const sending = choice !== 'keep'
+  // Kill rides the same wrapper as Steer (§5.2 "same with killPrompt(p)", Appendix C 5c "the same way"):
+  // Claude reads `Instruction from the user (via ContextSaver): Stop this behaviour …`.
+  const note = instructionOf(instruction)
+  const decided: Pattern = {
+    ...p,
+    decision: choice,
+    decidedAtTurn: state.turn,
+    lastDecision: choice,
+    instruction: sending ? instruction : p.instruction,
+    openedAtTurn: sending ? state.turn : p.openedAtTurn,
+  }
+  return {
+    ...state,
+    patterns: state.patterns.map(q => (q.id === p.id ? decided : q)),
+    cards: state.cards.filter(c => c !== p.id),
+    expanded: state.expanded === p.id ? null : state.expanded,
+    steering: null,
+    steerDraft: null,
+    notes: sending ? pushUnique(state.notes, note) : [...state.notes],
+    standing: sending ? pushUnique(state.standing, note) : [...state.standing],
+  }
+}
+
+const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>): State => {
+  const recurred = (p: Pattern): boolean => a.recurred.includes(p.id) && isSent(p.decision)
+  const marked = a.patterns.filter(recurred).map(p => p.id)
+  const reported = a.patterns.map(p => (recurred(p) ? { ...p, ignored: p.ignored + 1, openedAtTurn: null } : p))
+  // A session decision is never lost, even when the judge's registry omits it.
+  const patterns = [...reported, ...state.patterns.filter(p => isDecided(p) && patternById(reported, p.id) === undefined)]
+  const wanted = [...a.fresh.filter(id => patternById(patterns, id)?.decision === null), ...marked]
+  const added = wanted.filter((id, i) => wanted.indexOf(id) === i && !state.cards.includes(id))
+  const total = totalTokens(state)
+  const spent = state.judge.spent + a.spent
+  return {
+    ...state,
+    patterns,
+    cards: [...added, ...state.cards].filter(id => patternById(patterns, id) !== undefined),
+    judge: {
+      lastAtTokens: total,
+      lastAtTurn: state.turn,
+      running: false,
+      runs: state.judge.runs + 1,
+      spent,
+      backoff: spent > JUDGE_BUDGET_SHARE * total ? Math.min(state.judge.backoff * 2, JUDGE_MAX_BACKOFF) : state.judge.backoff,
+      error: a.error,
+      focus: a.focus,
+    },
+  }
+}
+
+const applyReset = (state: State): State => ({
+  ...initialState(state.cwd, state.usage.window),
+  overhead: state.overhead,
+  columns: state.columns,
+  paneOpen: state.paneOpen,
+  patterns: state.patterns.map(p => fromStored(toStored(p))),
+})
+
+/** Applies one action to the state, returning a new state (never mutates its input). */
+export const reduce = (state: State, action: Action): State => {
+  switch (action.type) {
+    case 'turn.start':
+      return { ...state, turn: state.turn + 1 }
+    case 'row':
+      return applyRow(state, action.row)
+    case 'turn.complete':
+      return applyTurnComplete(state, action.stat)
+    case 'usage':
+      return applyUsage(state, action.usage)
+    case 'overhead':
+      return { ...state, overhead: action.overhead }
+    case 'compact':
+      return { ...state, compactions: [...state.compactions, state.turn] }
+    case 'expand':
+      return { ...state, expanded: action.patternId === state.expanded ? null : action.patternId }
+    case 'steer.begin':
+      return { ...state, steering: state.steering === action.patternId ? null : action.patternId, steerDraft: null }
+    case 'steer.draft':
+      return { ...state, steerDraft: action.text }
+    case 'decide':
+      return applyDecide(state, action.patternId, action.choice, action.text)
+    case 'judge.start':
+      return { ...state, judge: { ...state.judge, running: true } }
+    case 'judge.done':
+      return applyJudgeDone(state, action)
+    case 'notes.drained':
+      return { ...state, notes: [] }
+    case 'standing.add':
+      return { ...state, standing: pushUnique(state.standing, action.text) }
+    case 'artifact.done':
+      return { ...state, patterns: state.patterns.map(p => (p.id === action.patternId ? { ...p, proposal: null } : p)) }
+    case 'pane':
+      return { ...state, paneOpen: action.open, autoOpened: action.auto === true ? true : state.autoOpened }
+    case 'columns':
+      return { ...state, columns: action.columns }
+    case 'reset':
+      return applyReset(state)
+  }
+}
+
+const shortKey = (r: Row): string => (r.key.startsWith(`${r.cls}:`) ? r.key.slice(r.cls.length + 1) : r.key).slice(0, 40)
+
+const statsOf = (p: Pattern, state: State): string => {
+  const cost = costOf(state, p)
+  const pct = pctOf(cost.chars, state.usage.window)
+  const time = duration(cost.ms)
+  const turns = turnsCited(p, state)
+  const first = turns[0]
+  const last = turns[turns.length - 1]
+  return [
+    `${p.hits.length}×`,
+    ...(pct > 0 ? [`~${pct}% context`] : []),
+    time,
+    ...(first === undefined || last === undefined ? [] : [`turns ${first}…${last}`]),
+  ].join(' · ')
+}
+
+const evidenceOf = (p: Pattern, state: State): string[] => {
+  const rows = rowsOf(state, p).map(r => ({
+    turn: r.turn,
+    seq: r.seq,
+    text: `r${r.seq} · turn ${r.turn} · ${r.tool} ${shortKey(r)} · ${duration(r.ms)} · ${r.chars}ch · "${r.head}"`,
+  }))
+  const turns = p.hits
+    .map(turnHandle)
+    .map(n => (n === null ? undefined : state.turns.find(t => t.turn === n)))
+    .filter((t): t is TurnStat => t !== undefined)
+    .map(t => ({ turn: t.turn, seq: 0, text: `turn ${t.turn} · no tool calls · ${t.answerChars}ch · "${t.answerHead}"` }))
+  return [...rows, ...turns].sort((a, b) => b.turn - a.turn || b.seq - a.seq).slice(0, 3).map(q => q.text)
+}
+
+/** Derives a waster card from a pattern and the evidence it cites. */
+export const cardOf = (p: Pattern, state: State): Card => ({
+  patternId: p.id,
+  kind: p.ignored > 0 ? `ignored · ${p.kind}` : p.kind,
+  stats: statsOf(p, state),
+  why: p.why,
+  fix: p.alternative,
+  killText: killPrompt(p),
+  evidence: evidenceOf(p, state),
+})
+
+const headerOf = (state: State): Header => ({
+  percent: state.usage.percent ?? null,
+  spark: state.usageSamples.map(s => s.percent),
+  tokensToCompaction: tokensToCompaction(state),
+  turnsToCompaction: turnsToCompaction(state),
+  judgeRuns: state.judge.runs,
+  judgeShare: Math.round((state.judge.spent / Math.max(1, totalTokens(state))) * 1000) / 10,
+  judgeRunning: state.judge.running,
+  savedPct: pctOf(state.saved.chars, state.usage.window),
+  savedMs: state.saved.ms,
+})
+
+const decidedRowOf = (state: State, p: Decided): DecidedRow => ({
+  patternId: p.id,
+  choice: p.decision,
+  kind: p.kind,
+  savedPct: isSent(p.decision) ? pctOf(baseline(state, p).chars, state.usage.window) : null,
+  ignored: p.ignored,
+})
+
+/** Builds everything the pane renders: header, wasters, decisions and rules. */
+export const paneModel = (state: State, artifacts: Artifact[]): PaneModel => ({
+  header: headerOf(state),
+  wasters: state.cards
+    .map(id => patternById(state.patterns, id))
+    .filter((p): p is Pattern => p !== undefined)
+    .map(p => cardOf(p, state)),
+  expanded: state.expanded,
+  steering: state.steering,
+  steerDraft: state.steerDraft,
+  decided: state.patterns
+    .filter(isDecided)
+    .sort((a, b) => (b.decidedAtTurn ?? 0) - (a.decidedAtTurn ?? 0))
+    .map(p => decidedRowOf(state, p)),
+  artifacts,
+})
+
+/** Builds the one summary line the band shows above the prompt. */
+export const bandModel = (state: State): BandModel => ({
+  percent: state.usage.percent ?? null,
+  tokensToCompaction: tokensToCompaction(state),
+  fresh: state.cards.length,
+  savedPct: pctOf(state.saved.chars, state.usage.window),
+  paneOpen: state.paneOpen,
+})
+
+const isFilled = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0
+
+const isText = (v: unknown, max: number): v is string => isFilled(v) && v.length <= max
+
+const isOneOf = <T extends string>(v: unknown, options: readonly T[]): v is T =>
+  typeof v === 'string' && (options as readonly string[]).includes(v)
+
+const fields = (v: unknown): Record<string, unknown> | null =>
+  v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+
+const signatureOf = (v: unknown): Signature | null | undefined => {
+  if (v === null) return null
+  const o = fields(v)
+  const tool = o?.['tool']
+  const key = o?.['key']
+  return isText(tool, KEY_MAX) && isText(key, KEY_MAX) ? { tool, key } : undefined
+}
+
+const proposalOf = (v: unknown): Proposal | null | undefined => {
+  if (v === null) return null
+  const o = fields(v)
+  const kind = o?.['kind']
+  const title = o?.['title']
+  const body = o?.['body']
+  if (!isOneOf(kind, ['claude-md', 'skill', 'agent-brief', 'settings-allow'])) return undefined
+  return isFilled(title) && isFilled(body) ? { kind, title, body } : undefined
+}
+
+const storedOf = (v: unknown): StoredPattern | null => {
+  const o = fields(v)
+  if (o === null) return null
+  const id = o['id']
+  const category = o['category']
+  const kind = o['kind']
+  const why = o['why']
+  const alternative = o['alternative']
+  const confidence = o['confidence']
+  const estTokensPerTurn = o['estTokensPerTurn']
+  const lastDecision = o['lastDecision']
+  const signature = signatureOf(o['signature'])
+  const proposal = proposalOf(o['proposal'])
+  if (typeof id !== 'string' || !/^[a-z-]+:[a-z0-9-]{1,40}$/.test(id)) return null
+  if (!isOneOf(category, ['execution', 'reading', 'production', 'behavior', 'communication', 'multi-agent', 'environment', 'process', 'other'])) return null
+  if (!isText(kind, KIND_MAX) || !isText(alternative, ALTERNATIVE_MAX) || typeof why !== 'string') return null
+  if (typeof confidence !== 'number' || !(confidence >= 0.5) || !(confidence <= 1)) return null
+  if (estTokensPerTurn !== null && !(typeof estTokensPerTurn === 'number' && Number.isFinite(estTokensPerTurn) && estTokensPerTurn >= 0)) return null
+  if (lastDecision !== null && !isOneOf(lastDecision, ['keep', 'steer', 'kill'])) return null
+  if (signature === undefined || proposal === undefined) return null
+  return { id, category, kind, signature, why, alternative, confidence, proposal, estTokensPerTurn, lastDecision }
+}
+
+/** Reads a stored registry from the plugin store, dropping every entry that does not validate. */
+export const parseRegistry = (value: unknown): StoredPattern[] => {
+  if (!Array.isArray(value)) return []
+  const byId = new Map<string, StoredPattern>()
+  for (const item of value) {
+    const stored = storedOf(item)
+    if (stored !== null) byId.set(stored.id, stored)
+  }
+  return [...byId.values()]
+}
+
+/** Strips a pattern's session fields, leaving what is persisted per project. */
+export const toStored = (p: Pattern): StoredPattern => ({
+  id: p.id,
+  category: p.category,
+  kind: p.kind,
+  signature: p.signature,
+  why: p.why,
+  alternative: p.alternative,
+  confidence: p.confidence,
+  proposal: p.proposal,
+  estTokensPerTurn: p.estTokensPerTurn,
+  lastDecision: p.lastDecision,
+})
+
+/** Revives a stored pattern with empty session fields. */
+export const fromStored = (s: StoredPattern): Pattern => ({
+  ...s, hits: [], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0,
+})
+
+/** Merges two stored registries by id; entries from `b` win. */
+export const mergeStored = (a: readonly StoredPattern[], b: readonly StoredPattern[]): StoredPattern[] => {
+  const byId = new Map<string, StoredPattern>(a.map(p => [p.id, p]))
+  for (const p of b) byId.set(p.id, p)
+  return [...byId.values()]
+}
+
+const classCounts = (rows: readonly Row[]): string => {
+  const counts = new Map<string, number>()
+  for (const r of rows) counts.set(r.cls, (counts.get(r.cls) ?? 0) + 1)
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([cls, n]) => `${cls}×${n}`).join(' ') || '(none)'
+}
+
+const oneLine = (text: string | null): string => (text === null ? '-' : `"${text.replace(/\n/g, '\\n').slice(0, 120)}"`)
+
+const patternLine = (p: Pattern): string =>
+  `  ${p.id} · hits ${p.hits.length} [${p.hits.slice(0, 5).join(' ')}] · ${p.decision ?? '-'} @ ${p.decidedAtTurn ?? '-'} · previous ${p.lastDecision ?? '-'} · ignored ${p.ignored} · opened ${p.openedAtTurn ?? '-'} · sent ${oneLine(p.instruction)}`
+
+const patternLines = (state: State): string[] => {
+  const shown = state.patterns.slice(0, DEBUG_MAX_PATTERNS).map(patternLine)
+  const rest = state.patterns.length - shown.length
+  return rest > 0 ? [...shown, `  … ${rest} more patterns`] : shown
+}
+
+/** Renders the whole state for `/saver debug` in at most 40 lines. */
+export const debugDump = (state: State): string => {
+  const j = state.judge
+  const u = state.usage
+  const o = state.overhead
+  return [
+    `ContextSaver · turn ${state.turn} · seq ${state.seq} · rows ${state.rows.length} · turns ${state.turns.length}`,
+    `rows ${classCounts(state.rows)}`,
+    `patterns ${state.patterns.length}`,
+    ...patternLines(state),
+    `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
+    `notes ${state.notes.length} · standing ${state.standing.length}`,
+    `judge runs ${j.runs} · spent ${j.spent} · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
+    `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
+    `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,
+    `compactions ${state.compactions.length === 0 ? 'none' : state.compactions.join(', ')}`,
+    `pane ${state.paneOpen ? 'open' : 'closed'} · autoOpened ${state.autoOpened} · columns ${state.columns ?? '-'} · expanded ${state.expanded ?? '-'} · steering ${state.steering ?? '-'}`,
+    `saved ${duration(state.saved.ms)} · ~${pctOf(state.saved.chars, u.window)}% · ${state.saved.chars} chars`,
+  ].slice(0, DEBUG_MAX_LINES).join('\n')
+}

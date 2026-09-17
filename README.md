@@ -16,3 +16,17 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .   # run Claude Code wi
 ## Development
 
 The build spec (architecture, contracts, the judge prompt, the UX walkthrough) will live in `docs/` once v1 lands. Until then it is tracked outside the repo.
+
+## Theme
+
+The pane's one accent is the theme key `suggestion` (rgb(87,105,247), ansi blue) — the engine has no
+`accent` key; `suggestion` carries the same value as `permission` and the engine's own
+`rate_limit_fill`. It is used on a live waster's `●`, the gauge's filled cells and the band's
+`n new`; `Button` has no `color` prop, so the verbs take their colour from the surface's
+focus/pointer inversion.
+
+The pane's layout numbers (the 10-cell gutter, the gauge and sparkline cells, the glyph set, the
+three copy strings) live at the top of `hooks/ui.tsx` rather than in `hooks/core/types.ts`: they are
+private to this drawing and `types.ts` is the shared contract, which carries no cells. This is a
+recorded divergence from the "constants only in types.ts" convention, to keep or hoist at
+integration.
