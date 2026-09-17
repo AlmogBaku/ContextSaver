@@ -15,10 +15,13 @@ const fenced = (path: string): string => {
   return `${lines.slice(open + 1, close).join('\n')}\n`
 }
 
+// The third copy is the private plan this repo was built from: checked when its path is given
+// (`bun run scripts/appendix-a.ts <plan.md>`), skipped otherwise, so the check works from a clone.
+const plan = process.argv[2]
 const copies: Record<string, string> = {
   JUDGE_PROMPT,
   'docs/SPEC.md': fenced('docs/SPEC.md'),
-  'plan file': fenced('/home/anakin/.claude/plans/lets-plan-this-mods-playground-prd-md-zany-lighthouse.md'),
+  ...(plan === undefined ? {} : { 'plan file': fenced(plan) }),
 }
 
 for (const [name, text] of Object.entries(copies)) {
