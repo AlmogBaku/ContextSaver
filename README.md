@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1><img src="assets/logo.png" alt="" width="38" align="center"> &nbsp;ContextSaver</h1>
+<h1><img src="assets/logo.png" alt="" width="40" align="middle"> ContextSaver</h1>
 
 **Stop Claude Code from wasting tokens doing useless shit, in realtime.**
 
