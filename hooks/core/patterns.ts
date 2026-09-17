@@ -1,17 +1,20 @@
-import { agentAliases, aliasOf, baseline, rowsOf, sumOf } from './evidence'
+import { agentAliases, aliasOf, baseline, rowsOf, sinks, sumOf } from './evidence'
 import { collapseWs, duration, instructionOf, killPrompt, median, pctOf } from './text'
 import {
   ALTERNATIVE_MAX, CARD_EVIDENCE, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, FILE_TOOLS,
   JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, MAIN_AGENT, MAX_PATTERNS, NO_CALLS, ROW_CAP,
-  SETTLE_TURNS, initialState,
+  SETTLE_TURNS, TREND_TURNS, initialState,
 } from './types'
 import type {
   Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Evidence, Header, JudgeRun, PaneModel,
-  Pattern, Proposal, Row, Signature, State, StoredPattern, TurnStat,
+  Pattern, Proposal, Row, Signature, Sinks, State, StoredPattern, TurnStat,
 } from './types'
 
 // The `:offset-limit` slice `normalize` appends to a Read key: the path is what the details name.
 const READ_RANGE = /:\d*-\d*$/
+
+const GROWTH_TURNS = 5     // turns with a context sample the pace to compaction is read from
+const GROWTH_SAMPLES = 3   // growth samples below which no pace is stated at all
 
 type Decided = Pattern & { decision: Choice }
 type Settle = { pattern: Pattern; ms: number; chars: number; requeue: string | null }
@@ -53,11 +56,23 @@ export const tokensToCompaction = (state: State): number | null => {
   return (state.usage.compactAt ?? Math.round(state.usage.window * 0.9)) - tokens
 }
 
-/** Turns left before compaction at the recent pace; null under three turns or a zero median. */
+/** The context after each turn that reported one, oldest first: how full the window was, turn by turn. */
+const contexts = (state: State): number[] =>
+  state.turns.map(t => t.context).filter((tokens): tokens is number => tokens !== null)
+
+/**
+ * Turns left before compaction at the recent pace; null under three growth samples or a zero median.
+ *
+ * The pace is how fast the window fills, not what a turn is billed: a turn can spend 60k tokens and
+ * grow the window by 8k, so the tokens of a turn would have claimed compaction was three turns away.
+ * A turn that shrank the window (a compaction, a `/clear`) is no pace at all, so drops are skipped.
+ */
 export const turnsToCompaction = (state: State): number | null => {
   const left = tokensToCompaction(state)
-  if (left === null || state.turns.length < 3) return null
-  const perTurn = median(state.turns.slice(-5).map(newTokens))
+  const seen = contexts(state).slice(-GROWTH_TURNS)
+  const growth = seen.slice(1).map((tokens, at) => tokens - (seen[at] ?? 0)).filter(step => step > 0)
+  if (left === null || growth.length < GROWTH_SAMPLES) return null
+  const perTurn = median(growth)
   return perTurn === 0 ? null : Math.round(left / perTurn)
 }
 
@@ -116,12 +131,16 @@ const grownWith = (p: Pattern, rows: readonly Row[]): Pattern =>
 // History, not a live call: no turn stats exist for it, nothing settles on it, and nothing was saved by it.
 const applyAdopt = (state: State, rows: readonly Omit<Row, 'seq'>[]): State => {
   const seeded = rows.map((row, i) => ({ ...row, seq: state.seq + i + 1 }))
+  const seq = state.seq + seeded.length
   return {
     ...state,
-    seq: state.seq + seeded.length,
+    seq,
     turn: Math.max(state.turn, ...seeded.map(row => row.turn)),
     rows: [...state.rows, ...seeded].slice(-ROW_CAP),
     patterns: state.patterns.map(p => grownWith(p, seeded)),
+    // The mid-turn cadence starts where the history ends: adopted rows are not new work, so a session
+    // joined late waits for JUDGE_MIN_NEW_ROWS of its own. `/saver check` still judges them on request.
+    judge: { ...state.judge, lastAtSeq: seq },
   }
 }
 
@@ -132,7 +151,9 @@ const applyTurnComplete = (state: State, stat: Omit<TurnStat, 'turn' | 'calls'>)
 })
 
 // Present values win; `window`/`compactAt` sticky (§5.2, widened so a partial usage dispatch never blanks the header).
-const applyUsage = (state: State, usage: State['usage']): State => ({
+// The first sample also dates the mid-turn cadence: without it `lastAtMs` is 0 against a clock reading ms
+// since the epoch, so the five-minute floor would be no floor at all. `/saver demo` passes 0 and seeds nothing.
+const applyUsage = (state: State, usage: State['usage'], now: number): State => ({
   ...state,
   usage: {
     window: usage.window || state.usage.window,
@@ -140,6 +161,7 @@ const applyUsage = (state: State, usage: State['usage']): State => ({
     tokens: usage.tokens ?? state.usage.tokens,
     percent: usage.percent ?? state.usage.percent,
   },
+  judge: state.judge.lastAtMs === 0 && now > 0 ? { ...state.judge, lastAtMs: now } : state.judge,
 })
 
 const applyDecide = (state: State, id: string, choice: Choice, text: string | undefined): State => {
@@ -223,11 +245,14 @@ export const reduce = (state: State, action: Action): State => {
     case 'turn.complete':
       return applyTurnComplete(state, action.stat)
     case 'usage':
-      return applyUsage(state, action.usage)
+      return applyUsage(state, action.usage, action.now)
     case 'overhead':
       return { ...state, overhead: action.overhead }
     case 'compact':
-      return { ...state, compactions: [...state.compactions, state.turn] }
+      // The fill a compaction invalidated is forgotten: `tokens` is sticky and a just-compacted window
+      // reports none until its next response (d.ts 7023-7025), so the header awaits the next turn instead
+      // of announcing two turns to a compaction that just happened.
+      return { ...state, compactions: [...state.compactions, state.turn], usage: { ...state.usage, tokens: undefined, percent: undefined } }
     case 'expand':
       return { ...state, expanded: action.patternId === state.expanded ? null : action.patternId }
     case 'steer.begin':
@@ -334,15 +359,25 @@ export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap
 const judgeShare = (state: State): number =>
   Math.round((state.judge.spent / Math.max(1, totalTokens(state))) * 1000) / 10
 
+// How full the window was after each of the last turns that reported it: the shape the header draws.
+const trendOf = (state: State): number[] =>
+  contexts(state)
+    .slice(-TREND_TURNS)
+    .map(tokens => Math.round((tokens / Math.max(1, state.usage.window)) * 1000) / 10)
+
+// Before the first row nothing was measured, and a total of zero would read as a session that cost nothing.
+const sinksOf = (state: State, measure: 'ms' | 'chars'): Sinks | null =>
+  state.rows.length === 0 ? null : sinks(state.rows, measure)
+
 const headerOf = (state: State): Header => ({
   percent: state.usage.percent ?? null,
   tokensToCompaction: tokensToCompaction(state),
   turnsToCompaction: turnsToCompaction(state),
-  trend: [],
-  time: null,
-  context: null,
-  judgeTime: null,
-  judgeContext: null,
+  trend: trendOf(state),
+  time: sinksOf(state, 'ms'),
+  context: sinksOf(state, 'chars'),
+  judgeTime: state.judge.time,
+  judgeContext: state.judge.context,
   judgeRuns: state.judge.runs,
   judgeTokens: state.judge.spent,
   judgeShare: judgeShare(state),
@@ -531,13 +566,14 @@ export const debugDump = (state: State): string => {
   const u = state.usage
   const o = state.overhead
   return [
-    `ContextSaver · turn ${state.turn} · seq ${state.seq} · rows ${state.rows.length} · turns ${state.turns.length}`,
+    `ContextSaver · turn ${state.turn} · seq ${state.seq} · rows ${state.rows.length} · turns ${state.turns.length} · patterns ${state.patterns.length}`,
     `rows ${classCounts(state.rows)}`,
-    `patterns ${state.patterns.length}`,
     ...patternLines(state),
     `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
     `notes ${state.notes.length} · standing ${state.standing.length} · written ${state.written.length}${state.written.length === 0 ? '' : `: ${state.written.join(', ')}`}`,
-    `judge runs ${j.runs} · spent ${j.spent} tokens (${judgeShare(state)}% of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
+    `judge runs ${j.runs} · spent ${j.spent} tokens (${judgeShare(state)}% of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} / row ${j.lastAtSeq} / ${j.lastAtMs}ms · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
+    `judge time: ${oneLine(j.time)}`,
+    `judge context: ${oneLine(j.context)}`,
     ...judgeRunLines(j.last),
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,

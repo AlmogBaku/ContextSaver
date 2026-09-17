@@ -84,10 +84,11 @@ describe('demo', () => {
     const state = demoTurns().reduce((seeded, stat) => reduce(seeded, { type: 'turn.complete', stat }),
       reduce(initialState('/work', WINDOW), { type: 'usage', usage: demoUsage(), now: 0 }))
 
-    expect(turns.length, 'three turns, so the run to compaction has a pace').toBeGreaterThanOrEqual(3)
+    expect(turns.length, 'three turns of shape, which the shell dates with its own context samples').toBeGreaterThanOrEqual(3)
     expect(state.usage.percent, 'the gauge has a percentage to fill').toEqual(32)
     expect(tokensToCompaction(state)).toEqual(580_000)
-    expect(turnsToCompaction(state)).toEqual(11)
+    expect(turnsToCompaction(state), 'a turn with no context after it is no pace: the pane test draws that half')
+      .toBeNull()
   })
 
   test('/saver demo fills the pane behind the debug flag and says nothing without it', async ($, on) => {
@@ -104,7 +105,8 @@ describe('demo', () => {
     expect(drawn, 'and the spawn waster is a card of its own').toContain('Claude keeps spawning a fresh explore agent')
     // The header is part of the drawing the demo exists to show, so it never draws its empty state.
     expect(drawn, 'the gauge is filled').toContain('32%')
-    expect(drawn).toContain('580k tokens to compaction · about 11 turns')
+    // The four context samples the demo dispatches are what paces this: 70k of growth a turn.
+    expect(drawn).toContain('580k tokens to compaction · about 8 turns')
     expect(drawn, 'no waiting header above cards that state a percentage of context').not.toContain('awaiting the first turn')
     expect(drawn, 'the steered one is decided, not a card').toContain('Decided')
     expect(drawn, 'with the sentence that was sent under it').toContain('run only the tests for the file you just edited')

@@ -15,6 +15,7 @@ export type SaverWorld = {
   logs: string[]
   commands: string[]
   usage: { tokens: number; percent: number }
+  denyUsage: boolean   // from here on `session.usage` is refused, as another plugin or a policy would refuse it
 }
 
 /**
@@ -27,7 +28,9 @@ export type SaverWorld = {
  */
 export function startsSaver(on: On, stored: Record<string, unknown> = {}): SaverWorld {
   const world: SaverWorld = {
-    clock: mock.clock(on),
+    // A real epoch, not 0: the mid-turn gate keeps five minutes between runs against `$.clock.now()`,
+    // which is milliseconds since the epoch, and a clock starting at 0 is a session that began then.
+    clock: mock.clock(on, { now: 1_700_000_000_000 }),
     store: storeStub(on, stored),
     opened: [],
     closed: [],
@@ -35,6 +38,7 @@ export function startsSaver(on: On, stored: Record<string, unknown> = {}): Saver
     logs: [],
     commands: [],
     usage: { tokens: 24_000, percent: 12 },
+    denyUsage: false,
   }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -43,7 +47,7 @@ export function startsSaver(on: On, stored: Record<string, unknown> = {}): Saver
     world.commands.push(e.name)
     return { value: { command: e.name } }
   })
-  on('session.usage', () => ({ value: usageAnswer(world.usage) }))
+  on('session.usage', () => (world.denyUsage ? { deny: 'no usage today' } : { value: usageAnswer(world.usage) }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.toast', ($, e) => {
     world.toasts.push(e.text)
