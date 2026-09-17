@@ -168,16 +168,18 @@ describe('register', () => {
     expect(prompts, 'the judge was asked once').toHaveLength(1)
     expect(prompts[0], 'the row carries the time the clock measured and the size of the text')
       .toContain(`r1 | Bash | test:bun test | test | main | 1 | ${CALL_MS} | ${OUT_CHARS} | -`)
-    expect(world.logs, 'the debug flag logs every row it recorded, and a run that found nothing as nothing')
+    expect(world.logs, 'the debug flag logs every row it recorded, a run that found nothing as nothing, and what the fork cost')
       .toEqual([
         `ContextSaver row r1 Bash test:bun test ${CALL_MS}ms ${OUT_CHARS}ch`,
-        'ContextSaver judge: 0 returned · 0 kept · 0 dropped',
+        'ContextSaver judge: 0 returned · 0 kept · 0 dropped · from /saver check',
+        'judge usage: in 900 · out 300 · cache read 40000 · cache create 100',
       ])
   })
 
   test('the judge cadence names a waster, the pane kills it and the next tool result carries the note', async ($, on) => {
     const world = startsSaver(on)
     const prompts: string[] = []
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
     on('tool.call', async () => {
       await world.clock.advance(CALL_MS)
       return bashAnswer(OUT_CHARS)
@@ -192,6 +194,8 @@ describe('register', () => {
     await world.clock.settle()
 
     expect(prompts, 'three turns and nine rows past the gates: one fork').toHaveLength(1)
+    expect(world.logs, 'the log says which lane started the run: this one is the cadence mid-turn, not a press')
+      .toEqual(expect.arrayContaining(['ContextSaver judge: 1 returned · 1 kept · 0 dropped · from tool.call']))
     expect(prompts[0]).toContain('## STATS')
     expect(prompts[0]).toContain('## LEDGER')
 
@@ -237,13 +241,16 @@ describe('register', () => {
     await $.command.run(saverRun('check'))
     await world.clock.settle()
 
-    expect(world.logs, 'the debug flag says what the judge returned and why a finding never reached the user')
+    expect(world.logs, 'the debug flag says what the judge returned, why a finding never reached the user, and what the fork cost')
       .toEqual(expect.arrayContaining([
-        'ContextSaver judge: 2 returned · 1 kept · 1 dropped',
+        'ContextSaver judge: 2 returned · 1 kept · 1 dropped · from /saver check',
         `${LOG_ID}: evidence r99 not in the ledger`,
+        // The stub's own counts: a cold cache is what makes a run expensive, and this one read 40k of it.
+        'judge usage: in 900 · out 300 · cache read 40000 · cache create 100',
       ]))
     const debug = await $.command.run(saverRun('debug'))
     expect(debug.text).toContain('judge last: 2 returned · 1 kept · 1 dropped')
+    expect(debug.text, 'and `/saver debug` prints the same line').toContain('judge usage: in 900 · out 300 · cache read 40000 · cache create 100')
     expect(debug.text).toContain(`  ${LOG_ID}: evidence r99 not in the ledger`)
     expect(debug.text, 'the finding that survived is the only card').toContain('cards 1')
   })

@@ -95,10 +95,11 @@ For you, it goes like this.
    interruptions. It watches quietly and says nothing.
 2. **It waits for a habit, not a spike.** One big command is not a problem. The same pointless command
    for the third time is. Only behaviours that already repeated ever reach you.
-3. **It answers "what took so long".** The header says where the wall-clock and the window went — `tests
-   ×12 · 22m`, `reads ×30 · 41% of your context` — and the model writes one plain line under each: what
-   those minutes were, in the words of your own work. An explanation is not an accusation: a long session
-   can be an honest one, and it says so.
+3. **It answers "what took so long".** The header says where the wall-clock and the window went in one
+   line each — `Time  22m in tools`, `Context  410k from tools` — and the model writes the sentence beside
+   the figure: what those minutes were, in the words of your own work. One figure and one sentence per
+   budget; the named sinks behind them are in `/saver debug`. An explanation is not an accusation: a long
+   session can be an honest one, and it says so.
 4. **It doesn't wait for the turn to end.** A three-hour agentic turn is checked while it runs, every 40
    tool calls and at most every five minutes, so the card arrives while there is still time to change
    course. The run to compaction is paced by how fast the window is actually filling, not by what a turn
@@ -138,15 +139,16 @@ guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](do
 | `/saver fix <n>` | Fixes card `n`: sends the fix the card offers, as it stands. |
 | `/saver fix [n] <text>` | Fixes card `n` with your own note instead — a leading number is always read as the card the pane draws, and without one it is the waster whose `Fix…` field is open, else card 1. The multi-line way to write one, from the composer. |
 | `/saver ignore <n>` | Ignores card `n`: nothing is sent, and it stays quiet for the session. |
-| `/saver debug` | Dumps the whole session state: rows, patterns, decisions, the judge's runs and cost, usage, savings. |
+| `/saver debug` | Dumps the whole session state: rows, the two budgets' named sinks, patterns, decisions, the judge's runs and what each fork cost (input, output, cache read, cache created), usage, savings. |
 | `/saver reset` | Clears this session's ledger and decisions; the pattern registry survives. |
 
 ## Good to know
 
 > [!IMPORTANT]
 > The judge runs on your session's model. `$.model.fork` has no model field, so a session on Opus pays
-> Opus to audit it. It keeps itself to a few percent of the session, and `/saver debug` shows exactly
-> what it spent.
+> Opus to audit it. It keeps itself to a few percent of the session; the header's name row says what it
+> has spent so far, and `/saver debug` breaks the last run into input, output and cache — a cold cache is
+> what makes a run expensive.
 
 - **This is v1.** The main flow was verified in a live session and every module has tests, but function
   hooks are early access and the API under this can still move.

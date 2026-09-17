@@ -7,7 +7,7 @@ import {
   ALTERNATIVE_MAX, JUDGE_LEDGER_ROWS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_NEW_TOKENS,
   JUDGE_MIN_ROWS, JUDGE_MIN_TURNS, KIND_MAX, MAX_BEHAVIORAL_FINDINGS, MAX_FINDINGS, MAX_PATTERNS,
 } from './types'
-import type { ArtifactKind, Category, Finding, Pattern, Proposal, Row, Signature, State } from './types'
+import type { ArtifactKind, Category, Finding, JudgeUsage, Pattern, Proposal, Row, Signature, State } from './types'
 
 /** The judge prompt (build spec Appendix A, verbatim) with the seven evidence placeholders. */
 export const JUDGE_PROMPT = `You are auditing THIS session for wasted context and wasted time. The transcript above is your own: read it for intent — what the user asked for, what you were told, what you already decided. The blocks below are the only evidence of what actually ran; nothing outside them exists for this audit.
@@ -144,9 +144,19 @@ export const shouldRun = (state: State, now: number): boolean =>
   state.rows.length >= JUDGE_MIN_ROWS &&
   (turnGate(state) || rowGate(state, now))
 
-/** What one judge fork cost us: input, output and cache-creation tokens (cache reads are free). */
-export const costOf = (u: ModelForkUsage): number =>
-  u.input_tokens + u.output_tokens + u.cache_creation_input_tokens
+/** The four counts the fork reported, under our own names: what `/saver debug` and the debug log print. */
+export const usageOf = (u: ModelForkUsage): JudgeUsage => ({
+  input: u.input_tokens,
+  output: u.output_tokens,
+  cacheRead: u.cache_read_input_tokens,
+  cacheCreate: u.cache_creation_input_tokens,
+})
+
+/** What a run's counts cost us: input, output and cache creation (cache reads are free). */
+export const spentOf = (u: JudgeUsage): number => u.input + u.output + u.cacheCreate
+
+/** What one judge fork cost us, straight from the usage the API reported. */
+export const costOf = (u: ModelForkUsage): number => spentOf(usageOf(u))
 
 /** Fills the judge prompt with this session's evidence blocks. */
 export const buildPrompt = (state: State): string =>

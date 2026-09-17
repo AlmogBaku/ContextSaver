@@ -1,5 +1,5 @@
 import { MAIN_AGENT } from './types'
-import type { Pattern, Row, TurnStat, Usage } from './types'
+import type { JudgeUsage, Pattern, Row, TurnStat, Usage } from './types'
 
 // A sample session, three turns wide: what the demo's rows and patterns are dated against. A session
 // younger than the sample is dated from turn 8, so the cards read 'turns 5–8' rather than 'turn 1'.
@@ -32,6 +32,9 @@ const turnSample = (input: number, output: number, ms: number, answer: string): 
 
 /** The usage the demo's header draws from: a third of a million-token window spent, with a compaction threshold. */
 export const demoUsage = (): Usage => ({ window: 1_000_000, compactAt: 900_000, tokens: 320_000, percent: 32 })
+
+/** What the demo's one judge run cost: a cold fork, whose cache creation is most of the bill. */
+export const demoForkUsage = (): JudgeUsage => ({ input: 96_000, output: 1_200, cacheRead: 0, cacheCreate: 221_000 })
 
 /** Three sample turns, so the header's run to compaction has a pace to state it in turns. */
 export const demoTurns = (): Omit<TurnStat, 'turn' | 'calls'>[] => [

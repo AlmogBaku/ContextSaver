@@ -23,6 +23,7 @@ import { fullPane } from './fixtures/ui/full-pane'
 import { manyWasters } from './fixtures/ui/many-wasters'
 import { millionPane } from './fixtures/ui/million-pane'
 import { overrunPane } from './fixtures/ui/overrun-pane'
+import { quietPane } from './fixtures/ui/quiet-pane'
 import { steeringPane } from './fixtures/ui/steering-pane'
 import { twoWasters } from './fixtures/ui/two-wasters'
 
@@ -486,25 +487,26 @@ describe('ui', () => {
     const wide = at(80)
     expect(drawnRows(wide), 'the name is the first row, beside the mark').toContain('ContextSaver')
     expect(drawnRows(wide)).toContain('↻ Check now')
+    expect(holds(wide, `ContextSaver${' '.repeat(4)}Judge 2 runs · 7.4k tokens`), 'what the judge cost rides the name row').toEqual(true)
     expect(holds(wide, '64% of context · 41k tokens to compaction · about 6 turns')).toEqual(true)
     expect(holds(wide, gauge(64, WIDE_GAUGE))).toEqual(true)
     expect(holds(wide, `${gauge(64, WIDE_GAUGE)}  ${TREND}`), 'the trend sits two cells past the gauge').toEqual(true)
-    expect(holds(wide, 'Saved ~3% · 3m 12s')).toEqual(true)
-    expect(holds(wide, 'Judge 2 runs · 7.4k tokens')).toEqual(true)
+    expect(holds(wide, 'Saved ~3% · 3m 12s'), 'the row the judge left shows what the session got back').toEqual(true)
     expect(holds(wide, '1.2%')).toEqual(false)                            // the share is a developer metric
     expect(drawnRows(wide), 'where the wall time went, from the ledger').toContain('Time')
-    expect(holds(wide, '3h 12m in tools · tests 48m (6) · agents 2h 05m (4) · git 4m')).toEqual(true)
+    expect(holds(wide, '3h 12m in tools · the full proxy suite runs after every fix'), 'one figure, one sentence').toEqual(true)
     expect(drawnRows(wide)).toContain('Context')
-    expect(holds(wide, '410k from tools · test output 190k (6) · reads 120k (41)')).toEqual(true)
-    expect(holds(wide, '↳ the full proxy suite runs after every fix round'), 'the judge says why').toEqual(true)
-    expect(holds(wide, '↳ most of it is test output nobody read past the summary line')).toEqual(true)
+    expect(holds(wide, '410k from tools · most of it is test output nobody read past')).toEqual(true)
+    expect(holds(wide, 'tests 48m (6)'), 'the named sinks are the model\'s and /saver debug\'s, not the row\'s').toEqual(false)
+    expect(holds(wide, '↳ the full proxy suite'), 'and the judge no longer gets a row under the figure').toEqual(false)
 
     const dock = at(60)
     expect(holds(dock, gauge(64, DOCK_GAUGE)), 'the gauge gives cells back to the mark and the trend').toEqual(true)
     expect(holds(dock, '64% of context · 41k tokens to compaction')).toEqual(true)
     expect(holds(dock, 'about 6 turns'), 'the run in turns is dropped whole').toEqual(false)
-    expect(holds(dock, 'Judge 2 runs · 7.4k'), 'the unit goes before the figure does').toEqual(true)
-    expect(holds(dock, '7.4k tokens')).toEqual(false)
+    expect(holds(dock, 'Judge 2 runs'), 'the runs outlive the tokens the name row cannot hold').toEqual(true)
+    expect(holds(dock, '7.4k')).toEqual(false)
+    expect(holds(dock, '3h 12m in tools · the full proxy suite ru…'), 'the sentence is cut, never the figure').toEqual(true)
     expect(holds(dock, 'Check now')).toEqual(true)
     expect(cellsOf(dock), 'every header row fits the body at 60 columns').toBeLessThanOrEqual(60)
     expect(overrun(dock)).toEqual([])
@@ -513,6 +515,12 @@ describe('ui', () => {
     expect(holds(tight, '64% · 41k to compaction'), 'a word goes before a figure does').toEqual(true)
     expect(holds(tight, 'Judge'), 'the judge is the first segment to go').toEqual(false)
     expect(holds(tight, 'Saved ~3% · 3m')).toEqual(true)
+    expect(holds(tight, '3h 12m in tools')).toEqual(true)
+    expect(holds(tight, 'in tools · '), 'a row with no room for a sentence keeps the figure alone').toEqual(false)
+
+    const quiet = at(80, quietPane)
+    expect(holds(quiet, '3h 12m in tools · nothing stands out yet'), 'before the judge speaks the row says so').toEqual(true)
+    expect(holds(quiet, 'Judge'), 'and a judge that has never run is no figure').toEqual(false)
 
     const narrowest = at(26)
     expect(holds(narrowest, gauge(64, PINCHED_GAUGE)), 'the trend goes and the gauge takes the row').toEqual(true)
@@ -526,6 +534,7 @@ describe('ui', () => {
 
     const million = at(100, millionPane)
     expect(holds(million, '5% of context · 914k tokens to compaction · about 33 turns')).toEqual(true)
+    expect(holds(million, 'Saved'), 'a session that saved nothing leaves the row blank').toEqual(false)
     expect(holds(million, TREND), 'one sample is a dot, not a shape').toEqual(false)
     const cramped = at(40, millionPane)
     expect(holds(cramped, '914k to compaction')).toEqual(true)
@@ -544,7 +553,7 @@ describe('ui', () => {
     expect(drawnRows(tree)).toContain('ContextSaver')
     expect(holds(tree, 'awaiting the first turn')).toEqual(true)
     expect(holds(tree, '░')).toEqual(false)
-    expect(holds(tree, 'Judge 1 run · 7.4k')).toEqual(true)
+    expect(holds(tree, 'Judge 1 run')).toEqual(true)
     expect(drawnRows(tree), 'no ledger row yet, so nothing to say about the time').not.toContain('Time')
   })
 
@@ -697,7 +706,7 @@ describe('ui', () => {
 
     const ui: Ui | null = resolved
     if (ui === null) throw new Error('the pane drew no elements')
-    const models = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, millionPane, fillingPane, fullPane, manyWasters]
+    const models = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, quietPane, millionPane, fillingPane, fullPane, manyWasters]
     for (const model of models) {
       for (const columns of [40, 56, 60, 70, 80, 100, 120, 160]) {
         const site = { bodyColumns: columns, maxRows: 30 }

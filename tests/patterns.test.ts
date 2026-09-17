@@ -178,23 +178,23 @@ describe('patterns', () => {
     expect(second.saved).toEqual({ ms: 0, chars: 0 })
     const judged = reduce({ ...second, turn: 10 }, { type: 'decide', patternId: suitePattern.id, choice: 'kill' })
     expect(judged.cards).toEqual([])
-    const again = reduce(judged, { type: 'judge.done', patterns: judged.patterns, fresh: [], recurred: [suitePattern.id], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const again = reduce(judged, { type: 'judge.done', patterns: judged.patterns, fresh: [], recurred: [suitePattern.id], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(again.patterns[0]).toMatchObject({ ignored: 3, openedAtTurn: null })
     expect(again.cards).toEqual([suitePattern.id])
   })
 
   test('judge.done recurred marks it ignored and returns the card', async () => {
     const state = seedState({ turn: 9, patterns: [steered()] })
-    const done = reduce(state, { type: 'judge.done', patterns: [steered()], fresh: [], recurred: [suitePattern.id], focus: 'auth', time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const done = reduce(state, { type: 'judge.done', patterns: [steered()], fresh: [], recurred: [suitePattern.id], focus: 'auth', time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(done.patterns[0]).toMatchObject({ ignored: 1, openedAtTurn: null, decision: 'steer' })
     expect(done.cards).toEqual([suitePattern.id])
-    const twice = reduce(done, { type: 'judge.done', patterns: done.patterns, fresh: [], recurred: [suitePattern.id], focus: 'auth', time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const twice = reduce(done, { type: 'judge.done', patterns: done.patterns, fresh: [], recurred: [suitePattern.id], focus: 'auth', time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(twice.patterns[0]?.ignored).toBe(2)
     expect(twice.cards).toEqual([suitePattern.id])
     expect(twice.judge.runs).toBe(2)
     expect(twice.judge.focus).toBe('auth')
     const kept: Pattern = { ...suitePattern, decision: 'keep', decidedAtTurn: 4, lastDecision: 'keep' }
-    const silent = reduce(seedState({ turn: 9, patterns: [kept] }), { type: 'judge.done', patterns: [kept], fresh: [suitePattern.id], recurred: [suitePattern.id], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const silent = reduce(seedState({ turn: 9, patterns: [kept] }), { type: 'judge.done', patterns: [kept], fresh: [suitePattern.id], recurred: [suitePattern.id], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(silent.patterns[0]?.ignored).toBe(0)
     expect(silent.cards).toEqual([])
   })
@@ -252,34 +252,39 @@ describe('patterns', () => {
     const kept: Pattern = { ...chattyPattern, decision: 'keep', decidedAtTurn: 3, lastDecision: 'keep' }
     const state = seedState({ turn: 9, turns: [1, 2, 3].map(turn => ({ ...turnEnd(), turn, calls: 1 })), patterns: [kept] })
     expect(reduce(state, { type: 'judge.start', now: 0, seq: 0 }).judge.running).toBe(true)
-    const first = reduce(state, { type: 'judge.done', patterns: [suitePattern], fresh: [suitePattern.id, chattyPattern.id], recurred: [], focus: 'auth', time: null, context: null, spent: 1_000, error: null, returned: 0, kept: 0, dropped: [] })
+    const first = reduce(state, { type: 'judge.done', patterns: [suitePattern], fresh: [suitePattern.id, chattyPattern.id], recurred: [], focus: 'auth', time: null, context: null, spent: 1_000, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(first.cards).toEqual([suitePattern.id])
     expect(first.patterns.map(p => p.id)).toEqual([suitePattern.id, chattyPattern.id])
     expect(first.patterns[1]).toMatchObject({ decision: 'keep', decidedAtTurn: 3 })
-    expect(first.judge).toEqual({ lastAtTokens: 30_000, lastAtTurn: 9, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 1, spent: 1_000, backoff: 2, error: null, focus: 'auth', time: null, context: null, last: { returned: 0, kept: 0, dropped: [] } })
+    expect(first.judge).toEqual({ lastAtTokens: 30_000, lastAtTurn: 9, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 1, spent: 1_000, backoff: 2, error: null, focus: 'auth', time: null, context: null, last: { returned: 0, kept: 0, dropped: [], usage: null } })
     const logDump: Pattern = { ...suitePattern, id: 'reading:unfiltered-log-dump', category: 'reading' }
-    const second = reduce(first, { type: 'judge.done', patterns: [...first.patterns, logDump], fresh: [suitePattern.id, logDump.id], recurred: [], focus: null, time: null, context: null, spent: 0, error: 'cold snapshot', returned: 0, kept: 0, dropped: [] })
+    const second = reduce(first, { type: 'judge.done', patterns: [...first.patterns, logDump], fresh: [suitePattern.id, logDump.id], recurred: [], focus: null, time: null, context: null, spent: 0, error: 'cold snapshot', returned: 0, kept: 0, dropped: [], usage: null })
     expect(second.cards).toEqual([logDump.id, suitePattern.id])
     expect(second.judge).toMatchObject({ runs: 2, spent: 1_000, backoff: 4, error: 'cold snapshot', focus: null })
-    const third = reduce(second, { type: 'judge.done', patterns: second.patterns, fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const third = reduce(second, { type: 'judge.done', patterns: second.patterns, fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(third.judge.backoff).toBe(JUDGE_MAX_BACKOFF)
-    const quiet = reduce(seedState(), { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const quiet = reduce(seedState(), { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(quiet.judge).toMatchObject({ runs: 1, backoff: 1, lastAtTokens: 0 })
   })
 
-  test('judge.done stores what the run returned, kept and dropped, and debug prints it', async () => {
+  test('judge.done stores what the run returned, kept, dropped and cost, and debug prints it', async () => {
     const dropped = [
       'execution:full-suite: evidence r99 not in the ledger',
       '#2: kind must start with "Claude keeps "',
       ...Array.from({ length: 5 }, (_, i) => `execution:suite-${i + 3}: over MAX_FINDINGS (6)`),
     ]
     const state = seedState({ turn: 9, patterns: [suitePattern] })
-    const done = reduce(state, { type: 'judge.done', patterns: [suitePattern], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 8, kept: 1, dropped })
-    expect(done.judge.last).toEqual({ returned: 8, kept: 1, dropped })
+    const usage = { input: 900, output: 300, cacheRead: 40_000, cacheCreate: 100 }
+    const done = reduce(state, { type: 'judge.done', patterns: [suitePattern], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 8, kept: 1, dropped, usage })
+    expect(done.judge.last).toEqual({ returned: 8, kept: 1, dropped, usage })
     const dump = debugDump(done)
     expect(dump, 'found nothing and found things that were dropped now read differently').toContain('judge last: 8 returned · 1 kept · 7 dropped')
     expect(dump).toContain('  execution:full-suite: evidence r99 not in the ledger')
     expect(dump, 'at most six reasons are printed').not.toContain('execution:suite-7:')
+    expect(dump, 'what the fork cost is under it, cold cache and all').toContain('judge usage: in 900 · out 300 · cache read 40000 · cache create 100')
+    const cold = reduce(state, { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: 'cold snapshot', returned: 0, kept: 0, dropped: [], usage: null })
+    expect(cold.judge.last?.usage, 'a fork that answered nothing cost nothing we can count').toBe(null)
+    expect(debugDump(cold), 'and nothing is printed of it').not.toContain('judge usage')
     const crowded = { ...done, patterns: Array.from({ length: 60 }, (_, i) => ({ ...suitePattern, id: `execution:waster-${i}` })) }
     expect(debugDump(crowded).split('\n').length, 'the 40-line contract holds with the reasons in it').toBeLessThanOrEqual(40)
     expect(reduce(done, { type: 'reset' }).judge.last, 'a reset knows of no run').toBe(null)
@@ -292,7 +297,7 @@ describe('patterns', () => {
     const done = reduce(started, {
       type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: 'a proxy rewrite',
       time: '2h 10m, most of it four full suite runs.', context: '410k chars, half of it one log dump.',
-      spent: 900, error: null, returned: 0, kept: 0, dropped: [],
+      spent: 900, error: null, returned: 0, kept: 0, dropped: [], usage: null,
     })
     expect(done.judge, 'a run that finished keeps the cadence it started under').toMatchObject({
       running: false, lastAtSeq: 61, lastAtMs: 1_700_000_000_000,
@@ -311,7 +316,7 @@ describe('patterns', () => {
 
   test('judge.done drops a card whose pattern the registry no longer carries', async () => {
     const state = seedState({ turn: 9, patterns: [suitePattern], cards: [suitePattern.id] })
-    const pruned = reduce(state, { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
+    const pruned = reduce(state, { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
     expect(pruned.patterns).toEqual([])
     expect(pruned.cards).toEqual([])
     expect(bandModel(pruned).fresh).toBe(0)
@@ -622,6 +627,9 @@ describe('patterns', () => {
     const dump = debugDump(state)
     expect(dump.split('\n').length).toBeLessThanOrEqual(40)
     expect(dump).toContain('test×1 read×1')
+    expect(dump, 'the sinks the header no longer spells out are printed here, with their counts')
+      .toContain('time sinks: 120000ms total · reads 60000 ×1 · tests 60000 ×1')
+    expect(dump).toContain('context sinks: 18000ch total · reads 9000 ×1 · tests 9000 ×1')
     expect(dump).toContain('hits 1 [r-1]')
     expect(dump).toContain('steer @ 5')
     expect(dump).toContain('ignored 1')
@@ -632,10 +640,10 @@ describe('patterns', () => {
     expect(dump, 'nothing said about the time reads as nothing').toContain('judge time: -')
     const crowded = seedState({
       patterns: Array.from({ length: 60 }, (_, i) => ({ ...suitePattern, id: `execution:waster-${i}` })),
-      judge: { ...seedState().judge, last: { returned: 8, kept: 1, dropped: Array.from({ length: 7 }, (_, i) => `execution:waster-${i}: dropped`) } },
+      judge: { ...seedState().judge, last: { returned: 8, kept: 1, dropped: Array.from({ length: 7 }, (_, i) => `execution:waster-${i}: dropped`), usage: { input: 900, output: 300, cacheRead: 0, cacheCreate: 96_000 } } },
     })
     expect(debugDump(crowded).split('\n').length, 'sixty patterns and six reasons still fit the forty').toBeLessThanOrEqual(40)
-    expect(debugDump(crowded)).toContain('… 40 more patterns')
+    expect(debugDump(crowded)).toContain('… 43 more patterns')
   })
 
   test('reduce never mutates the state it is given', async () => {
@@ -650,7 +658,7 @@ describe('patterns', () => {
       { type: 'turn.complete', stat: turnEnd() },
       { type: 'usage', usage: { window: 200_000, tokens: 10, percent: 5 }, now: 1 },
       { type: 'decide', patternId: suitePattern.id, choice: 'kill' },
-      { type: 'judge.done', patterns: [suitePattern], fresh: [suitePattern.id], recurred: [], focus: null, time: null, context: null, spent: 5, error: null, returned: 0, kept: 0, dropped: [] },
+      { type: 'judge.done', patterns: [suitePattern], fresh: [suitePattern.id], recurred: [], focus: null, time: null, context: null, spent: 5, error: null, returned: 0, kept: 0, dropped: [], usage: null },
       { type: 'standing.add', text: 'more' },
       { type: 'reset' },
     ]

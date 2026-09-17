@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { JUDGE_PROMPT, buildPrompt, costOf, merge, parseReply, shouldRun } from '../hooks/core/judge'
+import { JUDGE_PROMPT, buildPrompt, costOf, merge, parseReply, shouldRun, spentOf, usageOf } from '../hooks/core/judge'
 import { debugDump } from '../hooks/core/patterns'
 import { JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, MAX_PATTERNS } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
@@ -226,7 +226,7 @@ describe('judge', () => {
     expect(dropped.some(text => text.includes('\n')), 'no reason carries a newline').toBe(false)
     const crowded = judgeState({
       patterns: Array.from({ length: 60 }, (_, i) => judgePattern({ id: `execution:waster-${i + 1}` })),
-      judge: { ...judgeState().judge, last: { returned: 6, kept: 0, dropped } },
+      judge: { ...judgeState().judge, last: { returned: 6, kept: 0, dropped, usage: { input: 900, output: 300, cacheRead: 0, cacheCreate: 96_000 } } },
     })
     expect(debugDump(crowded).split('\n').length, 'the 40-line contract holds with six such reasons in it')
       .toBeLessThanOrEqual(40)
@@ -427,5 +427,11 @@ describe('judge', () => {
   test('costOf charges input, output and cache creation but not cache reads', ($, _on) => {
     expect(costOf({ input_tokens: 1000, output_tokens: 300, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 200 }))
       .toBe(1500)
+  })
+
+  test('usageOf keeps all four counts, so a cold fork can be told from a warm one', ($, _on) => {
+    const usage = usageOf({ input_tokens: 1000, output_tokens: 300, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 200 })
+    expect(usage, 'the API names on the left, ours on the right').toEqual({ input: 1000, output: 300, cacheRead: 90_000, cacheCreate: 200 })
+    expect(spentOf(usage), 'a read cache is free; the one we created is not').toBe(1500)
   })
 })

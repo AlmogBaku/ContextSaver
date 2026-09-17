@@ -21,7 +21,7 @@ export const KIND_MAX = 120
 export const ALTERNATIVE_MAX = 200
 export const KEY_MAX = 200
 export const DEBUG_MAX_LINES = 40             // `/saver debug` ceiling
-export const DEBUG_MAX_PATTERNS = 20          // pattern lines `/saver debug` prints before folding the rest
+export const DEBUG_MAX_PATTERNS = 17          // pattern lines `/saver debug` prints before folding the rest
 export const DEBUG_MAX_DROPPED = 6            // dropped-finding reasons `/saver debug` and the debug log print
 export const BRIEF_TOOLS = 'Read, Grep, Glob' // the tools an agent brief allows when the proposal names none
 export const FILE_TOOLS: readonly string[] = ['Read', 'Edit', 'Write', 'NotebookEdit']   // tools whose ledger key is the path they touched
@@ -80,8 +80,10 @@ export type Pattern = StoredPattern & {
   ignored: number                  // times the instruction was ignored
 }
 
-/** What one judge run reported: findings returned, findings kept, and one short reason per drop. */
-export type JudgeRun = { returned: number; kept: number; dropped: readonly string[] }
+/** What one fork of the judge cost, in the four token counts the API reports. */
+export type JudgeUsage = { input: number; output: number; cacheRead: number; cacheCreate: number }
+/** What one judge run reported: findings returned, findings kept, one short reason per drop, and what the fork cost (null when it returned nothing). */
+export type JudgeRun = { returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
 
 /** One cited call (or turn) as the details render it: what ran, in which loop, what it cost, what it answered. */
 export type Evidence = {
@@ -149,7 +151,7 @@ export type Action =
   | { type: 'steer.draft'; text: string }
   | { type: 'decide'; patternId: string; choice: Choice; text?: string }   // text required for steer
   | { type: 'judge.start'; now: number; seq: number }        // when and at which ledger row the run began, for the mid-turn cadence
-  | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; time: string | null; context: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[] }
+  | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; time: string | null; context: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
   | { type: 'notes.drained' }
   | { type: 'standing.add'; text: string }
   | { type: 'artifact.done'; patternId: string; kind: ArtifactKind; written: boolean }   // written: true once the rule is handled — written, tried or skipped — and recorded in state.written

@@ -6,7 +6,7 @@ import type { RenderElement } from 'claude-code'
 import { logoCells } from './core/logo'
 import { collapseWs, duration, fit, gauge, kilo, tokensOf } from './core/text'
 import { sparkline } from './core/trend'
-import { NO_CALLS, PANE_INLINE_ROWS, PANE_TITLE, SINKS } from './core/types'
+import { NO_CALLS, PANE_INLINE_ROWS, PANE_TITLE } from './core/types'
 import type {
   Actions,
   Artifact,
@@ -20,7 +20,6 @@ import type {
   Header,
   PaneModel,
   PaneProps,
-  Sinks,
   Ui,
 } from './core/types'
 
@@ -59,14 +58,14 @@ const RULES_MIN_TITLE = 8     // a rule's title keeps this many cells before its
 const CHECK_CELLS = 11        // '↻ Check now'
 const INFO_CELLS = 1          // 'i'
 const CONTROL_GAP = 2         // cells between a row's text and the Button at its right edge
-const STATUS_GAP = 4          // cells between what the session saved and what the judge cost
+const STATUS_GAP = 4          // cells between the pane's name and what the judge has cost beside it
 const TAG_MIN_CELLS = 52      // the card's cells at 60 body columns: under that the category tag is dropped
 const TITLE_MIN = 8           // cells a card's title keeps whatever else the row reserves
 const BAND_RESERVE = 4        // cells the engine's own collapse control '[-]' takes at the band's right edge
 const BAND_LEAD = PANE_TITLE.length + 4   // the name, the space before the mark, the mark itself and the two cells after it
 const TITLE_ROWS = 2
 const VALUE_ROWS = 2          // rows the fix keeps under the verbs
-const HINT_ROWS = 2           // rows the judge's one-line explanation keeps under a Time or Context row
+const HINT_MIN = 12           // cells the judge's sentence keeps at the end of a Time or Context row before it is dropped whole
 const DETAIL_ROWS_MAX = 4     // rows `why` and `fix` each keep inside the opened details
 const MIN_CELLS = 24
 const MIN_ROWS = 8            // however little the surface grants the inline pane, it is budgeted for this
@@ -108,6 +107,8 @@ const CONTEXT_LEAD = 'from tools'   // '410k from tools'
 const SAVED_LABEL = 'Saved '
 const JUDGE_LABEL = 'Judge '
 const TOKENS_UNIT = ' tokens'
+const SEP = ' · '                   // between two figures, or between a figure and the sentence about it
+const NOTHING_YET = 'nothing stands out yet'   // the tail of a budget row before the judge has spoken
 const DECIDED_LABEL = 'Decided'
 const RULES_LABEL = 'Rules for next session'
 const STEER_HINT = 'Enter sends · Fix… again closes · longer: /saver fix <n> <text>'
@@ -152,7 +153,7 @@ const linesOf = (text: string, cells: number, rows: number): string[] => {
 }
 
 /** Joins the segments that carry something with ' · '. */
-const joined = (segments: (string | null)[]): string => segments.filter(s => s !== null && s !== '').join(' · ')
+const joined = (segments: (string | null)[]): string => segments.filter(s => s !== null && s !== '').join(SEP)
 
 /** A block of at most `rows` truncated lines. */
 const textBlock = (ui: Ui, text: string, cells: number, rows: number, isDim?: true): RenderElement => {
@@ -260,29 +261,36 @@ const contextText = (header: Header, room: number): string => {
   return ladder.find(text => text.length <= room) ?? ''
 }
 
-/** What the status row draws: the savings, the judge's figures, or as much of them as the row holds. */
-const statusTexts = (header: Header, room: number): { saved: string; judge: string; tail: string } => {
-  const pct = header.savedPct > 0 ? `~${header.savedPct}%` : null
-  const ms = header.savedMs > 0 ? duration(header.savedMs) : null
+/** What the judge has cost, for the end of the name row: the runs, and the tokens while they fit. */
+const judgeText = (header: Header, room: number): string => {
   const runs = `${header.judgeRuns} run${header.judgeRuns === 1 ? '' : 's'}`
   const spent = header.judgeTokens > 0 ? kilo(header.judgeTokens) : null
   // A judge that has not run yet is not a figure: 'Check now' already says the run is there to be had.
-  const judge = header.judgeRuns === 0 ? '' : joined([runs, spent === null ? null : `${spent}${TOKENS_UNIT}`])
-  const shorter = header.judgeRuns === 0 ? '' : joined([runs, spent])
-  const tail = header.judgeRunning ? ` · ${CHECKING_TEXT}` : ''
-  const cells = (row: { saved: string; judge: string; tail: string }): number =>
+  const ladder = header.judgeRuns === 0
+    ? []
+    : [
+      `${JUDGE_LABEL}${joined([runs, spent === null ? null : `${spent}${TOKENS_UNIT}`])}`,
+      `${JUDGE_LABEL}${joined([runs, spent])}`,
+      `${JUDGE_LABEL}${runs}`,
+    ]
+  return ladder.find(text => text.length <= room) ?? ''
+}
+
+/** What the saved row draws: what the session got back, and that a run is in flight. */
+const savedTexts = (header: Header, room: number): { saved: string; tail: string } => {
+  const pct = header.savedPct > 0 ? `~${header.savedPct}%` : null
+  const ms = header.savedMs > 0 ? duration(header.savedMs) : null
+  const tail = header.judgeRunning ? CHECKING_TEXT : ''
+  const cells = (row: { saved: string; tail: string }): number =>
     (row.saved === '' ? 0 : SAVED_LABEL.length + row.saved.length)
-    + (row.judge === '' ? 0 : (row.saved === '' ? 0 : STATUS_GAP) + JUDGE_LABEL.length + row.judge.length)
-    + row.tail.length
+    + (row.tail === '' ? 0 : (row.saved === '' ? 0 : SEP.length) + row.tail.length)
   const ladder = [
-    { saved: joined([pct, ms]), judge, tail },
-    { saved: joined([pct, ms]), judge, tail: '' },
-    { saved: joined([pct, ms]), judge: shorter, tail: '' },
-    { saved: joined([pct, ms]), judge: '', tail: '' },
-    { saved: joined([pct ?? ms]), judge: '', tail: '' },
-    { saved: '', judge: '', tail: '' },
+    { saved: joined([pct, ms]), tail },
+    { saved: joined([pct, ms]), tail: '' },
+    { saved: joined([pct ?? ms]), tail: '' },
+    { saved: '', tail: '' },
   ]
-  return ladder.find(row => cells(row) <= room) ?? { saved: '', judge: '', tail: '' }
+  return ladder.find(row => cells(row) <= room) ?? { saved: '', tail: '' }
 }
 
 /** The 'Check now' button; while a run is in flight it says so, dims, and answers no press. */
@@ -293,32 +301,42 @@ const checkButton = (ui: Ui, header: Header, actions: Actions): RenderElement =>
     : <Button key="check" plain onPress={() => actions.check()}>{CHECK_LABEL}</Button>
 }
 
-/** The header's first row: the product's name, and the judge's button at the right edge. */
+/** The header's first row: the product's name, what the judge has cost, and its button at the right edge. */
 const nameRow = (ui: Ui, header: Header, actions: Actions, cells: number): RenderElement => {
   const { Box, Text } = ui
   // The surface already draws the pane's own title, so a row too tight for both keeps the button.
   const name = cells >= PANE_TITLE.length + CHECK_CELLS + CONTROL_GAP ? PANE_TITLE : ''
+  const judge = name === '' ? '' : judgeText(header, cells - name.length - STATUS_GAP - CHECK_CELLS - CONTROL_GAP)
+  const lead = name.length + (judge === '' ? 0 : STATUS_GAP + judge.length)
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
-      {name === '' ? <Box flexGrow={1} /> : <Box width={name.length}><Text bold>{name}</Text></Box>}
+      {name === ''
+        ? <Box flexGrow={1} />
+        : (
+          <Box width={lead}>
+            <Text wrap="truncate-end">
+              <Text bold>{name}</Text>
+              {judge === '' ? null : <Text dimColor>{`${' '.repeat(STATUS_GAP)}${judge}`}</Text>}
+            </Text>
+          </Box>
+        )}
       {checkButton(ui, header, actions)}
     </Box>
   )
 }
 
 /**
- * The header's last rows: what the session saved, what the judge cost, and that a run is in flight —
+ * The header's last rows beside the mark: what the session got back, and that a run is in flight —
  * appended to the figures, or, where the row could not hold it and there are rows to spare, its own.
  */
-const statusRows = (ui: Ui, header: Header, cells: number, isCompact: boolean): RenderElement[] => {
+const savedRows = (ui: Ui, header: Header, cells: number, isCompact: boolean): RenderElement[] => {
   const { Text } = ui
-  const { saved, judge, tail } = statusTexts(header, cells)
+  const { saved, tail } = savedTexts(header, cells)
   return [
     <Text wrap="truncate-end">
       {saved === '' ? null : <Text dimColor>{SAVED_LABEL}</Text>}
       {saved === '' ? null : <Text color={TONES.good}>{saved}</Text>}
-      {judge === '' ? null : <Text dimColor>{`${saved === '' ? '' : ' '.repeat(STATUS_GAP)}${JUDGE_LABEL}${judge}`}</Text>}
-      {tail === '' ? null : <Text dimColor>{tail}</Text>}
+      {tail === '' ? null : <Text dimColor>{`${saved === '' ? '' : SEP}${tail}`}</Text>}
     </Text>,
     ...(header.judgeRunning && tail === '' && !isCompact
       ? [<Text dimColor wrap="truncate-end">{fit(CHECKING_TEXT, cells)}</Text>]
@@ -326,39 +344,26 @@ const statusRows = (ui: Ui, header: Header, cells: number, isCompact: boolean): 
   ]
 }
 
-/** Where one budget went: the total, then the SINKS largest named consumers, dropped whole while tight. */
-const sinkText = (sinks: Sinks, lead: string, amount: (n: number) => string, room: number): string => {
-  const total = `${amount(sinks.total)} ${lead}`
-  const named = sinks.sinks.slice(0, SINKS)
-    .map(sink => `${sink.label} ${amount(sink.amount)}${sink.count > 1 ? ` (${sink.count})` : ''}`)
-  const ladder = Array.from({ length: named.length + 1 }, (_, back) =>
-    joined([total, ...named.slice(0, named.length - back)]))
-  return ladder.find(text => text.length <= room) ?? fit(total, room)
-}
-
-/** One budget as a row: its label in the gutter, where it went, and the judge's sentence about it. */
-const sinkRow = (
-  ui: Ui,
-  label: string,
-  text: string,
-  hint: string | null,
-  cells: number,
-): RenderElement => {
-  const { Box, Text } = ui
+/**
+ * One budget as one row: its label in the gutter, one figure, and the judge's sentence about it, dim.
+ * The named sinks behind the figure are the model's and `/saver debug`'s; a row is one fact here.
+ */
+const sinkRow = (ui: Ui, label: string, total: string, sentence: string, cells: number): RenderElement => {
+  const { Text } = ui
   const value = gutterValue(cells)
+  const figure = fit(total, value)
+  const room = value - figure.length - SEP.length
+  // A sentence left a handful of cells says nothing, so it is dropped whole rather than cut to nothing.
+  const tail = room >= HINT_MIN ? `${SEP}${fit(collapseWs(sentence), room)}` : ''
   return gutterRow(ui, label, (
-    <Box flexDirection="column">
-      <Text wrap="truncate-end">{fit(text, value)}</Text>
-      {hint === null
-        ? null
-        : linesOf(hint, value - FIX_CELLS, HINT_ROWS).map((line, at) => (
-          <Text dimColor wrap="truncate-end">{`${at === 0 ? `${GLYPHS.quote} ` : ' '.repeat(FIX_CELLS)}${line}`}</Text>
-        ))}
-    </Box>
+    <Text wrap="truncate-end">
+      {figure}
+      {tail === '' ? null : <Text dimColor>{tail}</Text>}
+    </Text>
   ), cells)
 }
 
-/** The header: the mark, the session's four rows beside it, then where the time and the context went. */
+/** The header: the mark, the session's four rows beside it, then one row each for the time and the context. */
 const headerSection = (
   ui: Ui,
   header: Header,
@@ -370,6 +375,13 @@ const headerSection = (
   const hasLogo = cells >= LOGO_MIN_CELLS
   const room = hasLogo ? cells - LOGO.columns - LOGO_GAP : cells
   const context = contextText(header, room)
+  // One figure and one sentence per budget the ledger has measured; inline the seat has no rows for them.
+  const budgets = isCompact
+    ? []
+    : [
+      ...(header.time === null ? [] : [{ label: TIME_LABEL, figure: `${span(header.time.total)} ${TIME_LEAD}`, sentence: header.judgeTime }]),
+      ...(header.context === null ? [] : [{ label: CONTEXT_LABEL, figure: `${kilo(header.context.total)} ${CONTEXT_LEAD}`, sentence: header.judgeContext }]),
+    ]
   // Indented to the cards' content column, so the labels and the card titles start at one x.
   return (
     <Box flexDirection="column" paddingX={1 + HEAD_INDENT}>
@@ -381,15 +393,11 @@ const headerSection = (
             ? <Text dimColor wrap="truncate-end">{fit(AWAITING_TEXT, room)}</Text>
             : <Text wrap="truncate-end">{context}</Text>}
           {header.percent === null ? null : gaugeRow(ui, header, header.percent, room)}
-          {statusRows(ui, header, room, isCompact)}
+          {savedRows(ui, header, room, isCompact)}
         </Box>
       </Box>
-      {isCompact || header.time === null
-        ? null
-        : sinkRow(ui, TIME_LABEL, sinkText(header.time, TIME_LEAD, span, gutterValue(cells)), header.judgeTime, cells)}
-      {isCompact || header.context === null
-        ? null
-        : sinkRow(ui, CONTEXT_LABEL, sinkText(header.context, CONTEXT_LEAD, kilo, gutterValue(cells)), header.judgeContext, cells)}
+      {budgets.length === 0 ? null : blank(ui)}
+      {budgets.map(budget => sinkRow(ui, budget.label, budget.figure, budget.sentence ?? NOTHING_YET, cells))}
       {blank(ui)}
     </Box>
   )

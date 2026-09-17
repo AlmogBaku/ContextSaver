@@ -6,8 +6,8 @@ import {
   SETTLE_TURNS, TREND_TURNS, initialState,
 } from './types'
 import type {
-  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Evidence, Header, JudgeRun, PaneModel,
-  Pattern, Proposal, Row, Signature, Sinks, State, StoredPattern, TurnStat,
+  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Evidence, Header, JudgeRun, JudgeUsage,
+  PaneModel, Pattern, Proposal, Row, Signature, Sinks, State, StoredPattern, TurnStat,
 } from './types'
 
 // The `:offset-limit` slice `normalize` appends to a Read key: the path is what the details name.
@@ -220,7 +220,7 @@ const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>
       focus: a.focus,
       time: a.time,
       context: a.context,
-      last: { returned: a.returned, kept: a.kept, dropped: [...a.dropped] },
+      last: { returned: a.returned, kept: a.kept, dropped: [...a.dropped], usage: a.usage },
     },
   }
 }
@@ -577,6 +577,10 @@ const patternLines = (state: State): string[] => {
   return rest > 0 ? [...shown, `  … ${rest} more patterns`] : shown
 }
 
+/** What one judge fork cost, one line: the same text `/saver debug` and the debug log both print. */
+export const usageLine = (u: JudgeUsage): string =>
+  `judge usage: in ${u.input} · out ${u.output} · cache read ${u.cacheRead} · cache create ${u.cacheCreate}`
+
 // What the last run reported, and why anything it returned never reached the user.
 const judgeRunLines = (run: JudgeRun | null): string[] =>
   run === null
@@ -584,7 +588,12 @@ const judgeRunLines = (run: JudgeRun | null): string[] =>
     : [
         `judge last: ${run.returned} returned · ${run.kept} kept · ${run.dropped.length} dropped`,
         ...run.dropped.slice(0, DEBUG_MAX_DROPPED).map(reason => `  ${reason}`),
+        ...(run.usage === null ? [] : [usageLine(run.usage)]),
       ]
+
+// Where a budget went, as the pane's Time and Context rows no longer spell out: the total and the largest sinks.
+const sinkLine = (label: string, unit: string, budget: Sinks | null): string =>
+  `${label} sinks: ${budget === null ? '-' : [`${budget.total}${unit} total`, ...budget.sinks.map(s => `${s.label} ${s.amount} ×${s.count}`)].join(' · ')}`
 
 /** Renders the whole state for `/saver debug` in at most 40 lines. */
 export const debugDump = (state: State): string => {
@@ -594,6 +603,8 @@ export const debugDump = (state: State): string => {
   return [
     `ContextSaver · turn ${state.turn} · seq ${state.seq} · rows ${state.rows.length} · turns ${state.turns.length} · patterns ${state.patterns.length}`,
     `rows ${classCounts(state.rows)}`,
+    sinkLine('time', 'ms', sinksOf(state, 'ms')),
+    sinkLine('context', 'ch', sinksOf(state, 'chars')),
     ...patternLines(state),
     `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
     `notes ${state.notes.length} · standing ${state.standing.length} · written ${state.written.length}${state.written.length === 0 ? '' : `: ${state.written.join(', ')}`}`,
