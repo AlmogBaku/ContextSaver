@@ -604,8 +604,8 @@ const judgeRunLines = (run: JudgeRun | null): string[] =>
 const sinkLine = (label: string, unit: string, budget: Sinks | null): string =>
   `${label} sinks: ${budget === null ? '-' : [`${budget.total}${unit} total`, ...budget.sinks.map(s => `${s.label} ${s.amount} ×${s.count}`)].join(' · ')}`
 
-/** Renders the whole state for `/saver debug` in at most 40 lines. */
-export const debugDump = (state: State): string => {
+/** Renders the whole state, and whether the load lane has reported yet, for `/saver debug` in ≤ 40 lines. */
+export const debugDump = (state: State, spoke = false): string => {
   const j = state.judge
   const u = state.usage
   const o = state.overhead
@@ -622,6 +622,7 @@ export const debugDump = (state: State): string => {
     `judge time: ${oneLine(j.time)}`,
     `judge context: ${oneLine(j.context)}`,
     ...judgeRunLines(j.last),
+    `armed check: ${state.pendingCheck ? 'pending' : 'spent'} · ${spoke ? 'reported' : 'not yet reported'}`,
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,
     `compactions ${state.compactions.length === 0 ? 'none' : state.compactions.join(', ')}`,

@@ -47,6 +47,9 @@ export function register(on: On): void {
   // A check asked for while a run is in flight is answered by that run: cadence runs are frequent now,
   // and the person who pressed Check now would otherwise be told `already checking` and never told more.
   let asked = false
+  // The load lane's one failure toast. Its arming survives every failure, so a toast per retry would be a
+  // storm — but total silence reads exactly like a check that never fired, so the first failure speaks.
+  let armedSpoke = false
   // The card whose Fix… field is waiting for the ring, and whether the tree holding it has been drawn: a ring
   // lands only on an element the drawn tree holds ('no element of its own is drawn under that key'), and a
   // tree lands after the hook that built it returns — so the ask takes two renders.
@@ -79,6 +82,13 @@ export function register(on: On): void {
     host?.invalidate()
     // Only a settled instruction is a saving to announce; the per-turn accrual behind it stays quiet.
     if (open.some(id => state.patterns.find(p => p.id === id)?.openedAtTurn === null)) savedToast(before)
+  }
+
+  // A `/clear`, a `/saver reset` or a resume starts the session over: the closure flags that belong to
+  // the session go with its state, so a new one may speak for its armed check again.
+  const resetSession = (): void => {
+    dispatch({ type: 'reset' })
+    armedSpoke = false
   }
 
   // Inside a render hook: fold the action in with no redraw, since a redraw loops.
@@ -138,10 +148,15 @@ export function register(on: On): void {
   })
 
   // A run the person asked for answers them, whatever it found: silence is what a check must never be.
-  // An armed check is the exception: its arming survived, so the next opportunity retries it and a
-  // toast per retry would be noise about a run nobody asked for — unless someone asked mid-run.
+  // An armed check nobody asked for says it once, in its own words, since it will be retried: the first
+  // failure names itself and the retries stay quiet.
   const failedToast = (reason: JudgeReason, failure: string): void => {
-    if (reason === 'load' && !asked) return
+    if (reason === 'load' && !asked) {
+      if (armedSpoke) return
+      armedSpoke = true
+      host?.toast(`ContextSaver: could not check yet — ${failure}`)
+      return
+    }
     if (REQUESTED.includes(reason) || asked) host?.toast(`ContextSaver: check failed — ${failure}`)
   }
 
@@ -217,11 +232,17 @@ export function register(on: On): void {
     }
   }
 
-  // The opportunities a run can start at: a check armed at load goes first and consults no gate — the
-  // cadence counts new work, and a session joined late has all of its work behind it — else the cadence.
+  // A check armed at load consults no gate — `shouldRun` counts new work, and a session joined late has
+  // all of its work behind it. Answers whether it took this opportunity.
+  const armedCheck = (): boolean => {
+    if (!state.pendingCheck || state.judge.running) return false
+    void runJudge('load').catch(() => undefined)
+    return true
+  }
+
+  // The opportunities a run can start at: the armed check first, else the cadence's own count of new work.
   const judgeAt = (now: number, cadence: JudgeReason): void => {
-    if (state.pendingCheck && !state.judge.running) void runJudge('load').catch(() => undefined)
-    else if (shouldRun(state, now)) void runJudge(cadence).catch(() => undefined)
+    if (!armedCheck() && shouldRun(state, now)) void runJudge(cadence).catch(() => undefined)
   }
 
   const checkNow = (): string => {
@@ -541,9 +562,12 @@ export function register(on: On): void {
       // `origin` is the engine's to stamp; read it defensively so an unstamped submission still carries the texts.
       if (e.origin?.kind === 'plugin' || e.text.trimStart().startsWith(`/${COMMAND.name}`)) return next(e)
       const extra = [...state.notes, ...state.standing.filter(text => !state.notes.includes(text))]
-      if (extra.length === 0) return next(e)
-      dispatch({ type: 'notes.drained' })
-      return next({ ...e, context: [...(e.context ?? []), ...extra] })
+      if (extra.length > 0) dispatch({ type: 'notes.drained' })
+      const carried = extra.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...extra] }
+      // A prompt is no new work, so there is no cadence lane here: only a check armed at load fires, and
+      // it never changes what the prompt carries — so a reload and one line of typing audit the session.
+      armedCheck()
+      return next(carried)
     } catch {
       return next(e)
     }
@@ -640,9 +664,9 @@ export function register(on: On): void {
         await openPane()
         return { text: 'ContextSaver: demo wasters loaded' }
       }
-      if (sub === 'debug') return { text: debugDump(state) }
+      if (sub === 'debug') return { text: debugDump(state, armedSpoke) }
       if (sub === 'reset') {
-        dispatch({ type: 'reset' })
+        resetSession()
         return { text: 'ContextSaver: session state reset' }
       }
       return { text: SAVER_USAGE }
@@ -654,7 +678,7 @@ export function register(on: On): void {
   on('command.run', { command: ['clear', 'resume'] }, async ($, e, next) => {
     const result = await next(e)
     try {
-      dispatch({ type: 'reset' })
+      resetSession()
     } catch {
       // the command ran either way: it is not ours to run a second time
     }

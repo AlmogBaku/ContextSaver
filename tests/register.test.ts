@@ -686,6 +686,7 @@ describe('register', () => {
     let forks = 0
     on('session.messages', () => ({ value: joinedTranscript }))   // three calls: under JUDGE_MIN_ROWS
     on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
     on('model.fork', () => {
       forks += 1
       return { value: forkAnswer(SUITE_REPLY) }
@@ -694,10 +695,128 @@ describe('register', () => {
     await $.session.start(SESSION)
     await $.turn.start({ text: 'carry on', turnId: 'later' })
     await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await $.prompt.submit(promptSubmit('carry on then'))
     await world.clock.settle()
 
     expect(forks, 'three rows are no ledger to judge: the session keeps today\'s cadence').toBe(0)
     expect(world.toasts).toEqual([])
+  })
+
+  // The person reloads the plugin and types: no tool call has run yet, so the prompt itself is the first
+  // warm opportunity the armed check gets. A prompt is not new work, so it fires nothing else.
+  test('the next prompt the person types fires the check a load armed', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('model.fork', () => {
+      forks += 1
+      return { value: forkAnswer(SUITE_REPLY) }
+    })
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await $.prompt.submit(promptSubmit('now fix the token refresh'))
+    await world.clock.settle()
+
+    expect(forks, 'one run over the history the load adopted, from the prompt alone').toBe(1)
+    expect(world.logs.join(' '), 'and it is the armed check, not a cadence a prompt invented')
+      .toContain('· from load')
+    expect(world.toasts, 'answered out loud, like the check nobody had to type').toEqual(['ContextSaver: 1 new waster'])
+    expect(world.opened.map(pane => pane.id), 'and the finding is put in front of the person').toEqual(['saver'])
+
+    await $.prompt.submit(promptSubmit('and now the tests'))
+    await world.clock.settle()
+
+    expect(forks, 'the run that answered spent the arming: a prompt is no cadence of its own').toBe(1)
+  })
+
+  test('a /saver prompt and a plugin\'s own prompt fire no armed check', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('model.fork', () => {
+      forks += 1
+      return { value: forkAnswer(SUITE_REPLY) }
+    })
+
+    await $.session.start(SESSION)
+
+    await $.prompt.submit(promptSubmit('/saver check'))
+    await world.clock.settle()
+    expect(forks, 'the command path runs its own check: the hook skips what it does not own').toBe(0)
+
+    await $.prompt.submit({ ...promptSubmit('judge this session'), origin: { kind: 'plugin', name: 'other' } })
+    await world.clock.settle()
+    expect(forks, 'a prompt of another plugin is not the person typing').toBe(0)
+
+    await $.prompt.submit(promptSubmit('carry on'))
+    await world.clock.settle()
+    expect(forks, 'the arming was live all along: the person\'s own prompt fires it').toBe(1)
+  })
+
+  // A check that fails silently reads exactly like one that never ran. The arming survives every failure,
+  // so the toast is bounded rather than muted: the first failure speaks, the retries do not.
+  test('an armed check that fails says so once, then the run that answers speaks for itself', async ($, on) => {
+    const world = startsSaver(on)
+    const replies: (ModelForkResult | null)[] = [null, null, forkAnswer(SUITE_REPLY)]
+    let forks = 0
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return { value: replies.shift() ?? null }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(world.toasts, 'the first failure names itself, so the reload is not a silence')
+      .toEqual(['ContextSaver: could not check yet — cold snapshot'])
+    expect((await $.command.run(saverRun('debug'))).text, 'and the dump says a check is still waiting')
+      .toContain('armed check: pending · reported')
+
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(world.toasts, 'the retry is quiet: one failure is the whole report').toHaveLength(1)
+
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks).toBe(3)
+    expect(world.toasts.at(-1), 'and the run that answered says what it found').toBe('ContextSaver: 1 new waster')
+    expect((await $.command.run(saverRun('debug'))).text, 'the arming is spent').toContain('armed check: spent')
+  })
+
+  test('a reset lets the next session speak for its own armed check', async ($, on) => {
+    const world = startsSaver(on)
+    on('session.messages', () => ({ value: transcriptOf(JOINED_CALLS) }))
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: null }))   // cold at every opportunity
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(world.toasts, 'two failures, one report').toEqual(['ContextSaver: could not check yet — cold snapshot'])
+
+    await $.command.run(saverRun('reset'))
+    await $.session.start(SESSION)   // the transcript is adopted again, and a check armed again
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(world.toasts, 'the flag went with the state it belonged to')
+      .toEqual(['ContextSaver: could not check yet — cold snapshot', 'ContextSaver: could not check yet — cold snapshot'])
   })
 
   // The snapshot can still be cold at the first opportunity, and a run that reported nothing is no audit:
@@ -719,13 +838,15 @@ describe('register', () => {
     await world.clock.settle()
 
     expect(forks, 'the first opportunity forked').toBe(1)
-    expect(world.toasts, 'a cold snapshot says nothing: it is retried, not failed').toEqual([])
+    expect(world.toasts, 'a cold snapshot is named once, since it is retried rather than failed')
+      .toEqual(['ContextSaver: could not check yet — cold snapshot'])
 
     await $.tool.call({ tool: 'Bash', command: 'bun test' })
     await world.clock.settle()
 
     expect(forks, 'the arming survived the cold fork').toBe(2)
-    expect(world.toasts, 'and the run that answered is the one that speaks').toEqual(['ContextSaver: 1 new waster'])
+    expect(world.toasts.at(-1), 'and the run that answered is the one that says what it found')
+      .toBe('ContextSaver: 1 new waster')
 
     await $.tool.call({ tool: 'Bash', command: 'bun test' })
     await world.clock.settle()

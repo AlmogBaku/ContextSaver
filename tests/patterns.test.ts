@@ -345,6 +345,11 @@ describe('patterns', () => {
     const answered = reduce(cold, done(null))
     expect(answered.pendingCheck, 'a run that answered audited the session').toBe(false)
     expect(reduce(armed, { type: 'reset' }).pendingCheck, 'and a cleared session has no history to audit').toBe(false)
+    // Whether a check is waiting, and whether the load lane already spent its one failure toast: a
+    // silent armed check must never again be indistinguishable from one that never fired.
+    expect(debugDump(armed), 'armed and not yet reported on').toContain('armed check: pending · not yet reported')
+    expect(debugDump(armed, true), 'armed and already reported once').toContain('armed check: pending · reported')
+    expect(debugDump(answered, true), 'and the arming is spent').toContain('armed check: spent')
   })
 
   test('judge.done drops a card whose pattern the registry no longer carries', async () => {
@@ -676,7 +681,7 @@ describe('patterns', () => {
       judge: { ...seedState().judge, last: { returned: 8, kept: 1, dropped: Array.from({ length: 7 }, (_, i) => `execution:waster-${i}: dropped`), usage: { input: 900, output: 300, cacheRead: 0, cacheCreate: 96_000 } } },
     })
     expect(debugDump(crowded).split('\n').length, 'sixty patterns and six reasons still fit the forty').toBeLessThanOrEqual(40)
-    expect(debugDump(crowded)).toContain('… 43 more patterns')
+    expect(debugDump(crowded)).toContain('… 44 more patterns')
   })
 
   test('reduce never mutates the state it is given', async () => {
