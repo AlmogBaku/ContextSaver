@@ -1,6 +1,7 @@
 import type { ModelForkResult, On, PaneOpenArgs, RenderElement } from 'claude-code'
 
 import { adoptRows } from './core/adopt'
+import { demoPatterns, demoRows } from './core/demo'
 import { buildPrompt, costOf, merge, parseReply, shouldRun } from './core/judge'
 import { rowOf } from './core/ledger'
 import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce, toStored } from './core/patterns'
@@ -203,9 +204,19 @@ export function register(on: On): void {
     host?.toast(`Trying "${a.title}" for this session`)
   }
 
+  // `autoFocus` only lands where the site takes the keyboard fresh, and the press that opened the field
+  // left the ring on the Steer button: the ring is moved by hand, and a refusal is no error of the user's.
+  const focusSteerField = (patternId: string): void => {
+    if (state.steering !== patternId) return
+    void host?.focusElement({ requestId: PANE_ID, key: `card:${patternId}:text` }).catch(() => undefined)
+  }
+
   const actions: Actions = {
     keep: patternId => decide(patternId, 'keep'),
-    steer: patternId => dispatch({ type: 'steer.begin', patternId }),
+    steer: patternId => {
+      dispatch({ type: 'steer.begin', patternId })
+      focusSteerField(patternId)
+    },
     steerDraft: text => dispatch({ type: 'steer.draft', text }),
     steerSubmit: (patternId, text) => steerSubmit(patternId, text),
     kill: patternId => decide(patternId, 'kill'),
@@ -233,6 +244,7 @@ export function register(on: On): void {
         log: text => $.ui.log(text),
         openPane: args => $.ui.open(args),
         closePane: args => $.ui.close(args),
+        focusElement: args => $.ui.focus(args),
         registerCommand: spec => $.command.register(spec),
         usage: args => $.session.usage(args),
         messages: () => $.session.messages(),
@@ -422,6 +434,18 @@ export function register(on: On): void {
         if (patternId === undefined || text === '') return { text: STEER_USAGE }
         steerSubmit(patternId, text)
         return { text: `ContextSaver: Claude will be told — ${text}` }
+      }
+      if (sub === 'demo' && isDebug) {
+        // Debug-only: the pane's own look, without waiting for a real finding.
+        for (const row of demoRows(state.turn)) dispatch({ type: 'row', row })
+        const patterns = demoPatterns(state.turn)
+        const fresh = patterns.filter(p => p.decision === null).map(p => p.id)
+        dispatch({
+          type: 'judge.done', patterns, fresh, recurred: [], focus: null, spent: 0, error: null,
+          returned: patterns.length, kept: patterns.length, dropped: [],
+        })
+        await openPane()
+        return { text: 'ContextSaver: demo wasters loaded' }
       }
       if (sub === 'debug') return { text: debugDump(state) }
       if (sub === 'reset') {

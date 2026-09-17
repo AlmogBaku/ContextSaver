@@ -6,6 +6,8 @@ import type {
   SessionMessage,
   SessionUsage,
   SessionUsageArgs,
+  UiFocusArgs,
+  UiFocusResult,
 } from 'claude-code'
 
 /** Host table: one lambda per `$.noun.verb` call, bound in session.start. */
@@ -22,6 +24,8 @@ export type Host = {
   openPane(args: PaneOpenArgs): Promise<void>
   /** $.ui.close(args) — close the named pane. */
   closePane(args: PaneCloseArgs): Promise<void>
+  /** $.ui.focus(args) — move a site's focus ring onto one of this plugin's elements. */
+  focusElement(args: UiFocusArgs): Promise<UiFocusResult>
   /** $.command.register(spec) — register a slash command. */
   registerCommand(spec: CommandSpec): Promise<{ command: string }>
   /** $.session.usage(args?) — read context window usage. */

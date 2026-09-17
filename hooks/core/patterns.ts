@@ -1,5 +1,5 @@
 import { baseline, costOf, rowsOf } from './evidence'
-import { duration, instructionOf, killPrompt, median, pctOf } from './text'
+import { duration, instructionOf, killPrompt, kilo, median, pctOf } from './text'
 import {
   ALTERNATIVE_MAX, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF,
   KEY_MAX, KIND_MAX, MAX_PATTERNS, ROW_CAP, SAMPLE_CAP, SETTLE_TURNS, initialState,
@@ -268,7 +268,8 @@ const statsOf = (p: Pattern, state: State): string => {
     `${p.hits.length}×`,
     ...(pct > 0 ? [`~${pct}% context`] : []),
     ...(cost.ms > 0 ? [duration(cost.ms)] : []),
-    ...(first === undefined || last === undefined ? [] : [`turns ${first}…${last}`]),
+    // One turn is not a range: 'turns 1…1' reads as a bug.
+    ...(first === undefined || last === undefined ? [] : [first === last ? `turn ${first}` : `turns ${first}…${last}`]),
   ].join(' · ')
 }
 
@@ -276,13 +277,14 @@ const evidenceOf = (p: Pattern, state: State): string[] => {
   const rows = rowsOf(state, p).map(r => ({
     turn: r.turn,
     seq: r.seq,
-    text: `r${r.seq} · turn ${r.turn} · ${r.tool} ${shortKey(r)} · ${duration(r.ms)} · ${r.chars}ch · "${r.head}"`,
+    // Short and rounded, and the tool's own name is already in the key: the card is 40 cells wide.
+    text: `r${r.seq} · t${r.turn} · ${shortKey(r)} · ${duration(r.ms)} · ${kilo(r.chars)} · "${r.head}"`,
   }))
   const turns = p.hits
     .map(turnHandle)
     .map(n => (n === null ? undefined : state.turns.find(t => t.turn === n)))
     .filter((t): t is TurnStat => t !== undefined)
-    .map(t => ({ turn: t.turn, seq: 0, text: `turn ${t.turn} · no tool calls · ${t.answerChars}ch · "${t.answerHead}"` }))
+    .map(t => ({ turn: t.turn, seq: 0, text: `t${t.turn} · no tool calls · ${kilo(t.answerChars)} · "${t.answerHead}"` }))
   return [...rows, ...turns].sort((a, b) => b.turn - a.turn || b.seq - a.seq).slice(0, 3).map(q => q.text)
 }
 

@@ -3,7 +3,7 @@ import type { Elements } from 'claude-code'
 export const PLUGIN_NAME = 'contextsaver'
 export const PANE_ID = 'saver'
 export const PANE_TITLE = 'ContextSaver'
-export const PANE_INLINE_ROWS = 14            // body rows requested when seated inline above the prompt
+export const PANE_INLINE_ROWS = 18            // body rows requested when seated inline above the prompt (the compact card is framed)
 export const AUTO_OPEN_MIN_COLUMNS = 144      // unasked opens wait undrawn below this width (d.ts 1943-1945)
 export const COMMAND = { name: 'saver', description: 'ContextSaver: toggle the pane · check | steer <text> | debug | reset', argumentHint: '[check | steer <text> | debug | reset]' } as const
 export const SETTLE_TURNS = 2                 // an instruction not ignored for this many turns is credited

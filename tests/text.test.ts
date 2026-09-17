@@ -5,6 +5,7 @@ import {
   gauge,
   instructionOf,
   killPrompt,
+  kilo,
   median,
   pctLeft,
   pctOf,
@@ -54,6 +55,12 @@ describe('text', () => {
 
   test('duration formats minutes and seconds', ($, _on) => {
     expect(duration(230000)).toBe('3m 50s')
+  })
+
+  test('kilo rounds a count short', ($, _on) => {
+    expect(kilo(800)).toBe('800')
+    expect(kilo(9_900)).toBe('9.9k')
+    expect(kilo(24_000)).toBe('24k')
   })
 
   test('slug produces kebab-case at most 40 chars', ($, _on) => {
