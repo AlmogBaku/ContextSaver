@@ -9,13 +9,8 @@
 </div>
 
 A Claude Code plugin that catches Claude repeating wasteful behaviour in your session and lets you stop
-it with one click. For example:
-
-- Running the full test suite after every one-line edit.
-- Reading the same file for the fourth time.
-- Dumping a 2,000-line log into the context to find one traceback.
-- Retrying the same failing command without reading the error.
-- Two subagents editing the same file.
+it with one click. Things like running the full test suite after every one-line edit, reading the same
+file for the fourth time, or dumping a 2,000-line log into the context to find one traceback.
 
 <p align="center">
   <img src="docs/screenshot.png" width="880"
