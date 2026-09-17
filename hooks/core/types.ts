@@ -5,7 +5,7 @@ export const PANE_ID = 'saver'
 export const PANE_TITLE = 'ContextSaver'
 export const PANE_INLINE_ROWS = 18            // body rows requested when seated inline above the prompt (the compact card is framed)
 export const AUTO_OPEN_MIN_COLUMNS = 144      // unasked opens wait undrawn below this width (d.ts 1943-1945)
-export const COMMAND = { name: 'saver', description: 'ContextSaver: toggle the pane · check | steer <text> | debug | reset', argumentHint: '[check | steer <text> | debug | reset]' } as const
+export const COMMAND = { name: 'saver', description: 'ContextSaver: toggle the pane · check | steer [n] <text> | keep <n> | kill <n> | debug | reset', argumentHint: '[check | steer [n] <text> | keep <n> | kill <n> | debug | reset]' } as const
 export const SETTLE_TURNS = 2                 // an instruction not ignored for this many turns is credited
 export const JUDGE_MIN_NEW_TOKENS = 30_000
 export const JUDGE_MIN_TURNS = 3
@@ -20,13 +20,16 @@ export const ROW_CAP = 2000
 export const KIND_MAX = 120
 export const ALTERNATIVE_MAX = 200
 export const KEY_MAX = 200
-export const SAMPLE_CAP = 30                  // usage samples kept (State.usageSamples: "last 30")
 export const DEBUG_MAX_LINES = 40             // `/saver debug` ceiling
 export const DEBUG_MAX_PATTERNS = 20          // pattern lines `/saver debug` prints before folding the rest
 export const DEBUG_MAX_DROPPED = 6            // dropped-finding reasons `/saver debug` and the debug log print
 export const BRIEF_TOOLS = 'Read, Grep, Glob' // the tools an agent brief allows when the proposal names none
+export const FILE_TOOLS: readonly string[] = ['Read', 'Edit', 'Write', 'NotebookEdit']   // tools whose ledger key is the path they touched
 export const CLAUDE_MD_HEADING = '## ContextSaver'
 export const RECOVERED_FLAG = 'recovered'     // `Row.flags` marker for a row rebuilt from the transcript: its `ms` is 0 and its agent reads `main`
+export const MAIN_AGENT = 'main'              // `Row.agent` of the main loop; the alias table leaves it as it is
+export const NO_CALLS = 'no tool calls'       // `Evidence.what` of a turn handle: that turn ran none
+export const CARD_EVIDENCE = 3                // cited calls one card's details show, newest first
 
 export type CommandClass = 'test' | 'lint' | 'format' | 'typecheck' | 'build' | 'install' | 'git' | 'read' | 'search' | 'other'
 export type Category = 'execution' | 'reading' | 'production' | 'behavior' | 'communication' | 'multi-agent' | 'environment' | 'process' | 'other'
@@ -76,7 +79,26 @@ export type Pattern = StoredPattern & {
 /** What one judge run reported: findings returned, findings kept, and one short reason per drop. */
 export type JudgeRun = { returned: number; kept: number; dropped: readonly string[] }
 
-export type Card = { patternId: string; kind: string; stats: string; why: string; fix: string; killText: string; evidence: string[] }   // evidence: ≤3 quotes built from the cited rows/turns
+/** One cited call (or turn) as the details render it: what ran, in which loop, what it cost, what it answered. */
+export type Evidence = {
+  turn: number
+  what: string             // the command for Bash, the path for a file tool, `tool key` otherwise; NO_CALLS for a turn handle
+  agent: string | null     // the loop's alias (a1, a2…), null when it was the main loop's own call
+  ms: number               // 0 when nothing measured it (a turn handle, a recovered row)
+  chars: number            // in-context size of the result, or of the turn's answer
+  head: string             // the first line of what came back, quoted under the call; '' when there is none
+}
+/** One waster as the pane draws it: the behaviour, the stats, the fix, and the receipts behind `i`. */
+export type Card = {
+  patternId: string
+  n: number                // 1-based seat in the pane's list, top to bottom
+  kind: string
+  stats: string
+  why: string
+  fix: string
+  total: { unit: 'calls' | 'turns'; calls: number; ms: number; chars: number }   // cited calls, their wall time and their context; `unit: 'turns'` when the pattern cites turns instead, so `calls` counts turns and `chars` is the per-turn estimate
+  evidence: readonly Evidence[]                          // ≤ CARD_EVIDENCE cited calls, newest first
+}
 export type Artifact = { patternId: string; kind: ArtifactKind; title: string; path: string; content: string; savingPct: number; mode: 'append' | 'write' | 'merge-settings' }
 export type Usage = { tokens?: number; window: number; percent?: number; compactAt?: number }
 
@@ -87,7 +109,6 @@ export type State = {
   rows: Row[]                      // capped at ROW_CAP (oldest dropped)
   turns: TurnStat[]
   usage: Usage
-  usageSamples: { turn: number; percent: number }[]   // one per main turn, last 30; feeds the header sparkline
   overhead: { memory: number; mcp: number; agents: number } | null
   compactions: number[]            // turn indices at which session.compact fired
   patterns: Pattern[]
@@ -106,7 +127,7 @@ export type State = {
 }
 
 export const initialState = (cwd: string, window: number): State => ({
-  cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, usageSamples: [], overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
+  cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
   judge: { lastAtTokens: 0, lastAtTurn: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, last: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
@@ -153,7 +174,6 @@ export type Actions = {
 /** View models: computed by patterns.ts from State, rendered by ui.tsx. Keeps the UI free of state logic. */
 export type Header = {
   percent: number | null            // context used, 0..100
-  spark: number[]                   // percent per recent turn, for the sparkline
   tokensToCompaction: number | null // exact: threshold - tokens
   turnsToCompaction: number | null  // estimate at the recent pace
   judgeRuns: number
@@ -163,7 +183,15 @@ export type Header = {
   savedPct: number
   savedMs: number
 }
-export type DecidedRow = { patternId: string; choice: Choice; kind: string; savedPct: number | null; ignored: number }
+export type DecidedRow = {
+  patternId: string
+  choice: Choice
+  kind: string
+  savedPct: number | null   // what one avoided repeat is worth; a rate until `settled`, a credit after it
+  settled: boolean          // the instruction was neither ignored nor still in flight, so the saving is real
+  instruction: string | null   // the sentence the user sent, when it is not the fix the card offered
+  ignored: number
+}
 export type PaneModel = {
   header: Header
   wasters: Card[]                   // undecided patterns, newest first

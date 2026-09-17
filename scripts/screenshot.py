@@ -118,7 +118,9 @@ def page(lines: list[str], cols: int, title: str) -> str:
   .bar{{height:38px;display:flex;align-items:center;gap:8px;padding:0 14px;color:#6c7086;font:13px -apple-system,Segoe UI,sans-serif}}
   .dot{{width:12px;height:12px;border-radius:50%}}
   .t{{flex:1;text-align:center;margin-right:52px}}
-  pre{{margin:0;padding:6px 18px 0;font:14px/1.3 "DejaVu Sans Mono","Noto Sans Mono",monospace;color:{FG_DEFAULT};white-space:pre}}
+  /* FreeMono is the only installed monospace covering the transcript elbow U+23BF: without it that row
+     falls back to a proportional font, shifts by about a cell, and the card borders look doubled. */
+  pre{{margin:0;padding:6px 18px 0;font:14px/1.3 "DejaVu Sans Mono","FreeMono","Noto Sans Mono",monospace;color:{FG_DEFAULT};white-space:pre}}
 </style>
 <div class="win"><div class="bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="t">{html.escape(title)}</span></div><pre>{body}</pre></div>'''
 

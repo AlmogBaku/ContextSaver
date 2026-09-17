@@ -1,10 +1,10 @@
 <div align="center">
 
-<h1><img src="logo-render.png" alt="" width="38" align="center"> &nbsp;ContextSaver</h1>
+<h1><img src="assets/logo.png" alt="" width="38" align="center"> &nbsp;ContextSaver</h1>
 
 **Stop Claude Code from wasting tokens doing useless shit, in realtime.**
 
-[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-166%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-173%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
@@ -19,7 +19,7 @@ ContextSaver logs every tool call, then asks the model one question: **what has 
 more than once that was a waste, and what should it do instead?** The answers land in a pane next to
 your transcript, with three buttons.
 
-<!-- Placeholder. Replace with a real capture:
+<!-- A real 160-column capture of `/saver demo`:
      tmux capture-pane -e -p -t <session> | python3 scripts/screenshot.py docs/screenshot.png --cols 160 -->
 <p align="center">
   <img src="docs/screenshot.png" width="880"
@@ -67,6 +67,20 @@ the turn that is already running.
 - **It never touches your work.** No tool is ever denied, no output trimmed, no error hidden. If a hook
   throws, the session carries on as if the plugin weren't there.
 
+## What it catches
+
+- The full suite after every one-line edit, and the typecheck that reruns when nothing changed.
+- The same file read again, or 2,000 lines read where one grep would have done it.
+- Raw command output dumped into the window instead of filtered where it was produced.
+- The same failing command retried three times without anyone reading the error.
+- A whole file rewritten to change three lines.
+- Four subagents reading the same files, two of them editing the same one.
+- The plan narrated again instead of the work getting done.
+- The work redone from scratch after a compaction.
+
+None of that is hardcoded. It is what the model has named so far, and it names whatever repeats in
+*your* session.
+
 ## How it works
 
 ContextSaver is a **Claude Mod** — a plugin built on function hooks, Claude Code's newest extension
@@ -82,10 +96,13 @@ For you, it goes like this.
    for the third time is. Only behaviours that already repeated ever reach you.
 3. **A card shows up in the pane, next to your transcript.** What Claude keeps doing, what it has cost
    you so far — how many times, how much of your context, how much of your life — and what it should be
-   doing instead. Press `i` for the receipts: the exact calls behind the claim.
+   doing instead. Press `i` for the receipts: the reasoning in full, then every call behind the claim —
+   the turn, the command or file, the loop it ran in, its seconds and its size, and the first line of
+   what came back. Each card is numbered, so `/saver keep 2` decides the one you are looking at.
 4. **You press one of three buttons.** *Keep* if you don't care, and it never mentions it again. *Steer*
    to type what Claude should do instead, the field pre-filled with the suggestion. *Kill* to send that
-   suggestion as it stands.
+   suggestion as it stands. The pane's last line names the same three verbs for the keyboard —
+   `/saver keep|steer|kill <n>` — because the composer keeps the Tab ring.
 5. **Claude changes course in the turn that's already running.** Your words reach it on its very next
    tool result, and ride along with every prompt after that, so it doesn't quietly drift back after a
    compaction. Nothing is blocked, nothing is denied, nothing waits on you.
@@ -108,7 +125,9 @@ architecture, and the judge's prompt, are in [`docs/SPEC.md`](docs/SPEC.md).
 |---|---|
 | `/saver` | Shows or hides the pane. |
 | `/saver check` | Runs the judge now instead of waiting for the cadence. |
-| `/saver steer <text>` | Sends an instruction for the open (or newest) waster — the multi-line way to steer, from the composer. |
+| `/saver steer [n] <text>` | Sends an instruction for card `n` — a leading number is always read as the card the pane draws, and without one it is the waster whose Steer field is open, else card 1. The multi-line way to steer, from the composer. |
+| `/saver keep <n>` | Keeps card `n`: nothing is sent, and it stays quiet for the session. |
+| `/saver kill <n>` | Kills card `n`: sends the fix as a stop instruction. |
 | `/saver debug` | Dumps the whole session state: rows, patterns, decisions, the judge's runs and cost, usage, savings. |
 | `/saver reset` | Clears this session's ledger and decisions; the pattern registry survives. |
 
@@ -134,7 +153,7 @@ architecture, and the judge's prompt, are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ```sh
 git clone https://github.com/AlmogBaku/ContextSaver && cd ContextSaver
-./scripts/check.sh                                          # validate --strict, typecheck, 166 tests
+./scripts/check.sh                                          # validate --strict, typecheck, 173 tests
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .    # run with the plugin loaded from this folder
 ```
 
@@ -154,46 +173,24 @@ collapse control `[-]` over the last cells of that row.
 
 With `CONTEXTSAVER_DEBUG` set, `/saver demo` fills the pane with three sample wasters from
 `hooks/core/demo.ts` — two awaiting a decision, one already steered so the decisions and the rules draw
-too — and opens it, so the design can be looked at without waiting for a real finding. Nothing is sent
-to Claude and nothing is written; without the flag the command is not there.
+too — against a sample usage and three sample turns, so the header's gauge and its run to compaction draw
+as well, and opens it, so the design can be looked at without waiting for a real finding. One sample call
+ran inside a subagent, which is where the pane's `a1` loop column comes from. Nothing is sent to Claude
+and nothing is written; without the flag the command is not there.
+
+Subagent loops are named `a1`, `a2`… in order of first appearance — in the pane's evidence and in the
+ledger the judge reads. The rows keep the real agent id, so matching stays stable; nobody has to read
+`toolu`-style hashes to see which loop ran a call.
+
+The pane's one accent is the theme key `suggestion` (rgb(87,105,247), ansi blue), on the newest card's
+border, a live waster's `●`, the gauge's fill and the band's `n new`. Everything else is default text or
+dim. The engine has no `accent` key, and `Button` has no `color` prop, so the verbs take their tone from
+the surface. The whole drawing contract is Appendix D of the spec.
 
 The build spec — architecture, module contracts, the judge prompt, the design brief, the UX
 walkthrough — is [`docs/SPEC.md`](docs/SPEC.md); the product spec it implements is
 [`docs/PRD.md`](docs/PRD.md).
 
-## Theme
+## License
 
-The pane's one accent is the theme key `suggestion` (rgb(87,105,247), ansi blue) — the engine has no
-`accent` key; `suggestion` carries the same value as `permission` and the engine's own
-`rate_limit_fill`. It is used on the newest waster's card border, a live waster's `●`, the gauge's
-filled cells and the band's `n new`; `ButtonProps` (641-706) carries `dimColor` and `hover` and **no
-`color`**, and one unknown prop blanks the whole pane, so the verbs, `Check now` and `Write` take their
-tone from the surface — default at rest, inverted under the focus or the pointer. The accent marks the
-block the eye must land on rather than the words inside it, and the spec says so (§5.5 item 1). The
-d.ts enumerates no colour names at all (`TextProps.color` is "a theme key or a raw color", and the only
-keys it ever names are `promptBorder`, `inactive` and `permission`), so there is no documented `warning`
-or `error` key: the gauge's fill is the accent at every level rather than changing colour as the context
-fills.
-
-Every other waster's card is drawn with `borderDimColor`, which is the whole hierarchy of the list: the
-eye lands on the accent frame first. The header, the empty state and the footer carry no rules or
-frames — a blank row separates blocks, and the surface already frames the pane.
-
-The header, the decided rows and the rules are indented to the cards' content column (`paddingX = 1 +
-1 + CARD_PAD`), so every value in the pane — a header label, a card title, a decision, a rule — starts
-at one x. The gauge is the spec's 16 cells and gives cells back only when the row cannot hold them. The
-glyph set is closed and nothing does double duty: `→` prefixes a card's fix row and labels `kill →`,
-`↪` means steered in DECIDED, `›` is the Steer field.
-
-Inline, the drawing is budgeted against the seat the surface granted (`min(site.maxRows,
-PANE_INLINE_ROWS)`), never against a constant: the header's rows, then the card's border, title, verbs
-and open field, and what is left is the card's content — one row per value and one evidence quote with
-`i` open, else the stats and the fix — with the remainder folding the wasters behind it. The verbs and
-the field are drawn above the content, so a seat smaller than the drawing costs detail, never a verb.
-
-The pane's layout numbers (the 10-cell gutter, the gauge and sparkline cells, the cells reserved for a
-Button at a row's right edge, the rows each block spends, the glyph set, the copy strings) live at the
-top of `hooks/ui.tsx` rather than in `hooks/core/types.ts`: they are private to this drawing and
-`types.ts` is the shared contract, which carries no cells. Constants that more than one module reads —
-the sample and debug caps, the CLAUDE.md heading, the agent brief's default tools — do live in
-`types.ts`.
+MIT © Almog Baku. See [LICENSE](LICENSE).

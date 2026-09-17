@@ -303,7 +303,8 @@ describe('register', () => {
     await world.clock.settle()
 
     const steered = await $.command.run(saverRun('steer  run only the covering tests'))
-    expect(steered.text).toBe('ContextSaver: Claude will be told — run only the covering tests')
+    expect(steered.text, 'the reply names the card it decided')
+      .toBe(`ContextSaver: card 1 — "Claude keeps running the whole bun test suite after every s…" · Claude will be told: run only the covering tests`)
     expect(world.toasts.join(' ')).toContain('ContextSaver: Claude will be told — run only the covering tests')
 
     await $.prompt.submit(promptSubmit('now fix the token refresh'))
@@ -318,7 +319,75 @@ describe('register', () => {
     await $.prompt.submit(promptSubmit('/saver debug'))
     expect(submitted[2], 'a prompt that is a /saver command carries nothing').toBeUndefined()
 
-    expect((await $.command.run(saverRun('steer'))).text).toContain('Usage: /saver steer <instruction>')
+    expect((await $.command.run(saverRun('steer'))).text, 'the one card was decided, so there is nothing left to steer')
+      .toBe('ContextSaver: nothing to decide on')
+  })
+
+  test('/saver steer takes the number the pane draws beside the card', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(TWO_REPLY) }))
+
+    await $.session.start(SESSION)
+
+    expect((await $.command.run(saverRun('keep 1'))).text, 'nothing has been found yet').toBe('ContextSaver: nothing to decide on')
+    expect((await $.command.run(saverRun('steer do less'))).text).toBe('ContextSaver: nothing to decide on')
+
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    // The judge reported the suite first, so the pane draws it as card 1 and the log as card 2.
+    expect((await $.command.run(saverRun('debug'))).text).toContain(`cards 2: ${SUITE_ID}, ${LOG_ID}`)
+    expect((await $.command.run(saverRun('keep 3'))).text, 'a number no card wears says so')
+      .toBe('ContextSaver: no card 3 (1–2)')
+    expect((await $.command.run(saverRun('kill nonsense'))).text)
+      .toBe('Usage: /saver [check | steer [n] <text> | keep <n> | kill <n> | debug | reset]')
+    expect((await $.command.run(saverRun('steer'))).text, 'a steer with no instruction is a usage question')
+      .toContain('Usage: /saver steer [n] <instruction>')
+
+    const steered = await $.command.run(saverRun('steer 2 read the log with a filter'))
+    expect(steered.text, 'a leading number picks the card and never lands in the instruction')
+      .toBe('ContextSaver: card 2 — "Claude keeps dumping the whole api log" · Claude will be told: read the log with a filter')
+    expect(world.toasts.join(' ')).toContain('ContextSaver: Claude will be told — read the log with a filter')
+
+    // One card left, so 9 is no card: a mistyped number is refused, never folded into the instruction.
+    const loose = await $.command.run(saverRun('steer 9 lives left in the suite'))
+    expect(loose.text, 'a number no card wears is a numbering mistake, not the first word')
+      .toBe('ContextSaver: no card 9 (1–1)')
+
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'the refused steer sent nothing, so the card is still waiting').toContain('cards 1')
+    expect(debug.text).toContain('sent "read the log with a filter"')
+    expect(debug.text, 'nothing garbled reached Claude').not.toContain('9 lives left in the suite')
+  })
+
+  test('/saver keep and kill decide by number and say which card they took', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(TWO_REPLY) }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    const kept = await $.command.run(saverRun('keep 1'))
+    expect(kept.text)
+      .toBe('ContextSaver: card 1 — "Claude keeps running the whole bun test suite after every s…" · kept')
+    expect(world.toasts.join(' ')).toContain('ContextSaver: kept "Claude keeps running the whole bun test suite')
+
+    // The kept card left the list, so the log is card 1 now: the numbers are the pane's, live.
+    const killed = await $.command.run(saverRun('kill 1'))
+    expect(killed.text).toBe('ContextSaver: card 1 — "Claude keeps dumping the whole api log" · told to stop')
+    expect(world.toasts.join(' ')).toContain('ContextSaver: told Claude to stop —')
+
+    const answered = await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    expect(answered.context?.join(' '), 'the kill rides the next tool result, as the pane\'s own Kill does')
+      .toContain('Stop this behaviour for the rest of the session')
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text).toContain('keep @ 1')
+    expect(debug.text).toContain('kill @ 1')
   })
 
   test('/saver toggles the pane, /clear resets the session and the store keeps the registry', async ($, on) => {
@@ -350,7 +419,8 @@ describe('register', () => {
     expect(debug.text, 'the session is empty again').toContain('turn 0 · seq 0 · rows 0 · turns 0')
     expect(debug.text, 'the registry survived, its evidence did not').toContain(`${SUITE_ID} · hits 0`)
     expect(debug.text).toContain('previous keep')
-    expect((await $.command.run(saverRun('nonsense'))).text).toBe('Usage: /saver [check | steer <text> | debug | reset]')
+    expect((await $.command.run(saverRun('nonsense'))).text)
+      .toBe('Usage: /saver [check | steer [n] <text> | keep <n> | kill <n> | debug | reset]')
     expect((await $.command.run(saverRun('reset'))).text).toBe('ContextSaver: session state reset')
   })
 

@@ -101,8 +101,12 @@ describe('rules', () => {
     expect(artifacts.map(a => a.patternId)).toEqual(['reading:unfiltered-log-dump', 'execution:full-suite-after-each-edit'])
     expect(artifacts.map(a => a.kind)).toEqual(['claude-md', 'claude-md'])
     expect(artifacts.map(a => a.savingPct)).toEqual([15, 3])
-    expect(artifacts[1]?.title).toBe('Running the whole bun test suite after every single-file edit')
+    // The label is the rule, not the waste: a row offering Write reads as the line it would write.
+    expect(artifacts[1]?.title).toBe('Run the full cycle only at the end of each phase')
+    expect(artifacts[1]?.title, 'never the behaviour the user asked Claude to stop').not.toContain('bun test suite')
     expect(artifacts[1]?.content).toBe('\n## ContextSaver\n- Run the full cycle only at the end of each phase.\n')
+    expect(artifacts[0]?.title, 'a kill is labelled by its scoped fix, first clause only')
+      .toBe('Run only the tests covering the files you changed')
     expect(artifacts[0]?.content).toBe(`\n## ContextSaver\n- ${killed.alternative}\n`)
     expect(artifacts[0]?.content).not.toContain('for the rest of the session')
     expect(artifacts[0]?.path).toBe('/repo/CLAUDE.md')

@@ -8,11 +8,13 @@ import type { Actions, PaneModel, Site, Ui } from '../hooks/core/types'
 import { awaitingPane } from './fixtures/ui/awaiting-pane'
 import { bandFull } from './fixtures/ui/band-full'
 import { bandQuiet } from './fixtures/ui/band-quiet'
+import { chattyPane } from './fixtures/ui/chatty-pane'
 import { checkingPane } from './fixtures/ui/checking-pane'
 import { decidedPane } from './fixtures/ui/decided-pane'
 import { draftPane } from './fixtures/ui/draft-pane'
 import { emptyPane } from './fixtures/ui/empty-pane'
 import { expandedPane } from './fixtures/ui/expanded-pane'
+import { manyWasters } from './fixtures/ui/many-wasters'
 import { millionPane } from './fixtures/ui/million-pane'
 import { overrunPane } from './fixtures/ui/overrun-pane'
 import { steeringPane } from './fixtures/ui/steering-pane'
@@ -90,6 +92,9 @@ const inputValueOf = (tree: unknown, key: string): unknown =>
   nodesOf(tree).find(node => node.type === 'Input' && node.props?.key === key)?.props?.value
 
 const holds = (tree: unknown, part: string): boolean => nodesOf(tree).some(node => textOf(node).includes(part))
+
+// A cited call is one Text of dim and plain segments, so it is read whole rather than segment by segment.
+const citedCalls = (tree: unknown): string[] => nodesOf(tree).map(textOf).filter(text => /^turn \d+ {2,}\S/.test(text))
 
 // Every framed block, outermost first: the cards and the empty state's own quiet frame.
 const framesOf = (tree: unknown): Node[] =>
@@ -242,10 +247,13 @@ describe('ui', () => {
 
     const tree = await $.ui.render(PANE_HOST)
 
-    expect(holds(tree, 'bun test suite')).toEqual(true)
+    expect(holds(tree, 'Claude keeps running the whole bun test'), 'the title wraps inside the width the seat leaves it').toEqual(true)
+    expect(holds(tree, 'suite after every single-file edit')).toEqual(true)
     expect(holds(tree, 'api logs')).toEqual(true)
-    expect(holds(tree, '3× · ~9% context')).toEqual(true)
-    expect(holds(tree, '2× · ~20% context')).toEqual(true)
+    expect(holds(tree, '3× · ~9% of context')).toEqual(true)
+    expect(holds(tree, '2× · ~20% of context')).toEqual(true)
+    expect(drawnRows(tree), 'each card wears the number the composer names it by').toContain('1')
+    expect(drawnRows(tree)).toContain('2')
     expect(drawnRows(tree), 'the fix is drawn behind its own glyph').toContain('→')
     expect(drawnRows(tree).some(row => row.startsWith(FIX.slice(0, 28))), 'the fix has a row of its own').toEqual(true)
     expect(keysOf(tree)).toEqual([
@@ -358,26 +366,57 @@ describe('ui', () => {
     expect(holds(tree, 'Judge 1 run · 7.4k')).toEqual(true)
   })
 
-  test('i opens why, fix, what Kill sends and the evidence in place', async ($, on) => {
+  test('i opens why, fix, the summary and the calls behind the claim', async ($, on) => {
     const clock = mock.clock(on)
     const { calls, actions } = recorder()
-    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
-      Pane({ ui: $.ui.resolve(e), model: expandedPane, site: PANE_SITE, placement: 'dock', actions }))
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      return Pane({ ui: resolved, model: expandedPane, site: WIDE_SITE, placement: 'dock', actions })
+    })
 
     const tree = await $.ui.render(PANE_HOST)
     const texts = drawnRows(tree)
 
     expect(texts).toContain('why')
     expect(texts).toContain('fix')
-    expect(texts).toContain('kill →')
-    expect(texts).toContain('evidence')
-    expect(holds(tree, '"Stop this behaviour for the rest')).toEqual(true)
-    expect(texts.filter(text => text.startsWith('r4') || text.startsWith('r5')).length).toEqual(3)
-    expect(holds(tree, '3× · ~9% context')).toEqual(false)
+    expect(texts, 'what Kill sends is the fix already on screen, so it has no row of its own').not.toContain('kill →')
+    expect(texts, 'one dim row says what the cited calls add up to').toContain('3 calls · 3m 12s · 72k chars of context')
+    expect(holds(tree, 'turn 8   bun test'), 'a cited call names its turn and what ran, nothing else').toEqual(true)
+    const cited = citedCalls(tree)
+    expect(cited, 'one row per cited call').toHaveLength(3)
+    expect(cited[0], 'the widest rung spells the unit of a size').toContain('1m 2s · 24k ch')
+    expect(cited[1], 'a call another loop made names that loop').toContain('   a1   ')
+    expect(cited[2], 'a main-loop call is not labelled with a loop').not.toContain('a1')
+    expect(new Set(cited.map(row => row.indexOf(' · 24k ch'))), 'the sizes are one column, however long the durations are')
+      .toEqual(new Set([cited[0]?.indexOf(' · 24k ch')]))
+    expect(holds(tree, '↳ "212 pass · 0 fail"'), 'the head of what came back is quoted under the call').toEqual(true)
+    expect(texts.filter(text => text.startsWith('↳ ')).length, 'a call that returned nothing is quoted no quote').toEqual(2)
+    expect(holds(tree, '3× · ~9% of context'), 'the stats row is what the details replace').toEqual(false)
+
+    // Narrow, the ladder drops the unit and then the loop's name; the turn, the command and the cost stay.
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the pane drew no elements')
+    const narrow = citedCalls(Pane({ ui, model: expandedPane, site: { bodyColumns: 40, maxRows: 30 }, placement: 'dock', actions }))
+    expect(narrow[0]).toContain('1m 2s · 24k')
+    expect(narrow[0], 'the unit is the first thing the row gives back').not.toContain('24k ch')
+    expect(narrow[1], 'then the loop it ran in').not.toContain('a1')
 
     await $.ui.press({ plugin: DRAWER, key: `card:${FIRST}:info` })
     await clock.settle()
     expect(calls).toEqual([{ name: 'info', arg: FIRST }])
+  })
+
+  test('the details of a behavioural finding count turns and its estimate per turn', async ($, on) => {
+    const { actions } = recorder()
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
+      Pane({ ui: $.ui.resolve(e), model: chattyPane, site: WIDE_SITE, placement: 'dock', actions }))
+
+    const tree = await $.ui.render(PANE_HOST)
+
+    expect(drawnRows(tree)).toContain('2 turns · ~1.2k tokens per turn')
+    expect(holds(tree, 'turn 15   no tool calls   6.1k answer')).toEqual(true)
+    expect(holds(tree, '↳ "To recap the plan')).toEqual(true)
   })
 
   test('Steer opens a field holding the fix, and the draft is drawn back', async ($, on) => {
@@ -397,7 +436,7 @@ describe('ui', () => {
     expect(keysOf(open)).toContain(`card:${FIRST}:text`)
     expect(inputValueOf(open, `card:${FIRST}:text`)).toEqual(FIX)
     expect(holds(open, 'Enter sends')).toEqual(true)
-    expect(holds(open, 'longer: /saver steer in the prompt')).toEqual(true)
+    expect(holds(open, 'longer: /saver steer <n> <text>')).toEqual(true)
     expect(keysOf(open)).toContain(`card:${FIRST}:keep`)
 
     const drafted = await $.ui.render(DRAFT_HOST)
@@ -475,7 +514,7 @@ describe('ui', () => {
 
     const ui: Ui | null = resolved
     if (ui === null) throw new Error('the pane drew no elements')
-    for (const model of [emptyPane, twoWasters, expandedPane, steeringPane, decidedPane, overrunPane, awaitingPane, millionPane]) {
+    for (const model of [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, millionPane, manyWasters]) {
       for (const columns of [40, 56, 70, 80, 100, 120]) {
         const site = { bodyColumns: columns, maxRows: 30 }
         const dock = Pane({ ui, model, site, placement: 'dock', actions })
@@ -489,6 +528,10 @@ describe('ui', () => {
         expect(overrun(band), `band ${columns} controls`).toEqual([])
       }
     }
+    // A seat of ten and up wears two digits: the cell they sit in keeps the space before the accent dot.
+    const deep = Pane({ ui, model: manyWasters, site: { bodyColumns: 80, maxRows: 30 }, placement: 'dock', actions })
+    const twelfth = nodesOf(deep).find(node => node.type === 'Box' && textOf(node) === '12')
+    expect(cellsOf(twelfth), 'a two-digit number is not flush against the dot').toBeGreaterThan('12'.length)
   })
 
   test('the inline pane is budgeted against the seat, and a verb is never what gets cut', async ($, on) => {
@@ -506,7 +549,7 @@ describe('ui', () => {
     if (ui === null) throw new Error('the pane drew no elements')
     // The worst case the seat ever holds: the details open behind i and the Steer field open under them.
     const busiest: PaneModel = { ...expandedPane, steering: expandedPane.expanded }
-    const models: PaneModel[] = [emptyPane, twoWasters, expandedPane, steeringPane, busiest, decidedPane]
+    const models: PaneModel[] = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, busiest, decidedPane, manyWasters]
     for (const model of models) {
       for (const seat of [14, 16, 18]) {
         for (const columns of [56, 100, 160]) {
@@ -589,7 +632,7 @@ describe('ui', () => {
     expect(holds(band, '133k to compaction')).toEqual(true)
     expect(cellsOf(band)).toBeLessThanOrEqual(BAND_PROPS.bodyColumns)
     expect(holds(pane, 'Context')).toEqual(true)
-    expect(holds(pane, 'bun test suite')).toEqual(true)
+    expect(holds(pane, 'Claude keeps running the whole bun test')).toEqual(true)
     expect(drawnRows(pane)).toContain('Keep')
     expect(cellsOf(pane)).toBeLessThanOrEqual(PANE_PROPS.bodyColumns)
   })

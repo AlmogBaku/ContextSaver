@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   collapseWs,
   duration,
+  fit,
   gauge,
   instructionOf,
   killPrompt,
@@ -10,8 +11,8 @@ import {
   pctLeft,
   pctOf,
   slug,
-  sparkline,
   stableJson,
+  tokensOf,
 } from '../hooks/core/text'
 import type { StoredPattern } from '../hooks/core/types'
 
@@ -99,16 +100,15 @@ describe('text', () => {
     )
   })
 
-  test('sparkline returns block characters scaled 0..100', ($, _on) => {
-    // 0 → ▁ (idx 0), 50 → ▅ (idx 4), 100 → █ (idx 7)
-    const result = sparkline([0, 50, 100], 3)
-    expect(result).toBe('▁▅█')
+  test('tokensOf counts four characters to the token', ($, _on) => {
+    expect(tokensOf(4_800)).toBe(1_200)
+    expect(tokensOf(0)).toBe(0)
   })
 
-  test('sparkline uses last width values', ($, _on) => {
-    // takes last 2: [100, 50] → █▅
-    const result = sparkline([0, 100, 50], 2)
-    expect(result).toBe('█▅')
+  test('fit truncates with an ellipsis and never leaves a space before it', ($, _on) => {
+    expect(fit('bun test', 8)).toBe('bun test')
+    expect(fit('bun test tests/auth.test.ts', 12)).toBe('bun test te…')
+    expect(fit('bun test the whole suite', 10)).toBe('bun test…')
   })
 
   test('gauge fills cells proportionally', ($, _on) => {

@@ -1,12 +1,28 @@
 import type { PaneModel } from '../../../hooks/core/types'
 import { twoWasters } from './two-wasters'
 
-/** The two wasters with one steered decision behind them and one rule proposed. */
+/** The two wasters with one settled steer behind them, one ignored kill, and one rule proposed. */
 export const decidedPane: PaneModel = {
   ...twoWasters,
   decided: [
-    { patternId: 'reading:re-read', choice: 'steer', kind: 're-reading src/auth.ts', savedPct: 1, ignored: 0 },
-    { patternId: 'process:plan-resummary', choice: 'kill', kind: 're-summarising the plan every turn', savedPct: 0, ignored: 1 },
+    {
+      patternId: 'reading:re-read',
+      choice: 'steer',
+      kind: 're-reading src/auth.ts',
+      savedPct: 1,
+      settled: true,
+      instruction: 'read src/auth.ts once and keep the summary',
+      ignored: 0,
+    },
+    {
+      patternId: 'process:plan-resummary',
+      choice: 'kill',
+      kind: 're-summarising the plan every turn',
+      savedPct: 0,
+      settled: false,
+      instruction: null,
+      ignored: 1,
+    },
   ],
   artifacts: [
     {

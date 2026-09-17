@@ -25,9 +25,16 @@ export const duration = (ms: number): string => {
   return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`
 }
 
+/** Returns what a length of text costs in tokens, four characters to one. */
+export const tokensOf = (chars: number): number => Math.round(chars / 4)
+
 /** Formats a count short and rounded: '9.9k', '41k', '800'. */
 export const kilo = (n: number): string =>
   n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${Math.round(n / 100) / 10}k` : `${n}`
+
+/** Truncates text to `cells` characters, ending it with '…' when it is cut and never a space before it. */
+export const fit = (text: string, cells: number): string =>
+  text.length <= cells ? text : `${text.slice(0, Math.max(0, cells - 1)).trimEnd()}…`
 
 /** Returns a kebab-case slug of at most forty characters. */
 export const slug = (s: string): string =>
@@ -53,18 +60,6 @@ export const stableJson = (v: unknown, omit: readonly string[]): string => {
     return val
   }
   return JSON.stringify(v, replacer)
-}
-
-/** Renders a sparkline of the last `width` values (0..100) using block characters. */
-export const sparkline = (values: number[], width: number): string => {
-  const blocks = '▁▂▃▄▅▆▇█'
-  const slice = values.slice(-width)
-  if (slice.length === 0) return ' '.repeat(width)
-  return slice.map(v => {
-    const clamped = Math.max(0, Math.min(100, v))
-    const idx = Math.min(7, Math.floor(clamped / 100 * 8))
-    return blocks[idx] ?? '▁'
-  }).join('')
 }
 
 /** Renders a filled/empty gauge of `width` cells for a percentage 0..100. */

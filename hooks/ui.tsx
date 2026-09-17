@@ -3,8 +3,8 @@
 /* @jsxFrag Fragment */
 import type { RenderElement } from 'claude-code'
 
-import { collapseWs, duration, gauge, kilo } from './core/text'
-import { PANE_INLINE_ROWS, PANE_TITLE } from './core/types'
+import { collapseWs, duration, fit, gauge, kilo, tokensOf } from './core/text'
+import { NO_CALLS, PANE_INLINE_ROWS, PANE_TITLE } from './core/types'
 import type {
   Actions,
   Artifact,
@@ -14,6 +14,7 @@ import type {
   Card,
   Choice,
   DecidedRow,
+  Evidence,
   Header,
   PaneModel,
   PaneProps,
@@ -25,7 +26,13 @@ import type {
 // records the divergence; hoisting them is WP6's call at integration).
 const ACCENT = 'suggestion'   // the theme's accent key (the engine's own suggestion blue and gauge fill)
 const GUTTER = 10             // cells of the dim label column inside an opened card
+const NUMBER_CELLS = 3        // the card's dim number and the space after it (two digits and their space fit)
 const GLYPH_CELLS = 2         // the waster's '●' and the space after it
+const CALL_GAP = 3            // cells between the columns of an evidence row
+const CALL_MIN_WHAT = 8       // cells the command or path keeps before the cost is dropped whole
+const CALL_SEP = ' · '        // between a cited call's wall time and its size
+const CALL_UNIT = ' ch'       // the unit the widest rung of the cost ladder spells out
+const QUOTE_MAX = 60          // characters of a result quoted under the call that produced it
 const FIX_CELLS = 2           // the fix row's '→' and the space after it
 const FIELD_CELLS = 2         // the Steer row's '›' and the space after it
 const CARD_PAD = 2            // paddingX inside a card's border
@@ -42,8 +49,8 @@ const INFO_CELLS = 1          // 'i'
 const CONTROL_GAP = 2         // cells between a row's text and the Button at its right edge
 const BAND_RESERVE = 4        // cells the engine's own collapse control '[-]' takes at the band's right edge
 const TITLE_ROWS = 2
-const VALUE_ROWS = 2
-const EVIDENCE_ROWS = 3
+const VALUE_ROWS = 2          // rows the fix keeps under the verbs
+const DETAIL_ROWS_MAX = 4     // rows `why` and `fix` each keep inside the opened details
 const MIN_CELLS = 24
 const MIN_ROWS = 8            // however little the surface grants the inline pane, it is budgeted for this
 const HEAD_ROWS = 3           // the inline header's own rows: the label, the gauge and the blank under them
@@ -51,10 +58,10 @@ const FOOT_ROWS = 2           // the inline footer's own rows: the blank and the
 const CARD_BORDER_ROWS = 2    // the card's own '╭───╮' and '╰───╯'
 const VERBS_ROWS = 1
 const STEER_ROWS = 2          // the field and its hint
-const COMPACT_ROWS = 1        // rows a value or a quote gets inside the inline card
-const DETAIL_ROWS = 3         // 'why', 'fix' and 'kill →' before the evidence
+const COMPACT_ROWS = 1        // rows a value or a cited call gets inside the inline card
+const DETAIL_ROWS = 3         // 'why', 'fix' and the summary row before the cited calls
 const STAT_ROWS = 2           // the stats line and the fix line of a folded card
-const GLYPHS = { live: '●', kept: '✓', steered: '↪', killed: '✕', fix: '→', field: '›', kill: '→' } as const
+const GLYPHS = { live: '●', kept: '✓', steered: '↪', killed: '✕', fix: '→', field: '›', quote: '↳' } as const
 const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.kept, steer: GLYPHS.steered, kill: GLYPHS.killed }
 const ARTIFACT_LABEL: Record<ArtifactKind, string> = {
   'claude-md': 'CLAUDE.md',
@@ -69,14 +76,14 @@ const SAVED_LABEL = 'Saved '
 const JUDGE_LABEL = 'Judge '
 const DECIDED_LABEL = 'Decided'
 const RULES_LABEL = 'Rules for next session'
-const STEER_HINT = 'Enter sends · Steer again closes · longer: /saver steer in the prompt'
+const STEER_HINT = 'Enter sends · Steer again closes · longer: /saver steer <n> <text>'
 const EMPTY_TEXT = 'Watching quietly. Nothing repeating yet.'
 const AWAITING_TEXT = 'awaiting the first turn'
 const FULL_PANE_HINT = '/saver for the full pane'
+const VERBS_HINT = '/saver keep|steer|kill <n>'   // the keyboard route to the verbs, for a pane the Tab ring never reaches
 
-/** Truncates text to `cells` characters, ending it with '…' when it is cut and never a space before it. */
-const fit = (text: string, cells: number): string =>
-  text.length <= cells ? text : `${text.slice(0, Math.max(0, cells - 1)).trimEnd()}…`
+// The cells one card's cited calls are laid out against: three columns, the cost's own rung of the ladder.
+type CallColumns = { turn: number; what: number; alias: number; time: number; unit: boolean; cost: boolean }
 
 /** Wraps text into at most `rows` lines of `cells` characters, the last cut with '…'. */
 const linesOf = (text: string, cells: number, rows: number): string[] => {
@@ -253,16 +260,18 @@ const headerSection = (
 }
 
 /** The cells a title row has once the 'i' Button and the gap before it are reserved. */
-const titleValue = (cells: number): number => Math.max(GLYPH_CELLS + 8, cells - INFO_CELLS - CONTROL_GAP)
+const titleValue = (cells: number): number =>
+  Math.max(NUMBER_CELLS + GLYPH_CELLS + 8, cells - INFO_CELLS - CONTROL_GAP)
 
-/** A waster's title row: the accent dot, the behaviour in bold, and 'i' at the right edge. */
+/** A waster's title row: its number, the accent dot, the behaviour in bold, and 'i' at the right edge. */
 const titleRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderElement => {
   const { Box, Text, Button } = ui
   const value = titleValue(cells)
-  const title = value - GLYPH_CELLS
+  const title = value - NUMBER_CELLS - GLYPH_CELLS
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
       <Box flexDirection="row" width={value}>
+        <Box width={NUMBER_CELLS}><Text dimColor wrap="truncate-end">{`${card.n}`}</Text></Box>
         <Box width={GLYPH_CELLS}><Text color={ACCENT}>{GLYPHS.live}</Text></Box>
         <Box flexDirection="column">
           {linesOf(card.kind, title, TITLE_ROWS).map(line => (
@@ -288,19 +297,99 @@ const verbsRow = (ui: Ui, card: Card, actions: Actions): RenderElement => {
   )
 }
 
-/** The details behind 'i': why, the fix, what Kill sends, and the evidence quotes the seat holds. */
+/** The widest of the texts, in cells. */
+const widest = (texts: readonly string[]): number => texts.reduce((n, text) => Math.max(n, text.length), 0)
+
+/** The wall time of a cited call as its row draws it; '' when nothing measured it (a turn, a rebuilt row). */
+const callTime = (e: Evidence): string => (e.what === NO_CALLS || e.ms <= 0 ? '' : duration(e.ms))
+
+/**
+ * What one cited call cost: its wall time right-aligned in the card's shared time column, then its size —
+ * the unit spelled out while the row holds it. A row nothing timed keeps the column, so the sizes read as one.
+ */
+const callMeta = (e: Evidence, time: number, hasUnit: boolean): string => {
+  const size = e.what === NO_CALLS ? `${kilo(e.chars)} answer` : `${kilo(e.chars)}${hasUnit ? CALL_UNIT : ''}`
+  if (time === 0) return size
+  const spent = callTime(e)
+  return spent === '' ? `${' '.repeat(time + CALL_SEP.length)}${size}` : `${spent.padStart(time)}${CALL_SEP}${size}`
+}
+
+/**
+ * The columns every cited call of one card shares, so its sizes line up under each other: the unit,
+ * then the alias, then the cost dropped whole while the widest row cannot hold them.
+ */
+const callColumns = (evidence: readonly Evidence[], cells: number): CallColumns => {
+  const turn = widest(evidence.map(e => `turn ${e.turn}`))
+  const alias = widest(evidence.map(e => e.agent ?? ''))
+  const time = widest(evidence.map(callTime))
+  const bare = { turn, alias: 0, time: 0, unit: false, cost: false }
+  const ladder = [
+    { turn, alias, time, unit: true, cost: true },
+    { turn, alias, time, unit: false, cost: true },
+    { turn, alias: 0, time, unit: false, cost: true },
+    bare,
+  ]
+  const fixed = (c: Omit<CallColumns, 'what'>): number =>
+    c.turn + CALL_GAP
+    + (c.alias === 0 ? 0 : c.alias + CALL_GAP)
+    + (c.cost ? widest(evidence.map(e => callMeta(e, c.time, c.unit))) + CALL_GAP : 0)
+  const chosen = ladder.find(c => fixed(c) + CALL_MIN_WHAT <= cells) ?? bare
+  return { ...chosen, what: Math.max(1, Math.min(widest(evidence.map(e => e.what)), cells - fixed(chosen))) }
+}
+
+/** The cells one evidence row draws, laid out against the card's shared columns. */
+const callCells = (e: Evidence, cols: CallColumns): { turn: string; what: string; alias: string; meta: string } => ({
+  turn: `turn ${e.turn}`.padEnd(cols.turn),
+  what: fit(e.what, cols.what).padEnd(cols.what),
+  alias: cols.alias === 0 ? '' : (e.agent ?? '').padEnd(cols.alias),
+  meta: cols.cost ? callMeta(e, cols.time, cols.unit) : '',
+})
+
+/** One cited call: the turn, what ran, the loop it ran in, what it cost — then the head of what came back. */
+const callBlock = (ui: Ui, e: Evidence, cols: CallColumns, cells: number, isCompact: boolean): RenderElement[] => {
+  const { Text } = ui
+  const { turn, what, alias, meta } = callCells(e, cols)
+  const gap = ' '.repeat(CALL_GAP)
+  return [
+    <Text wrap="truncate-end">
+      <Text dimColor>{`${turn}${gap}`}</Text>
+      {what}
+      {alias === '' ? null : <Text dimColor>{`${gap}${alias}`}</Text>}
+      {meta === '' ? null : <Text dimColor>{`${gap}${meta}`}</Text>}
+    </Text>,
+    // The quote is the receipt: it is dropped when the seat is tight, or when nothing came back to quote.
+    ...(isCompact || e.head === ''
+      ? []
+      : [<Text dimColor wrap="truncate-end">{fit(`${GLYPHS.quote} "${fit(e.head, QUOTE_MAX)}"`, cells)}</Text>]),
+  ]
+}
+
+/** The one dim summary row of the details: what the cited evidence adds up to, in the unit the model counted. */
+const totalText = (card: Card): string => {
+  const { unit, calls, ms, chars } = card.total
+  const plural = calls === 1 ? '' : 's'
+  // A behavioural card counts turns and states what the judge estimates each one costs; the unit is
+  // the model's to say, never inferred from the evidence the details happened to keep.
+  return unit === 'turns'
+    ? joined([`${calls} turn${plural}`, chars > 0 ? `~${kilo(tokensOf(chars))} tokens per turn` : null])
+    : joined([`${calls} call${plural}`, ms > 0 ? duration(ms) : null, `${kilo(chars)} chars of context`])
+}
+
+/** The details behind 'i': why, the fix, the summary, and the calls behind the claim. */
 const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): RenderElement[] => {
+  const { Text } = ui
   const value = Math.max(8, cells - GUTTER)
-  // Inline every value is one row and one quote, so each row of the card's budget holds one of them.
-  const rows = isCompact ? COMPACT_ROWS : VALUE_ROWS
-  const quotes = isCompact ? COMPACT_ROWS : EVIDENCE_ROWS
+  // Inline every value is one row and one call, so each row of the card's budget holds one of them.
+  const rows = isCompact ? COMPACT_ROWS : DETAIL_ROWS_MAX
+  const calls = isCompact ? COMPACT_ROWS : card.evidence.length
+  // The columns are measured over the calls this drawing shows, so they hold whatever it draws.
+  const shown = card.evidence.slice(0, calls)
+  const cols = callColumns(shown, cells)
   return [
     gutterRow(ui, 'why', textBlock(ui, card.why, value, rows)),
     gutterRow(ui, 'fix', textBlock(ui, card.fix, value, rows)),
-    gutterRow(ui, `kill ${GLYPHS.kill}`, textBlock(ui, `"${card.killText}"`, value, rows)),
-    ...card.evidence.slice(0, quotes).map((quote, at) =>
-      gutterRow(ui, at === 0 ? 'evidence' : '', fit(quote, value)),
-    ),
+    ...(card.total.calls === 0 ? [] : [<Text dimColor wrap="truncate-end">{fit(totalText(card), cells)}</Text>]),
+    ...shown.flatMap(e => callBlock(ui, e, cols, cells, isCompact)),
   ]
 }
 
@@ -335,7 +424,7 @@ const cardContentRows = (card: Card, model: PaneModel): number =>
 /** Rows an inline card spends on everything but its content: the border, the title, the verbs, the field. */
 const cardFixedRows = (card: Card, model: PaneModel, cells: number): number =>
   CARD_BORDER_ROWS
-  + linesOf(card.kind, titleValue(cells - CARD_CHROME) - GLYPH_CELLS, TITLE_ROWS).length
+  + linesOf(card.kind, titleValue(cells - CARD_CHROME) - NUMBER_CELLS - GLYPH_CELLS, TITLE_ROWS).length
   + VERBS_ROWS
   + (model.steering === card.patternId ? STEER_ROWS : 0)
 
@@ -389,14 +478,14 @@ const cardBlock = (
     : <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={CARD_PAD}>{rows}</Box>
 }
 
-/** One further waster on the inline pane: a dim line with its dot and its count. */
+/** One further waster on the inline pane: a dim line with its number, its dot and its count. */
 const compactRow = (ui: Ui, card: Card, cells: number): RenderElement => {
   const { Text } = ui
   const first = card.stats.split(' · ')[0] ?? ''
   const hits = HITS.test(first) ? first : null   // only a hit count; another stats order degrades to nothing
   const room = hits === null ? cells : Math.max(8, cells - hits.length - 3)
   return (
-    <Text dimColor wrap="truncate-end">{joined([fit(`${GLYPHS.live} ${card.kind}`, room), hits])}</Text>
+    <Text dimColor wrap="truncate-end">{joined([fit(`${card.n} ${GLYPHS.live} ${card.kind}`, room), hits])}</Text>
   )
 }
 
@@ -441,19 +530,30 @@ const wastersSection = (
   )
 }
 
-/** One decided pattern: its glyph and behaviour, with what it saved or how often it was ignored. */
+/** What a decision is worth: a rate while it is only projected, a credit once the saving settled (D4). */
+const creditText = (row: DecidedRow): string => {
+  if (row.savedPct === null || row.savedPct <= 0) return ''
+  return row.settled ? `saved ~${row.savedPct}%` : `~${row.savedPct}% per repeat`
+}
+
+/** One decided pattern: its glyph and behaviour, what it is worth, and the sentence the user sent. */
 const decidedRow = (ui: Ui, row: DecidedRow, cells: number): RenderElement => {
   const { Box, Text } = ui
-  const right = row.ignored > 0
-    ? `ignored ${row.ignored}×`
-    : row.savedPct === null || row.savedPct <= 0 ? '' : `saved ~${row.savedPct}%`
+  const right = row.ignored > 0 ? `ignored ${row.ignored}×` : creditText(row)
   const value = Math.max(8, cells - right.length - CONTROL_GAP)
   return (
-    <Box flexDirection="row" width={cells} justifyContent="space-between">
-      <Box width={value}>
-        <Text wrap="truncate-end">{fit(`${DECIDED_GLYPH[row.choice]} ${row.kind}`, value)}</Text>
+    <Box flexDirection="column">
+      <Box flexDirection="row" width={cells} justifyContent="space-between">
+        <Box width={value}>
+          <Text wrap="truncate-end">{fit(`${DECIDED_GLYPH[row.choice]} ${row.kind}`, value)}</Text>
+        </Box>
+        {right === '' ? null : <Box width={right.length}><Text dimColor>{right}</Text></Box>}
       </Box>
-      {right === '' ? null : <Box width={right.length}><Text dimColor>{right}</Text></Box>}
+      {row.instruction === null
+        ? null
+        : glyphRow(ui, GLYPHS.field, (
+          <Text dimColor wrap="truncate-end">{fit(collapseWs(row.instruction), Math.max(8, cells - FIELD_CELLS))}</Text>
+        ))}
     </Box>
   )
 }
@@ -524,6 +624,17 @@ const footerSection = (
   )
 }
 
+/** The pane's last row: the verbs by number, since nothing else on screen says they can be typed. */
+const hintSection = (ui: Ui, cells: number): RenderElement => {
+  const { Box, Text } = ui
+  return (
+    <Box flexDirection="column" paddingX={1 + HEAD_INDENT}>
+      {blank(ui)}
+      <Text dimColor wrap="truncate-end">{fit(VERBS_HINT, cells)}</Text>
+    </Box>
+  )
+}
+
 /** The band's segments, the ones that carry nothing left out. */
 const bandSegments = (model: BandModel): { text: string; isFresh?: true }[] => [
   ...(model.percent !== null && model.percent > 0 ? [{ text: `${Math.round(model.percent)}%` }] : []),
@@ -568,11 +679,15 @@ export function Pane(props: PaneProps): RenderElement {
   const seat = Math.max(MIN_ROWS, Math.min(site.maxRows, PANE_INLINE_ROWS))
   const foot = model.decided.length === 0 && model.artifacts.length === 0 ? 0 : FOOT_ROWS
   const rows = isCompact ? Math.max(0, seat - headRows(model.header, indented) - foot) : null
+  // The command hint is the docked pane's last row: inline the seat is counted in rows and the
+  // footer already names a command, and with no card listed there is no number to type.
+  const isHinted = !isCompact && model.wasters.length > 0
   return (
     <Box flexDirection="column">
       {headerSection(ui, model.header, actions, indented, isCompact)}
       {wastersSection(ui, model, actions, cells, rows)}
       {footerSection(ui, model, actions, indented, isCompact)}
+      {isHinted ? hintSection(ui, indented) : null}
     </Box>
   )
 }

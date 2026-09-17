@@ -92,6 +92,14 @@ describe('judge', () => {
     expect(prompt).not.toContain('{{')
   })
 
+  test('the LEDGER header names the loops the agent column holds', ($, _on) => {
+    const prompt = buildPrompt(judgeState())
+    expect(JUDGE_PROMPT).toContain(' Agents are named `a1`, `a2`… in order of first appearance; `main` is the main loop.')
+    expect(prompt, 'the row the subagent ran reads the alias the header explains')
+      .toContain('r8 | Edit | /src/token.ts | other | a1 | 7 |')
+    expect(prompt, 'no raw agent id is ever quoted to the judge').not.toContain('agent-1')
+  })
+
   test('buildPrompt folds the rows past the ledger window into summary lines', ($, _on) => {
     const prompt = buildPrompt(judgeState({ rows: Array.from({ length: 160 }, (_, i) => filler(i + 1)) }))
     expect(prompt).toContain('~ | Bash | test:bun test | ×10 | Σ1000ch')

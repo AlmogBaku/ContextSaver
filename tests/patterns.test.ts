@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import { agentAliases } from '../hooks/core/evidence'
 import {
   bandModel, cardOf, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce,
   tokensToCompaction, toStored, totalTokens, turnsToCompaction,
 } from '../hooks/core/patterns'
 import { instructionOf, killPrompt } from '../hooks/core/text'
-import { JUDGE_MAX_BACKOFF, MAX_PATTERNS, ROW_CAP, SETTLE_TURNS } from '../hooks/core/types'
-import type { Action, Pattern, Row } from '../hooks/core/types'
+import { JUDGE_MAX_BACKOFF, MAX_PATTERNS, NO_CALLS, ROW_CAP, SETTLE_TURNS } from '../hooks/core/types'
+import type { Action, Card, Pattern, Row, State } from '../hooks/core/types'
 import { chattyPattern } from './fixtures/patterns/chattyPattern'
 import { claudeMdArtifact } from './fixtures/patterns/claudeMdArtifact'
 import { junkRegistry } from './fixtures/patterns/junkRegistry'
@@ -16,6 +17,9 @@ import { testRow } from './fixtures/patterns/testRow'
 import { turnEnd } from './fixtures/patterns/turnEnd'
 
 const withSeq = (over: Partial<Omit<Row, 'seq'>>, seq: number): Row => ({ ...testRow(over), seq })
+
+// `paneModel` names the loops once for the whole draw; a test drawing one card names them itself.
+const cardIn = (p: Pattern, state: State, n: number): Card => cardOf(p, state, n, agentAliases(state.rows))
 
 const steered = (over: Partial<Pattern> = {}): Pattern => ({
   ...suitePattern, hits: ['r-1', 'r-2'], decision: 'steer', decidedAtTurn: 5, lastDecision: 'steer',
@@ -289,21 +293,13 @@ describe('patterns', () => {
     expect(paneModel(pruned, []).wasters).toEqual([])
   })
 
-  test('usage merges stickily and samples one percent per turn', async () => {
+  test('usage merges stickily, so a partial sample never blanks the header', async () => {
     const first = reduce(seedState({ turn: 1 }), { type: 'usage', usage: { window: 200_000, tokens: 50_000, percent: 25, compactAt: 180_000 }, now: 1 })
     expect(first.usage).toEqual({ window: 200_000, tokens: 50_000, percent: 25, compactAt: 180_000 })
-    expect(first.usageSamples).toEqual([{ turn: 1, percent: 25 }])
     const second = reduce({ ...first, turn: 2 }, { type: 'usage', usage: { window: 200_000, tokens: 60_000, percent: 30 }, now: 2 })
     expect(second.usage).toEqual({ window: 200_000, tokens: 60_000, percent: 30, compactAt: 180_000 })
-    const resampled = reduce(second, { type: 'usage', usage: { window: 200_000, tokens: 61_000, percent: 33 }, now: 3 })
-    expect(resampled.usageSamples).toEqual([{ turn: 1, percent: 25 }, { turn: 2, percent: 33 }])
-    const quiet = reduce(resampled, { type: 'usage', usage: { window: 200_000, tokens: 62_000 }, now: 4 })
-    expect(quiet.usageSamples).toEqual(resampled.usageSamples)
-    expect(quiet.usage).toMatchObject({ tokens: 62_000, percent: 33 })
-    const many = Array.from({ length: 40 }, (_, i) => i + 1)
-      .reduce((s, turn) => reduce({ ...s, turn }, { type: 'usage', usage: { window: 200_000, percent: turn }, now: turn }), seedState())
-    expect(many.usageSamples).toHaveLength(30)
-    expect(many.usageSamples[0]).toEqual({ turn: 11, percent: 11 })
+    const quiet = reduce(second, { type: 'usage', usage: { window: 200_000, tokens: 62_000 }, now: 4 })
+    expect(quiet.usage, 'the percentage the dispatch left out is the one already known').toMatchObject({ tokens: 62_000, percent: 30 })
   })
 
   test('overhead, compact, expand, steer.begin, drafts, notes, standing, artifacts, pane and columns', async () => {
@@ -340,7 +336,7 @@ describe('patterns', () => {
     const state = seedState({
       turn: 9, seq: 1, rows: [withSeq({ id: 'r-1' }, 1)], turns: [{ ...turnEnd(), turn: 1, calls: 1 }],
       usage: { window: 200_000, tokens: 90_000, percent: 45, compactAt: 180_000 },
-      usageSamples: [{ turn: 1, percent: 45 }], overhead: { memory: 1, mcp: 2, agents: 3 }, compactions: [4],
+      overhead: { memory: 1, mcp: 2, agents: 3 }, compactions: [4],
       patterns: [{ ...suitePattern, hits: ['r-1'], decision: 'steer', decidedAtTurn: 5, lastDecision: 'steer', instruction: 'x', openedAtTurn: 5, ignored: 2 }],
       cards: [suitePattern.id], notes: ['n'], standing: ['s'], written: [`${suitePattern.id}:claude-md`], paneOpen: true, columns: 150,
       saved: { ms: 10, chars: 20 },
@@ -348,7 +344,7 @@ describe('patterns', () => {
     })
     const clean = reduce(state, { type: 'reset' })
     expect(clean).toMatchObject({
-      turn: 0, seq: 0, rows: [], turns: [], usageSamples: [], compactions: [], cards: [], notes: [], standing: [], written: [],
+      turn: 0, seq: 0, rows: [], turns: [], compactions: [], cards: [], notes: [], standing: [], written: [],
       expanded: null, steering: null, steerDraft: null, autoOpened: false,
     })
     expect(clean.usage).toEqual({ window: 200_000 })
@@ -403,35 +399,61 @@ describe('patterns', () => {
     expect(capped.map(p => at(p.id))).toEqual([...capped.map(p => at(p.id))].sort((a, b) => a - b))
   })
 
-  test('cardOf states the stats, the fix, the kill text and the newest evidence first', async () => {
+  test('cardOf states the stats, the fix, what the evidence adds up to and the newest call first', async () => {
     const rows = [withSeq({ id: 'r-1', turn: 5, ms: 60_000, chars: 9_000 }, 1), withSeq({ id: 'r-2', turn: 8, ms: 45_000, chars: 9_600 }, 2)]
     const p: Pattern = { ...suitePattern, hits: ['r-1', 'r-2'] }
     const state = seedState({ rows, patterns: [p] })
-    expect(cardOf(p, state)).toEqual({
+    expect(cardIn(p, state, 1)).toEqual({
       patternId: suitePattern.id,
+      n: 1,
       kind: suitePattern.kind,
-      stats: '2× · ~2.3% context · 1m 45s · turns 5…8',
+      stats: '2× · ~2.3% of context · 1m 45s · turns 5–8',
       why: suitePattern.why,
       fix: suitePattern.alternative,
-      killText: killPrompt(suitePattern),
+      total: { unit: 'calls', calls: 2, ms: 105_000, chars: 18_600 },
       evidence: [
-        'r2 · t8 · bun test · 45s · 9.6k · "✓ 212 passed"',
-        'r1 · t5 · bun test · 1m · 9k · "✓ 212 passed"',
+        { turn: 8, what: 'bun test', agent: null, ms: 45_000, chars: 9_600, head: '✓ 212 passed' },
+        { turn: 5, what: 'bun test', agent: null, ms: 60_000, chars: 9_000, head: '✓ 212 passed' },
       ],
     })
-    expect(cardOf({ ...p, ignored: 1 }, state).kind).toBe(`ignored · ${suitePattern.kind}`)
+    expect(cardIn(p, state, 3).n, 'the card knows the seat the pane drew it in').toBe(3)
+    expect(cardIn({ ...p, ignored: 1 }, state, 1).kind).toBe(`ignored · ${suitePattern.kind}`)
+    const wide: Pattern = { ...suitePattern, hits: ['r-1', 'r-2', 'r-3', 'r-4'] }
+    const loops = seedState({
+      rows: [
+        ...rows,
+        withSeq({ id: 'r-3', turn: 9, agent: 'agent-9', ms: 1_000, chars: 200, head: '' }, 3),
+        withSeq({ id: 'r-4', turn: 10, tool: 'Read', key: '/src/auth.ts:-', cls: 'read', ms: 40, chars: 5_200, head: 'import { sign }' }, 4),
+      ],
+      patterns: [wide],
+    })
+    const many = cardIn(wide, loops, 1)
+    expect(many.total, 'the summary counts every cited call, not just the three shown')
+      .toEqual({ unit: 'calls', calls: 4, ms: 106_040, chars: 24_000 })
+    expect(many.evidence, 'three calls, newest first, the loop named only when it was not the main one').toEqual([
+      { turn: 10, what: '/src/auth.ts', agent: null, ms: 40, chars: 5_200, head: 'import { sign }' },
+      { turn: 9, what: 'bun test', agent: 'a1', ms: 1_000, chars: 200, head: '' },
+      { turn: 8, what: 'bun test', agent: null, ms: 45_000, chars: 9_600, head: '✓ 212 passed' },
+    ])
+    const twice: Pattern = { ...suitePattern, hits: ['t-1', 't-2'] }
+    const oneTurn = seedState({
+      rows: [withSeq({ id: 't-1', turn: 4, head: 'the older run' }, 1), withSeq({ id: 't-2', turn: 4, head: 'the newer run' }, 2)],
+      patterns: [twice],
+    })
+    expect(cardIn(twice, oneTurn, 1).evidence.map(e => e.head), 'two calls inside one turn read newest first too')
+      .toEqual(['the newer run', 'the older run'])
     const rebuilt: Pattern = { ...suitePattern, hits: ['a-1', 'a-2', 'a-3'] }
     const history = seedState({
       rows: [1, 2, 3].map(i => withSeq({ id: `a-${i}`, turn: i, ms: 0, chars: 9_000, flags: ['recovered'] }, i)),
       patterns: [rebuilt],
     })
-    expect(cardOf(rebuilt, history).stats, 'a card built from history claims no time nobody measured').toBe('3× · ~3.4% context · turns 1…3')
+    expect(cardIn(rebuilt, history, 1).stats, 'a card built from history claims no time nobody measured').toBe('3× · ~3.4% of context · turns 1–3')
     const quick: Pattern = { ...suitePattern, hits: ['q-1', 'q-2', 'q-3'] }
     const fast = seedState({ rows: [1, 2, 3].map(i => withSeq({ id: `q-${i}`, turn: 4 + i, ms: 100, chars: 40 }, i)), patterns: [quick] })
-    expect(cardOf(quick, fast).stats).toBe('3× · 0s · turns 5…7')
+    expect(cardIn(quick, fast, 1).stats).toBe('3× · 0s · turns 5–7')
     const once: Pattern = { ...suitePattern, hits: ['o-1', 'o-2'] }
     const sameTurn = seedState({ rows: [1, 2].map(i => withSeq({ id: `o-${i}`, turn: 6, ms: 100, chars: 40 }, i)), patterns: [once] })
-    expect(cardOf(once, sameTurn).stats, 'one turn is not a range').toBe('2× · 0s · turn 6')
+    expect(cardIn(once, sameTurn, 1).stats, 'one turn is not a range').toBe('2× · 0s · turn 6')
     const behavioural = seedState({
       patterns: [chattyPattern],
       turns: [
@@ -439,12 +461,26 @@ describe('patterns', () => {
         { ...turnEnd({ answerChars: 6_100, answerHead: 'To recap the plan' }), turn: 15, calls: 0 },
       ],
     })
-    const card = cardOf(chattyPattern, behavioural)
-    expect(card.stats, 'evidence with no recorded duration claims none rather than 0s').toBe('2× · turns 14…15')
+    const card = cardIn(chattyPattern, behavioural, 1)
+    expect(card.stats, 'evidence with no recorded duration claims none rather than 0s').toBe('2× · turns 14–15')
+    expect(card.total, 'a behavioural card counts turns and what the judge estimates each one costs')
+      .toEqual({ unit: 'turns', calls: 2, ms: 0, chars: 4_800 })
     expect(card.evidence).toEqual([
-      't15 · no tool calls · 6.1k · "To recap the plan"',
-      't14 · no tool calls · 5.4k · "Here is the plan again"',
+      { turn: 15, what: NO_CALLS, agent: null, ms: 0, chars: 6_100, head: 'To recap the plan' },
+      { turn: 14, what: NO_CALLS, agent: null, ms: 0, chars: 5_400, head: 'Here is the plan again' },
     ])
+    // A finding may cite rows and turn handles together: the rows in hand are the unit, however new the
+    // turns beside them, and here every handle the details keep is a turn.
+    const mixed: Pattern = { ...chattyPattern, hits: ['m-1', 'm-2', 'turn:15', 'turn:16', 'turn:17'] }
+    const both = seedState({
+      rows: [1, 2].map(i => withSeq({ id: `m-${i}`, turn: 2 + i, ms: 0, chars: 2_300, flags: ['recovered'] }, i)),
+      turns: [15, 16, 17].map(turn => ({ ...turnEnd({ answerChars: 6_000, answerHead: 'Recapping the plan' }), turn, calls: 0 })),
+      patterns: [mixed],
+    })
+    const mixedCard = cardIn(mixed, both, 1)
+    expect(mixedCard.total, 'rows in hand are calls, whatever the turn handles beside them say')
+      .toEqual({ unit: 'calls', calls: 2, ms: 0, chars: 4_600 })
+    expect(mixedCard.evidence.map(e => e.turn), 'the three newest cited handles are all turns').toEqual([17, 16, 15])
   })
 
   test('paneModel and bandModel are the shapes the UI renders', async () => {
@@ -463,7 +499,6 @@ describe('patterns', () => {
       ],
       turns: [1, 2, 3].map(turn => ({ ...turnEnd(), turn, calls: 2 })),
       usage: { window: 200_000, tokens: 128_000, percent: 64, compactAt: 180_000 },
-      usageSamples: [{ turn: 1, percent: 60 }, { turn: 2, percent: 64 }],
       patterns: [waster, steeredLog, keptChat],
       cards: [waster.id], expanded: waster.id, steering: waster.id, steerDraft: 'draft',
       judge: { lastAtTokens: 0, lastAtTurn: 3, running: true, runs: 2, spent: 600, backoff: 1, error: null, focus: 'auth', last: null },
@@ -471,21 +506,32 @@ describe('patterns', () => {
     })
     const model = paneModel(state, [claudeMdArtifact])
     expect(model.header).toEqual({
-      percent: 64, spark: [60, 64], tokensToCompaction: 52_000, turnsToCompaction: 5,
+      percent: 64, tokensToCompaction: 52_000, turnsToCompaction: 5,
       judgeRuns: 2, judgeTokens: 600, judgeShare: 2, judgeRunning: true, savedPct: 4.5, savedMs: 192_000,
     })
     expect(model.wasters.map(c => c.patternId)).toEqual([waster.id])
+    expect(model.wasters.map(c => c.n), 'the cards are numbered as they are drawn, top to bottom').toEqual([1])
     expect(model).toMatchObject({ expanded: waster.id, steering: waster.id, steerDraft: 'draft' })
     expect(model.decided).toEqual([
-      { patternId: steeredLog.id, choice: 'steer', kind: steeredLog.kind, savedPct: 5, ignored: 1 },
-      { patternId: keptChat.id, choice: 'keep', kind: keptChat.kind, savedPct: null, ignored: 0 },
+      // Ignored once, so the figure is still a projection: only a settled instruction is a credit (D4).
+      { patternId: steeredLog.id, choice: 'steer', kind: steeredLog.kind, savedPct: 5, settled: false, instruction: 'grep it', ignored: 1 },
+      { patternId: keptChat.id, choice: 'keep', kind: keptChat.kind, savedPct: null, settled: false, instruction: null, ignored: 0 },
     ])
+    const quiet = paneModel({ ...state, patterns: [{ ...steeredLog, ignored: 0 }] }, [])
+    expect(quiet.decided[0], 'nothing ignored it and nothing is in flight: the saving settled')
+      .toMatchObject({ settled: true })
+    const inFlight = paneModel({ ...state, patterns: [{ ...steeredLog, ignored: 0, openedAtTurn: 12 }] }, [])
+    expect(inFlight.decided[0], 'the instruction is still in flight, so nothing settled yet')
+      .toMatchObject({ settled: false })
+    const suggested = paneModel({ ...state, patterns: [{ ...steeredLog, instruction: steeredLog.alternative }] }, [])
+    expect(suggested.decided[0], 'a steer that sent the fix as it stood is no second sentence to show')
+      .toMatchObject({ instruction: null })
     expect(model.artifacts).toEqual([claudeMdArtifact])
     expect(bandModel(state)).toEqual({ percent: 64, tokensToCompaction: 52_000, fresh: 1, savedPct: 4.5, paneOpen: false })
     const empty = paneModel(seedState(), [])
     expect(empty.wasters).toEqual([])
     expect(empty.decided).toEqual([])
-    expect(empty.header).toMatchObject({ percent: null, spark: [], tokensToCompaction: null, turnsToCompaction: null, savedPct: 0 })
+    expect(empty.header).toMatchObject({ percent: null, tokensToCompaction: null, turnsToCompaction: null, savedPct: 0 })
     expect(bandModel(seedState())).toEqual({ percent: null, tokensToCompaction: null, fresh: 0, savedPct: 0, paneOpen: false })
   })
 

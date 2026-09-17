@@ -4,7 +4,6 @@ import type { PaneModel } from '../../../hooks/core/types'
 export const emptyPane: PaneModel = {
   header: {
     percent: 12,
-    spark: [],
     tokensToCompaction: null,
     turnsToCompaction: null,
     judgeRuns: 0,

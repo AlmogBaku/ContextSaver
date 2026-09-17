@@ -1,3 +1,4 @@
+import { agentAliases, aliasOf } from './evidence'
 import { median } from './text'
 import { JUDGE_LEDGER_ROWS } from './types'
 import type { CommandClass, Row, State, TurnStat } from './types'
@@ -82,10 +83,10 @@ const flagsCell = (row: Row): string => {
 
 const pathsCell = (paths: string[]): string => (paths.length > 0 ? paths.slice(0, 3).join(' ') : '-')
 
-/** Renders one ledger row: r<seq> | tool | key | cls | agent | turn | ms | chars | flags | paths. */
-export const ledgerLine = (row: Row): string =>
+/** Renders one ledger row: r<seq> | tool | key | cls | agent alias | turn | ms | chars | flags | paths. */
+export const ledgerLine = (row: Row, aliases: ReadonlyMap<string, string>): string =>
   [
-    `r${row.seq}`, row.tool, row.key, row.cls, row.agent,
+    `r${row.seq}`, row.tool, row.key, row.cls, aliasOf(aliases, row.agent),
     `${row.turn}`, `${row.ms}`, `${row.chars}`, flagsCell(row), pathsCell(row.paths),
   ].join(' | ')
 
@@ -93,10 +94,11 @@ export const ledgerLine = (row: Row): string =>
 export const summaryLine = (tool: string, key: string, count: number, chars: number): string =>
   `~ | ${tool} | ${key} | ×${count} | Σ${chars}ch`
 
-const keyStatLine = (s: KeyStat): string =>
+const keyStatLine = (s: KeyStat, aliases: ReadonlyMap<string, string>): string =>
   [
     s.tool, s.key, s.cls, `×${s.count}`, `Σ${s.ms}ms`, `Σ${s.chars}ch`,
-    `turns ${s.firstTurn}-${s.lastTurn}`, `edits-between ${s.editsBetween ?? '-'}`, s.agents.join(' '),
+    `turns ${s.firstTurn}-${s.lastTurn}`, `edits-between ${s.editsBetween ?? '-'}`,
+    s.agents.map(agent => aliasOf(aliases, agent)).join(' '),
   ].join(' | ')
 
 const groupLines = (rows: Row[], nameOf: (r: Row) => string, lineOf: (name: string, g: Row[]) => string): string[] =>
@@ -109,8 +111,8 @@ const classLines = (rows: Row[]): string[] =>
   groupLines(rows, r => r.cls, (name, g) =>
     `${name} | ×${g.length} | Σ${sum(g.map(r => r.ms))}ms | Σ${sum(g.map(r => r.chars))}ch`)
 
-const agentLines = (rows: Row[]): string[] =>
-  groupLines(rows, r => r.agent, (name, g) => `${name} | ×${g.length} | Σ${sum(g.map(r => r.chars))}ch`)
+const agentLines = (rows: Row[], aliases: ReadonlyMap<string, string>): string[] =>
+  groupLines(rows, r => r.agent, (name, g) => `${aliasOf(aliases, name)} | ×${g.length} | Σ${sum(g.map(r => r.chars))}ch`)
 
 const costliestLines = (rows: Row[]): string[] =>
   [...rows]
@@ -122,13 +124,14 @@ const costliestLines = (rows: Row[]): string[] =>
 export const statsLines = (rows: Row[]): string[] => {
   if (rows.length === 0) return ['(none)']
   const stats = aggregate(rows)
+  const aliases = agentAliases(rows)
   return [
     'per call:',
-    ...stats.filter((s, i) => i < 20 || s.count >= 3).map(keyStatLine),
+    ...stats.filter((s, i) => i < 20 || s.count >= 3).map(s => keyStatLine(s, aliases)),
     'per class:',
     ...classLines(rows),
     'per agent:',
-    ...agentLines(rows),
+    ...agentLines(rows, aliases),
     'costliest rows:',
     ...costliestLines(rows),
   ]
@@ -172,5 +175,6 @@ export const turnsBlock = (state: State): string =>
 export const ledgerBlock = (state: State): string => {
   const cut = Math.max(0, state.rows.length - JUDGE_LEDGER_ROWS)
   const folded = aggregate(state.rows.slice(0, cut)).map(s => summaryLine(s.tool, s.key, s.count, s.chars))
-  return block([...folded, ...state.rows.slice(cut).map(ledgerLine)])
+  const aliases = agentAliases(state.rows)
+  return block([...folded, ...state.rows.slice(cut).map(row => ledgerLine(row, aliases))])
 }

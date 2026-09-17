@@ -7,7 +7,6 @@ export const millionPane: PaneModel = {
   header: {
     ...twoWasters.header,
     percent: 5,
-    spark: [1, 2, 3, 5],
     tokensToCompaction: 914_000,
     turnsToCompaction: 33,
     savedPct: 0,

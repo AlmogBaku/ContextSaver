@@ -4,7 +4,6 @@ import type { PaneModel } from '../../../hooks/core/types'
 export const twoWasters: PaneModel = {
   header: {
     percent: 64,
-    spark: [11, 18, 24, 31, 39, 47, 55, 60, 64],
     tokensToCompaction: 41_000,
     turnsToCompaction: 6,
     judgeRuns: 2,
@@ -17,25 +16,29 @@ export const twoWasters: PaneModel = {
   wasters: [
     {
       patternId: 'execution:full-suite',
+      n: 1,
       kind: 'Claude keeps running the whole bun test suite after every single-file edit',
-      stats: '3× · ~9% context · 3m 12s · turns 5…8',
+      stats: '3× · ~9% of context · 3m 12s · turns 5–8',
       why: 'ran in full 3× while only src/auth.ts changed between runs; the user asked for a fix, not full verification',
       fix: 'run only the tests covering the files you changed; run the full suite once when the phase is done',
-      killText: 'Stop this behaviour for the rest of the session: Claude keeps running the whole bun test suite after every single-file edit. From now on: run only the tests covering the files you changed',
+      total: { unit: 'calls', calls: 3, ms: 192_000, chars: 72_000 },
       evidence: [
-        'r50 · t8 · bun test · 60s · 9.9k · 212 passed',
-        'r45 · t7 · bun test · 59s · 9.6k · 212 passed',
-        'r41 · t5 · bun test · 61s · 9.8k · 212 passed',
+        { turn: 8, what: 'bun test', agent: null, ms: 62_000, chars: 24_000, head: '212 pass · 0 fail · ran 1284 expect() calls in 61.98s' },
+        { turn: 7, what: 'bun test', agent: 'a1', ms: 59_000, chars: 24_000, head: '212 pass · 0 fail' },
+        { turn: 5, what: 'bun test', agent: null, ms: 71_000, chars: 24_000, head: '' },
       ],
     },
     {
       patternId: 'reading:api-logs',
+      n: 2,
       kind: 'Claude keeps reading 2000 lines of api logs instead of grepping for the error',
-      stats: '2× · ~20% context · turns 11…13',
+      stats: '2× · ~20% of context · 8s · turns 11–13',
       why: 'read the whole log twice when one grep would have shown the traceback',
       fix: "grep -nE 'ERROR|Traceback' and read only the 50 lines around the match",
-      killText: 'Stop this behaviour for the rest of the session: Claude keeps reading 2000 lines of api logs. From now on: grep for the error and read only the lines around it',
-      evidence: ['r61 · t13 · cat logs/api.log · 4s · 41k · GET /health 200'],
+      total: { unit: 'calls', calls: 2, ms: 8_000, chars: 160_000 },
+      evidence: [
+        { turn: 13, what: 'cat logs/api.log', agent: null, ms: 4_000, chars: 80_000, head: 'GET /health 200 12ms · GET /v1/users 200 41ms' },
+      ],
     },
   ],
   expanded: null,

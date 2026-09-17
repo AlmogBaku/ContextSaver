@@ -7,7 +7,6 @@ export const awaitingPane: PaneModel = {
   header: {
     ...twoWasters.header,
     percent: null,
-    spark: [],
     tokensToCompaction: null,
     turnsToCompaction: null,
     judgeRuns: 1,

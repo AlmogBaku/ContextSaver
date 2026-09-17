@@ -57,11 +57,14 @@ const artifactsOf = (state: State, p: Pattern): Artifact[] => {
 const proposalOf = (p: Pattern): Proposal | null => {
   if (p.decision === null || p.decision === 'keep') return null
   if (p.proposal !== null) return p.proposal
-  return { kind: 'claude-md', title: titleOf(p), body: p.decision === 'kill' ? p.alternative : (p.instruction ?? p.alternative) }
+  const body = p.decision === 'kill' ? p.alternative : (p.instruction ?? p.alternative)
+  // The label is the rule, never the waste: a row offering `Write` reads as what would be written.
+  return { kind: 'claude-md', title: titleOf(body) || p.id, body }
 }
 
-const titleOf = (p: Pattern): string => {
-  const s = collapseWs(p.kind).replace(/^Claude keeps /i, '') || p.id
+// The rule's first clause as a label: what it tells Claude to do, capitalised and without its full stop.
+const titleOf = (body: string): string => {
+  const s = collapseWs(body).split(/[;,]/)[0]?.replace(/\.$/, '') ?? ''
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 

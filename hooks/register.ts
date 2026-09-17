@@ -1,12 +1,12 @@
 import type { ModelForkResult, On, PaneOpenArgs, RenderElement } from 'claude-code'
 
 import { adoptRows } from './core/adopt'
-import { demoPatterns, demoRows } from './core/demo'
+import { demoPatterns, demoRows, demoTurns, demoUsage } from './core/demo'
 import { buildPrompt, costOf, merge, parseReply, shouldRun } from './core/judge'
 import { rowOf } from './core/ledger'
 import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce, toStored } from './core/patterns'
 import { appendedTo, bulletOnly, mergeSettings, propose } from './core/rules'
-import { collapseWs, duration, instructionOf, pctOf } from './core/text'
+import { collapseWs, duration, fit, instructionOf, pctOf } from './core/text'
 import {
   AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, MAX_PATTERNS, PANE_ID, PANE_INLINE_ROWS,
   PANE_TITLE, PLUGIN_NAME, initialState,
@@ -15,9 +15,11 @@ import type { Action, Actions, Artifact, Choice, State } from './core/types'
 import type { Host } from './host'
 import { Band, Pane } from './ui'
 
-const STEER_USAGE = 'Usage: /saver steer <instruction> (applies to the waster whose Steer field is open, else the newest)'
-const SAVER_USAGE = 'Usage: /saver [check | steer <text> | debug | reset]'
+const STEER_USAGE = 'Usage: /saver steer [n] <instruction> (a leading number is the card the pane draws; without one: the card whose Steer field is open, else card 1)'
+const SAVER_USAGE = 'Usage: /saver [check | steer [n] <text> | keep <n> | kill <n> | debug | reset]'
+const NOTHING_TEXT = 'ContextSaver: nothing to decide on'
 const ANSWER_HEAD = 100   // characters of the turn's answer kept as an evidence quote
+const CARD_KIND = 60      // characters of a card's behaviour quoted back in a command's reply
 
 /**
  * Registers ContextSaver: the ledger of every tool call, the judge that names wasteful
@@ -167,6 +169,31 @@ export function register(on: On): void {
     if (choice === 'kill') host?.toast(`ContextSaver: told Claude to stop — ${p.alternative}`)
     if (choice === 'steer') host?.toast(`ContextSaver: Claude will be told — ${firstLine(text ?? '')}`)
     persist()
+  }
+
+  // The number the pane draws beside a card is its seat in `cards`; 0 means the card is no longer listed.
+  const seatOf = (patternId: string): number => state.cards.indexOf(patternId) + 1
+
+  const cardReply = (patternId: string, seat: number, tail: string): string => {
+    const kind = state.patterns.find(q => q.id === patternId)?.kind ?? patternId
+    return `ContextSaver: card ${seat} — "${fit(kind, CARD_KIND)}" · ${tail}`
+  }
+
+  const numberOf = (token: string): number | null => (/^\d+$/.test(token) ? Number(token) : null)
+
+  // A number no card wears is a numbering mistake, whichever verb typed it: it is refused, never obeyed.
+  const noCardText = (n: number): string => `ContextSaver: no card ${n} (1–${state.cards.length})`
+
+  // `/saver keep 2` and `/saver kill 2` decide the card the pane numbers 2, and say which one they took.
+  const decideByNumber = (choice: Choice, token: string): string => {
+    if (state.cards.length === 0) return NOTHING_TEXT
+    const n = numberOf(token)
+    if (n === null) return SAVER_USAGE
+    const patternId = state.cards[n - 1]
+    if (patternId === undefined) return noCardText(n)
+    const reply = cardReply(patternId, n, choice === 'keep' ? 'kept' : 'told to stop')
+    decide(patternId, choice)
+    return reply
   }
 
   const steerSubmit = (patternId: string, text: string): void => {
@@ -429,14 +456,27 @@ export function register(on: On): void {
       }
       if (sub === 'check') return { text: checkNow() }
       if (sub === 'steer') {
-        const text = args.slice(sub.length).trim()   // newlines inside the instruction survive
-        const patternId = state.steering ?? state.cards[0]
-        if (patternId === undefined || text === '') return { text: STEER_USAGE }
+        const rest = args.slice(sub.length).trim()   // newlines inside the instruction survive
+        const [first = ''] = rest.split(/\s+/)
+        // A leading number is always the card: folding a mistyped one back into the instruction would
+        // steer the wrong card with a garbled sentence, and `standing` keeps it for the whole session.
+        const n = numberOf(first)
+        if (state.cards.length === 0) return { text: NOTHING_TEXT }
+        if (n !== null && (n < 1 || n > state.cards.length)) return { text: noCardText(n) }
+        const text = (n === null ? rest : rest.slice(first.length)).trim()
+        const patternId = n === null ? (state.steering ?? state.cards[0]) : state.cards[n - 1]
+        const seat = patternId === undefined ? 0 : seatOf(patternId)
+        if (patternId === undefined || seat === 0 || text === '') return { text: STEER_USAGE }
         steerSubmit(patternId, text)
-        return { text: `ContextSaver: Claude will be told — ${text}` }
+        return { text: cardReply(patternId, seat, `Claude will be told: ${text}`) }
       }
+      if (sub === 'keep' || sub === 'kill') return { text: decideByNumber(sub, args.slice(sub.length).trim()) }
       if (sub === 'demo' && isDebug) {
-        // Debug-only: the pane's own look, without waiting for a real finding.
+        // Debug-only: the pane's own look, without waiting for a real finding. The header is part of that
+        // look, so a usage sample and its turns come first — without them the hero row draws its empty
+        // state above cards that state a percentage of context. (`now` is the reducer's to ignore.)
+        dispatch({ type: 'usage', usage: demoUsage(), now: 0 })
+        for (const stat of demoTurns()) dispatch({ type: 'turn.complete', stat })
         for (const row of demoRows(state.turn)) dispatch({ type: 'row', row })
         const patterns = demoPatterns(state.turn)
         const fresh = patterns.filter(p => p.decision === null).map(p => p.id)

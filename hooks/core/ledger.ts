@@ -1,7 +1,7 @@
 import type { ToolCallResult } from 'claude-code'
 
 import { collapseWs, stableJson } from './text'
-import { KEY_MAX } from './types'
+import { FILE_TOOLS, KEY_MAX, MAIN_AGENT } from './types'
 import type { CommandClass, Row } from './types'
 
 /** The flat tool event a row is built from: the tool, this call's id, the loop, and the tool's arguments beside them. */
@@ -84,7 +84,7 @@ export const normalize = (tool: string, input: unknown): { key: string; cls: Com
     const cls = classOf(command)
     return { key: `${cls}:${command}`.slice(0, KEY_MAX), cls }
   }
-  if (tool === 'Read' || tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') {
+  if (FILE_TOOLS.includes(tool)) {
     const path = pathArg(args)
     const range = tool === 'Read' ? `:${asNumber(args.offset) ?? ''}-${asNumber(args.limit) ?? ''}` : ''
     return { key: `${path}${range}`.slice(0, KEY_MAX), cls: tool === 'Read' ? 'read' : 'other' }
@@ -186,7 +186,7 @@ export const rowOf = (e: ToolEvent, result: ToolCallResult, ms: number, turn: nu
     tool: e.tool,
     key,
     cls,
-    agent: asString(e.agentId) ?? 'main',
+    agent: asString(e.agentId) ?? MAIN_AGENT,
     turn,
     ms,
     chars: result.text?.length ?? 0,

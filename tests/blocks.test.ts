@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   aggregate, decisionsBlock, knownPatternsBlock, ledgerBlock, ledgerLine, statsLines, summaryLine, turnsBlock,
 } from '../hooks/core/blocks'
+import { agentAliases } from '../hooks/core/evidence'
 import { initialState } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
 import { judgePattern } from './fixtures/judge/judgePattern'
@@ -17,16 +18,20 @@ const filler = (seq: number): Row => ({
 
 const at = (seq: number): Row => rows.filter(r => r.seq === seq)[0] ?? filler(seq)
 
+const aliases = agentAliases(rows)
+
+const lineOf = (seq: number): string => ledgerLine(at(seq), aliases)
+
 describe('blocks', () => {
   test('ledgerLine renders every column, with a dash for empty flags and paths', ($, _on) => {
-    expect(ledgerLine(at(1))).toBe('r1 | Bash | test:bun test | test | main | 2 | 61000 | 9700 | - | -')
-    expect(ledgerLine(at(5))).toBe(
+    expect(lineOf(1)).toBe('r1 | Bash | test:bun test | test | main | 2 | 61000 | 9700 | - | -')
+    expect(lineOf(5)).toBe(
       'r5 | Bash | read:docker compose logs api --tail 2000 | read | main | 5 | 3000 | 41000 | persist=120000 | -')
   })
 
   test('ledgerLine folds edit sizes and spawn metadata into the flags cell', ($, _on) => {
-    expect(ledgerLine(at(2))).toBe('r2 | Edit | /src/auth.ts | other | main | 3 | 120 | 300 | +4/-2 | /src/auth.ts')
-    expect(ledgerLine(at(7))).toBe(
+    expect(lineOf(2)).toBe('r2 | Edit | /src/auth.ts | other | main | 3 | 120 | 300 | +4/-2 | /src/auth.ts')
+    expect(lineOf(7)).toBe(
       'r7 | Agent | agent:explorer | other | main | 7 | 30000 | 2000 | agent=explorer/opus/completed/42000tok/0edits/180pch | -')
   })
 
@@ -51,9 +56,19 @@ describe('blocks', () => {
       'Bash | test:bun test | test | ×3 | Σ180000ms | Σ29400ch | turns 2-6 | edits-between 0.5 | main')
     expect(lines[lines.indexOf('per class:') + 1]).toBe('read | ×2 | Σ3040ms | Σ46200ch')
     expect(lines[lines.indexOf('per agent:') + 1]).toBe('main | ×7 | Σ77900ch')
+    expect(lines[lines.indexOf('per agent:') + 2], 'a subagent is named by its alias, never by its raw id').toBe('a1 | ×1 | Σ260ch')
     expect(lines[lines.indexOf('costliest rows:') + 1]).toBe(
       'r5 | Bash | read:docker compose logs api --tail 2000 | 41000ch')
     expect(statsLines([])).toEqual(['(none)'])
+  })
+
+  test('every agent cell reads an alias, in both the ledger and the per-call stats', ($, _on) => {
+    expect(lineOf(8), 'the ledger row of a subagent call names the loop a1')
+      .toBe('r8 | Edit | /src/token.ts | other | a1 | 7 | 200 | 260 | +10/-1 | /src/token.ts')
+    const perCall = statsLines(rows).filter(line => line.includes('/src/token.ts'))
+    expect(perCall[0]?.endsWith(' | a1'), 'the per-call line names the same alias').toEqual(true)
+    expect(statsLines(rows).some(line => line.includes('agent-1')), 'the raw id never reaches the judge').toEqual(false)
+    expect(ledgerBlock(judgeState()).includes('agent-1')).toEqual(false)
   })
 
   test('knownPatternsBlock lines decisions and previous-session calibration', ($, _on) => {
@@ -93,7 +108,7 @@ describe('blocks', () => {
       '~ | Bash | test:bun test | ×5 | Σ500ch',
     ])
     expect(lines[2]).toBe('r11 | Bash | read:cat notes.md | read | main | 11 | 10 | 100 | - | -')
-    expect(ledgerBlock(judgeState())).toBe(rows.map(ledgerLine).join('\n'))
+    expect(ledgerBlock(judgeState())).toBe(rows.map(row => ledgerLine(row, aliases)).join('\n'))
   })
 
   test('the blocks say (none) for an empty session', ($, _on) => {

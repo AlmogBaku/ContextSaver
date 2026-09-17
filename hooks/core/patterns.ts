@@ -1,13 +1,17 @@
-import { baseline, costOf, rowsOf } from './evidence'
-import { duration, instructionOf, killPrompt, kilo, median, pctOf } from './text'
+import { agentAliases, aliasOf, baseline, rowsOf, sumOf } from './evidence'
+import { collapseWs, duration, instructionOf, killPrompt, median, pctOf } from './text'
 import {
-  ALTERNATIVE_MAX, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF,
-  KEY_MAX, KIND_MAX, MAX_PATTERNS, ROW_CAP, SAMPLE_CAP, SETTLE_TURNS, initialState,
+  ALTERNATIVE_MAX, CARD_EVIDENCE, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, FILE_TOOLS,
+  JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, MAIN_AGENT, MAX_PATTERNS, NO_CALLS, ROW_CAP,
+  SETTLE_TURNS, initialState,
 } from './types'
 import type {
-  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Header, JudgeRun, PaneModel,
+  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Evidence, Header, JudgeRun, PaneModel,
   Pattern, Proposal, Row, Signature, State, StoredPattern, TurnStat,
 } from './types'
+
+// The `:offset-limit` slice `normalize` appends to a Read key: the path is what the details name.
+const READ_RANGE = /:\d*-\d*$/
 
 type Decided = Pattern & { decision: Choice }
 type Settle = { pattern: Pattern; ms: number; chars: number; requeue: string | null }
@@ -32,9 +36,9 @@ const turnHandle = (handle: string): number | null => {
   return n === undefined ? null : Number(n)
 }
 
-const turnsCited = (p: Pattern, state: State): number[] => {
+const turnsCited = (p: Pattern, rows: readonly Row[]): number[] => {
   const fromHandles = p.hits.map(turnHandle).filter((n): n is number => n !== null)
-  return [...rowsOf(state, p).map(r => r.turn), ...fromHandles].sort((a, b) => a - b)
+  return [...rows.map(r => r.turn), ...fromHandles].sort((a, b) => a - b)
 }
 
 const newTokens = (t: TurnStat): number => t.input + t.output + t.cacheCreate
@@ -128,19 +132,15 @@ const applyTurnComplete = (state: State, stat: Omit<TurnStat, 'turn' | 'calls'>)
 })
 
 // Present values win; `window`/`compactAt` sticky (§5.2, widened so a partial usage dispatch never blanks the header).
-const applyUsage = (state: State, usage: State['usage']): State => {
-  const merged = {
+const applyUsage = (state: State, usage: State['usage']): State => ({
+  ...state,
+  usage: {
     window: usage.window || state.usage.window,
     compactAt: usage.compactAt ?? state.usage.compactAt,
     tokens: usage.tokens ?? state.usage.tokens,
     percent: usage.percent ?? state.usage.percent,
-  }
-  const percent = usage.percent
-  const samples = percent === undefined
-    ? state.usageSamples
-    : [...state.usageSamples.filter(s => s.turn !== state.turn), { turn: state.turn, percent }].slice(-SAMPLE_CAP)
-  return { ...state, usage: merged, usageSamples: samples }
-}
+  },
+})
 
 const applyDecide = (state: State, id: string, choice: Choice, text: string | undefined): State => {
   const p = patternById(state.patterns, id)
@@ -255,56 +255,82 @@ export const reduce = (state: State, action: Action): State => {
   }
 }
 
-const shortKey = (r: Row): string => (r.key.startsWith(`${r.cls}:`) ? r.key.slice(r.cls.length + 1) : r.key).slice(0, 40)
-
-const statsOf = (p: Pattern, state: State): string => {
-  const cost = costOf(state, p)
+const statsOf = (p: Pattern, state: State, rows: readonly Row[]): string => {
+  const cost = sumOf(rows)
   const pct = pctOf(cost.chars, state.usage.window)
-  const turns = turnsCited(p, state)
+  const turns = turnsCited(p, rows)
   const first = turns[0]
   const last = turns[turns.length - 1]
   // Zero segments are dropped whole: turn handles and rebuilt rows carry no duration, and `0s` would claim a suite that ran for minutes cost nothing.
   return [
     `${p.hits.length}×`,
-    ...(pct > 0 ? [`~${pct}% context`] : []),
+    ...(pct > 0 ? [`~${pct}% of context`] : []),
     ...(cost.ms > 0 ? [duration(cost.ms)] : []),
-    // One turn is not a range: 'turns 1…1' reads as a bug.
-    ...(first === undefined || last === undefined ? [] : [first === last ? `turn ${first}` : `turns ${first}…${last}`]),
+    // One turn is not a range: 'turns 1–1' reads as a bug.
+    ...(first === undefined || last === undefined ? [] : [first === last ? `turn ${first}` : `turns ${first}–${last}`]),
   ].join(' · ')
 }
 
-const evidenceOf = (p: Pattern, state: State): string[] => {
-  const rows = rowsOf(state, p).map(r => ({
+// What ran, in the words the person typed or read: the command, the file, or the tool and its key.
+const whatRan = (r: Row): string => {
+  if (r.tool === 'Bash') return r.key.startsWith(`${r.cls}:`) ? r.key.slice(r.cls.length + 1) : r.key
+  if (FILE_TOOLS.includes(r.tool)) return r.key.replace(READ_RANGE, '')
+  return `${r.tool} ${r.key}`
+}
+
+const citedRows = (rows: readonly Row[], aliases: ReadonlyMap<string, string>): Evidence[] =>
+  rows.map(r => ({
     turn: r.turn,
-    seq: r.seq,
-    // Short and rounded, and the tool's own name is already in the key: the card is 40 cells wide.
-    text: `r${r.seq} · t${r.turn} · ${shortKey(r)} · ${duration(r.ms)} · ${kilo(r.chars)} · "${r.head}"`,
+    what: whatRan(r),
+    // The loop is named only when it was not the main one: an alias on every row would be noise.
+    agent: r.agent === MAIN_AGENT ? null : aliasOf(aliases, r.agent),
+    ms: r.ms,
+    chars: r.chars,
+    head: r.head,
   }))
-  const turns = p.hits
+
+const citedTurnStats = (p: Pattern, state: State): TurnStat[] =>
+  p.hits
     .map(turnHandle)
     .map(n => (n === null ? undefined : state.turns.find(t => t.turn === n)))
     .filter((t): t is TurnStat => t !== undefined)
-    .map(t => ({ turn: t.turn, seq: 0, text: `t${t.turn} · no tool calls · ${kilo(t.answerChars)} · "${t.answerHead}"` }))
-  return [...rows, ...turns].sort((a, b) => b.turn - a.turn || b.seq - a.seq).slice(0, 3).map(q => q.text)
+
+const evidenceOf = (p: Pattern, state: State, rows: readonly Row[], aliases: ReadonlyMap<string, string>): Evidence[] => {
+  const turns: Evidence[] = citedTurnStats(p, state)
+    .map(t => ({ turn: t.turn, what: NO_CALLS, agent: null, ms: 0, chars: t.answerChars, head: t.answerHead }))
+  // Reversed first, so two calls inside one turn also read newest-first once the stable sort has run.
+  return [...citedRows(rows, aliases).reverse(), ...turns]
+    .sort((a, b) => b.turn - a.turn)
+    .slice(0, CARD_EVIDENCE)
 }
 
-/** Derives a waster card from a pattern and the evidence it cites. */
-export const cardOf = (p: Pattern, state: State): Card => ({
-  patternId: p.id,
-  kind: p.ignored > 0 ? `ignored · ${p.kind}` : p.kind,
-  stats: statsOf(p, state),
-  why: p.why,
-  fix: p.alternative,
-  killText: killPrompt(p),
-  evidence: evidenceOf(p, state),
-})
+// A pattern with no row in hand cites turns, not calls: it counts them, and its context cost is the
+// judge's per-turn estimate. The unit is stated here, so the drawing never has to guess it back.
+const totalOf = (p: Pattern, state: State, rows: readonly Row[]): Card['total'] => {
+  if (rows.length > 0) return { unit: 'calls', calls: rows.length, ...sumOf(rows) }
+  return { unit: 'turns', calls: citedTurnStats(p, state).length, ms: 0, chars: (p.estTokensPerTurn ?? 0) * 4 }
+}
+
+/** Derives the waster card in seat `n` from a pattern, the evidence it cites and the ledger's loop aliases. */
+export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap<string, string>): Card => {
+  const rows = rowsOf(state, p)
+  return {
+    patternId: p.id,
+    n,
+    kind: p.ignored > 0 ? `ignored · ${p.kind}` : p.kind,
+    stats: statsOf(p, state, rows),
+    why: p.why,
+    fix: p.alternative,
+    total: totalOf(p, state, rows),
+    evidence: evidenceOf(p, state, rows, aliases),
+  }
+}
 
 const judgeShare = (state: State): number =>
   Math.round((state.judge.spent / Math.max(1, totalTokens(state))) * 1000) / 10
 
 const headerOf = (state: State): Header => ({
   percent: state.usage.percent ?? null,
-  spark: state.usageSamples.map(s => s.percent),
   tokensToCompaction: tokensToCompaction(state),
   turnsToCompaction: turnsToCompaction(state),
   judgeRuns: state.judge.runs,
@@ -320,25 +346,38 @@ const decidedRowOf = (state: State, p: Decided): DecidedRow => ({
   choice: p.decision,
   kind: p.kind,
   savedPct: isSent(p.decision) ? pctOf(baseline(state, p).chars, state.usage.window) : null,
+  // D4: the figure is a projection of one avoided repeat until the instruction settled — nothing ignored
+  // it and nothing is still in flight — so the drawing can say `per repeat` before it says `saved`.
+  settled: isSent(p.decision) && p.openedAtTurn === null && p.ignored === 0,
+  // What Kill sends is the kind and the fix the row already carries; only a steer's own sentence is news.
+  instruction: p.decision === 'steer' && p.instruction !== null && collapseWs(p.instruction) !== collapseWs(p.alternative)
+    ? p.instruction
+    : null,
   ignored: p.ignored,
 })
 
 /** Builds everything the pane renders: header, wasters, decisions and rules. */
-export const paneModel = (state: State, artifacts: Artifact[]): PaneModel => ({
-  header: headerOf(state),
-  wasters: state.cards
-    .map(id => patternById(state.patterns, id))
-    .filter((p): p is Pattern => p !== undefined)
-    .map(p => cardOf(p, state)),
-  expanded: state.expanded,
-  steering: state.steering,
-  steerDraft: state.steerDraft,
-  decided: state.patterns
-    .filter(isDecided)
-    .sort((a, b) => (b.decidedAtTurn ?? 0) - (a.decidedAtTurn ?? 0))
-    .map(p => decidedRowOf(state, p)),
-  artifacts,
-})
+export const paneModel = (state: State, artifacts: Artifact[]): PaneModel => {
+  // One alias table for the whole draw: the naming is the ledger's, not a card's, and the pane
+  // redraws on every ledger row and every keystroke in the Steer field.
+  const aliases = agentAliases(state.rows)
+  return {
+    header: headerOf(state),
+    // Numbered as they are drawn, so `/saver keep 2` names the card the person is looking at.
+    wasters: state.cards
+      .map(id => patternById(state.patterns, id))
+      .filter((p): p is Pattern => p !== undefined)
+      .map((p, at) => cardOf(p, state, at + 1, aliases)),
+    expanded: state.expanded,
+    steering: state.steering,
+    steerDraft: state.steerDraft,
+    decided: state.patterns
+      .filter(isDecided)
+      .sort((a, b) => (b.decidedAtTurn ?? 0) - (a.decidedAtTurn ?? 0))
+      .map(p => decidedRowOf(state, p)),
+    artifacts,
+  }
+}
 
 /** Builds the one summary line the band shows above the prompt. */
 export const bandModel = (state: State): BandModel => ({
