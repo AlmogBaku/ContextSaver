@@ -9,7 +9,7 @@ import { appendedTo, bulletOnly, mergeSettings, propose } from './core/rules'
 import { collapseWs, duration, fit, instructionOf, pctOf } from './core/text'
 import {
   AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, JUDGE_MIN_ROWS, MAX_PATTERNS, PANE_ID,
-  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, initialState,
+  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, STEER_RING_TRIES, STEER_RING_WAIT_MS, initialState,
 } from './core/types'
 import type { Action, Actions, Artifact, Choice, State, Ui } from './core/types'
 import type { Host } from './host'
@@ -50,10 +50,6 @@ export function register(on: On): void {
   // The load lane's one failure toast. Its arming survives every failure, so a toast per retry would be a
   // storm — but total silence reads exactly like a check that never fired, so the first failure speaks.
   let armedSpoke = false
-  // The card whose Fix… field is waiting for the ring, and whether the tree holding it has been drawn: a ring
-  // lands only on an element the drawn tree holds ('no element of its own is drawn under that key'), and a
-  // tree lands after the hook that built it returns — so the ask takes two renders.
-  let ringWanted: { patternId: string; isDrawn: boolean } | null = null
 
   const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -343,55 +339,43 @@ export function register(on: On): void {
     host?.toast(`Trying "${a.title}" for this session`)
   }
 
-  // `autoFocus` only lands where the site takes the keyboard fresh, and the press that opened the field left
-  // the ring on the Fix… button: the keys are asked for by re-opening our own pane, which delivers no second
-  // instance, only the focus rewrite (d.ts 4901-4922). A refusal is the person's to make, so it is no error.
-  const wantSteerRing = (patternId: string): void => {
-    const engine = host
-    if (engine === null || state.steering !== patternId) return
-    ringWanted = { patternId, isDrawn: false }
-    void engine.openPane(paneArgs(true)).catch(() => undefined)
-  }
+  // The key the pane draws a card's Fix… field under.
+  const steerFieldKey = (patternId: string): string => `card:${patternId}:text`
 
-  // Once the field is on screen, the ring is moved onto it. Where it stayed put and the pane does not even
-  // hold the keyboard, the composer is the only way in and the line that says so is owed.
-  const takeSteerRing = (patternId: string, isFocused: boolean): void => {
+  // The ring lands only on an element the drawn tree already holds ('no element of its own is drawn under that
+  // key', d.ts 8846-8853), and a tree lands after the render hook that built it returns. The press that opens
+  // the field asks for a redraw and nothing more, so the ask waits for the frame the field is drawn in, and
+  // asks again while the engine answers that nothing is drawn under the key — a few frames, then it stops.
+  const steerRing = async (patternId: string): Promise<void> => {
     const engine = host
-    ringWanted = null
     if (engine === null) return
-    const seat = seatOf(patternId)
-    void (async () => {
-      const moved = await engine
-        .focusElement({ requestId: PANE_ID, key: `card:${patternId}:text` })
-        .then(result => result.deny === undefined)
-        .catch(() => false)
-      if (moved || isFocused) return
-      engine.toast(`ContextSaver: the composer has your keys — type /saver fix ${seat} <your note>`)
-    })()
-  }
-
-  // The two renders a ring takes: this one draws the field and asks for one more draw, the next one — where
-  // the field is already on screen — moves the ring onto it.
-  const stepSteerRing = (isFocused: boolean): void => {
-    const wanted = ringWanted
-    if (wanted === null) return
-    if (state.steering !== wanted.patternId) {
-      ringWanted = null
-      return
+    // `focus` is a request, not a grant (d.ts 4915-4922): the surface refuses it while the person holds an
+    // element of ours, which the press that opened the field is — but where the composer holds the keys over
+    // an empty line it is granted, and then `autoFocus` lands the ring on the field by itself.
+    void engine.openPane(paneArgs(true)).catch(() => undefined)
+    let denied = 'the ask was never answered'
+    for (let tries = STEER_RING_TRIES; tries > 0; tries -= 1) {
+      await engine.sleep(STEER_RING_WAIT_MS).catch(() => undefined)
+      // The field was closed again, or another card's opened: this ring is nobody's now.
+      if (state.steering !== patternId) return
+      const deny = await engine
+        .focusElement({ requestId: PANE_ID, key: steerFieldKey(patternId) })
+        .then(result => result.deny ?? null)
+        .catch(err => messageOf(err))
+      if (deny === null) return
+      denied = deny
     }
-    if (!wanted.isDrawn) {
-      ringWanted = { ...wanted, isDrawn: true }
-      host?.invalidate()
-      return
-    }
-    takeSteerRing(wanted.patternId, isFocused)
+    // The ring stayed put, so the keystrokes are the composer's: the way in is the line the person is owed.
+    engine.toast(`ContextSaver: the composer has your keys — type /saver fix ${seatOf(patternId)} <your note>`)
+    if (isDebug) engine.log(`${PLUGIN_NAME}: the ring never reached ${steerFieldKey(patternId)} — ${denied}`)
   }
 
   const actions: Actions = {
     keep: patternId => decide(patternId, 'keep'),
     steer: patternId => {
       dispatch({ type: 'steer.begin', patternId })
-      wantSteerRing(patternId)
+      // A second press closed the field; only the press that opened one goes looking for the keyboard.
+      if (state.steering === patternId) void steerRing(patternId)
     },
     // The pane's body is this hook's tree, so the redraw is what paints the keystroke; the text it draws
     // back is this one, which is also what `/saver fix` sends when the keyboard never reaches the field.
@@ -418,6 +402,7 @@ export function register(on: On): void {
     try {
       const engine: Host = {
         now: () => $.clock.now(),
+        sleep: ms => $.clock.sleep(ms),
         invalidate: () => $.ui.invalidate('ui.render'),
         toast: text => $.ui.toast(text),
         log: text => $.ui.log(text),
@@ -599,7 +584,6 @@ export function register(on: On): void {
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, ($, e, next) => {
     try {
       if (host === null || e.surface === 'mobile') return next(e)
-      stepSteerRing(e.props.isFocused)
       const { Box, Text, Button, Input, Raster } = $.ui.resolve(e) as unknown as Ui
       return Pane({
         ui: { Box, Text, Button, Input, Raster },

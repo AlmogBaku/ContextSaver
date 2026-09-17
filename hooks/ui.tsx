@@ -566,11 +566,11 @@ const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): Rend
 /**
  * The Fix… field and its hint, opened in place under the verbs.
  *
- * `value` is the text the field holds when drawn (d.ts 3756-3760) and the pane's body is this hook's tree,
- * so the typing is painted by the next draw and a draw that leaves `value` out draws an empty field: every
- * render carries the text — the draft once a keystroke landed, the fix before that — and the keystroke's own
- * redraw is what shows it. Verified live at 85 columns: the characters land in the field, and a redraw for
- * any other reason draws the draft back rather than wiping it.
+ * The field opens empty, with the card's own fix drawn dim behind it (d.ts 3752-3755): a one-line field draws
+ * its head and truncates the rest, so a field pre-filled with a fix as long as this one draws the fix and
+ * hides every character the person types after it. `value` is the text the field holds when drawn (d.ts
+ * 3756-3760) and the pane's body is this hook's tree, so every render carries the draft back — the keystroke's
+ * own redraw is what paints it, and a redraw for any other reason draws it again rather than wiping it.
  */
 const steerRows = (ui: Ui, card: Card, draft: string | null, actions: Actions, cells: number): RenderElement[] => {
   const { Box, Input, Text } = ui
@@ -581,7 +581,8 @@ const steerRows = (ui: Ui, card: Card, draft: string | null, actions: Actions, c
       <Box flexGrow={1}>
         <Input
           key={`card:${id}:text`}
-          value={draft ?? card.fix}
+          value={draft ?? ''}
+          placeholder={card.fix}
           submitLabel="send"
           autoFocus
           onInput={(text: string) => actions.steerDraft(text)}

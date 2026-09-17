@@ -2,7 +2,7 @@ import type { ModelForkResult, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS } from '../hooks/core/types'
+import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, STEER_RING_TRIES, STEER_RING_WAIT_MS } from '../hooks/core/types'
 import { assistant } from './fixtures/adopt/assistant'
 import { bashUse } from './fixtures/adopt/bashUse'
 import { prompt } from './fixtures/adopt/prompt'
@@ -285,14 +285,16 @@ describe('register', () => {
     expect((await $.command.run(saverRun('debug'))).text, 'what the instruction keeps saving is still counted').toContain('saved 0s · ~2% · 16000 chars')
   })
 
-  // Bugs (a) and (b): the pane never held the keyboard, so the arrows were the engine's own navigation and the
-  // Fix… field drew while the typing went to the composer. The press now asks for the keys by re-opening our
-  // own pane (which delivers no second instance, only the focus rewrite), and the render that draws the field
-  // asks for one more draw, whose render moves the ring. Nothing beneath `claude plugin test`
-  // serves the host's `ui.focus`, so the ring never moves in a test: what a test sees is the ask, and the
-  // composer route the plugin owes a person whose pane holds neither the ring nor the keyboard.
-  test('pressing Fix… opens the field, asks for the keyboard, and names the composer route when the ring stays put', async ($, on) => {
+  // Bugs (a), (b) and (d): the pane never held the keyboard, so the Fix… field drew while the typing went to
+  // the composer. The press asks for the keys by re-opening our own pane (which delivers no second instance,
+  // only the focus rewrite), and then asks for the ring itself — a ring lands only on an element the drawn tree
+  // already holds (d.ts 8846-8853), and that tree lands a frame after the press, so the ask waits for a frame
+  // and asks again while the engine answers that nothing is drawn under the key. Nothing beneath `claude plugin
+  // test` serves the host's `ui.focus`, so the ring never lands in a test: what a test sees is the asking, and
+  // the composer route the plugin owes a person whose keystrokes are going somewhere else.
+  test('pressing Fix… opens the field, asks for the keyboard, and names the composer route where the ring never lands', async ($, on) => {
     const world = startsSaver(on)
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
     on('tool.call', () => bashAnswer(OUT_CHARS))
     on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
 
@@ -302,31 +304,56 @@ describe('register', () => {
     await world.clock.settle()
     await $.ui.render(paneRender())
     const asked = world.opened.length
+    const spoken = world.toasts.length
 
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
     await world.clock.settle()
 
     expect(world.opened.slice(asked), 'the open pane is re-opened for one reason only: to ask for the keys')
       .toEqual([{ id: 'saver', title: 'ContextSaver', rows: 18, focus: true }])
-    expect(world.toasts, 'nothing is said before the field is even drawn').toEqual(['ContextSaver: 1 new waster'])
-
-    // The render that draws the field only asks for one more draw: a ring lands on an element the drawn tree
-    // already holds. The draw after it is where the ring is asked for, over a pane drawing unfocused.
     expect(textOf(await $.ui.render(paneRender())), 'the field is open under the verbs, and stays open')
       .toContain('Enter sends · Fix… again closes')
-    await world.clock.settle()
-    expect(world.toasts, 'nothing is said while the field is one draw old').toEqual(['ContextSaver: 1 new waster'])
 
-    await $.ui.render(paneRender())
-    await world.clock.settle()
+    await world.clock.advance(STEER_RING_WAIT_MS)
 
-    expect(world.toasts.filter(text => text.includes('has your keys')), 'the route is said once, with the card\'s own number')
+    expect(world.toasts.slice(spoken), 'nothing is said while the field is still being given its frames').toEqual([])
+
+    await world.clock.advance(STEER_RING_TRIES * STEER_RING_WAIT_MS)
+
+    expect(world.toasts.slice(spoken), 'the route in is said once, with the card\'s own number')
       .toEqual(['ContextSaver: the composer has your keys — type /saver fix 1 <your note>'])
+    expect(world.logs.filter(text => text.includes('the ring never reached')), 'the debug log names the key and what refused it')
+      .toEqual([`contextsaver: the ring never reached card:${SUITE_ID}:text — no implementation for ui.focus`])
+    expect(textOf(await $.ui.render(paneRender())), 'the field a person cannot type in still says the route')
+      .toContain('or /saver fix <n> <text>')
 
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
-    await world.clock.settle()
+    await world.clock.advance(STEER_RING_TRIES * STEER_RING_WAIT_MS)
 
     expect((await $.command.run(saverRun('debug'))).text, 'Fix… again closed it').toContain('steering -')
+  })
+
+  // A field closed while the ring is still being asked for is nobody's field: the asking stops with it, and the
+  // route a person never needs is a line they never see.
+  test('a Fix… field closed again while the ring is being asked for says nothing', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+    await $.ui.render(paneRender())
+    const spoken = world.toasts.length
+
+    await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
+    await world.clock.advance(STEER_RING_WAIT_MS)
+    await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
+    await world.clock.advance(STEER_RING_TRIES * STEER_RING_WAIT_MS)
+
+    expect((await $.command.run(saverRun('debug'))).text, 'the second press closed the field').toContain('steering -')
+    expect(world.toasts.slice(spoken), 'a field nobody is typing in is owed no route').toEqual([])
   })
 
   test('/saver fix with a note decides the newest waster and every later prompt carries the standing text', async ($, on) => {

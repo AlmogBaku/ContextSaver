@@ -14,6 +14,8 @@ import type {
 export type Host = {
   /** $.clock.now() — current time in milliseconds. */
   now(): Promise<number>
+  /** $.clock.sleep(ms) — resolve after ms milliseconds. */
+  sleep(ms: number): Promise<void>
   /** $.ui.invalidate('ui.render') — request a redraw (fire-and-forget). */
   invalidate(): void
   /** $.ui.toast(text) — show a transient notification (fire-and-forget). */

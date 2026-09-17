@@ -78,7 +78,8 @@ const textOf = (value: unknown): string => {
   if (typeof value !== 'object' || value === null) return ''
   const node = value as Node
   const label = node.props?.label
-  const held = node.props?.value
+  // What a person reads in a field: its text, or the placeholder the surface draws dim while it is empty.
+  const held = node.props?.value === '' ? node.props?.placeholder : node.props?.value
   const own = typeof label === 'string' ? label : typeof held === 'string' ? held : ''
   return `${own}${kidsOf(node).map(textOf).join('')}`
 }
@@ -100,6 +101,9 @@ const keysOf = (tree: unknown): string[] =>
 
 const inputValueOf = (tree: unknown, key: string): unknown =>
   nodesOf(tree).find(node => node.type === 'Input' && node.props?.key === key)?.props?.value
+
+const placeholderOf = (tree: unknown, key: string): unknown =>
+  nodesOf(tree).find(node => node.type === 'Input' && node.props?.key === key)?.props?.placeholder
 
 const holds = (tree: unknown, part: string): boolean => nodesOf(tree).some(node => textOf(node).includes(part))
 
@@ -611,9 +615,11 @@ describe('ui', () => {
     expect(holds(tree, '↳ "To recap the plan')).toEqual(true)
   })
 
-  // The field holds the text the last render gave it (d.ts 3756-3760) and the pane's body is this tree, so
-  // every render carries the text: the fix until a keystroke lands, the draft from then on.
-  test('Fix… opens a field holding the fix, and the draft is drawn back', async ($, on) => {
+  // Bug (c): the field opened pre-filled with the fix, a line longer than the seat, so a one-line field drew
+  // the fix, truncated the rest, and hid every character the person typed after it. It opens empty now, the
+  // fix dim behind it (d.ts 3752-3755). The field holds the text the last render gave it (d.ts 3756-3760) and
+  // the pane's body is this tree, so every render carries the draft back rather than wiping it.
+  test('Fix… opens an empty field with the fix drawn dim behind it, and the draft is drawn back', async ($, on) => {
     const clock = mock.clock(on)
     const { calls, actions } = recorder()
     on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
@@ -628,7 +634,8 @@ describe('ui', () => {
     const open = await $.ui.render(PANE_HOST)
 
     expect(keysOf(open)).toContain(`card:${FIRST}:text`)
-    expect(inputValueOf(open, `card:${FIRST}:text`)).toEqual(FIX)
+    expect(inputValueOf(open, `card:${FIRST}:text`), 'nothing is pre-filled, so the first keystroke is what the field shows').toEqual('')
+    expect(placeholderOf(open, `card:${FIRST}:text`), 'the fix is the dim suggestion behind the empty field').toEqual(FIX)
     expect(holds(open, 'Enter sends')).toEqual(true)
     expect(holds(open, 'Fix… again closes')).toEqual(true)
     expect(holds(open, 'or /saver fix <n> <text>')).toEqual(true)
@@ -639,6 +646,7 @@ describe('ui', () => {
     expect(keysOf(drafted), 'the field is still the same element').toContain(`card:${FIRST}:text`)
     expect(inputValueOf(drafted, `card:${FIRST}:text`), 'what the person typed is what the redraw draws')
       .toEqual(draftPane.steerDraft)
+    expect(placeholderOf(drafted, `card:${FIRST}:text`), 'the suggestion stays behind the words the person is writing').toEqual(FIX)
 
     await $.ui.press({ plugin: DRAWER, key: `card:${FIRST}:steer`, requestId: DRAFT_HOST.requestId })
     await clock.settle()
