@@ -805,7 +805,8 @@ const counted = (n: number, word: string): string => `${n} ${word}${n === 1 ? ''
  * band gives back the time, then the sentence itself, and never a cut figure.
  */
 const foundLines = (model: BandModel): string[] => {
-  const pct = model.costPct > 0 ? `~${model.costPct}% of your context` : null
+  const whole = Math.round(model.costPct)   // a teaser needs no decimal
+  const pct = model.costPct > 0 ? `${whole >= 1 ? `~${whole}%` : 'under 1%'} of your context` : null
   // Seconds are no promise worth making, and a behavioural card carries no wall time at all.
   const time = model.costMs >= MINUTE_MS ? duration(model.costMs) : null
   if (pct === null && time === null) return [`Found ${counted(model.fresh, 'thing')} worth a look`]
