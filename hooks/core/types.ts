@@ -122,7 +122,7 @@ export type State = {
   cards: string[]                  // pattern ids awaiting a decision, newest first (the pane's WASTERS list)
   expanded: string | null          // pattern id whose (i) details are open; one at a time
   steering: string | null          // pattern id whose Fix… field is open
-  steerDraft: string | null        // the field's current text (kept in state so redraws never wipe it)
+  steerDraft: string | null        // what the person has typed so far: every render draws it back into the field, so a redraw for any other reason never wipes it
   notes: string[]                  // one-shot texts: drained into the next tool result or prompt
   standing: string[]               // texts re-sent with every prompt this session
   written: string[]                // `${patternId}:${kind}` of artifacts written, tried or skipped this session; propose() omits them
@@ -170,7 +170,7 @@ export type Site = { bodyColumns: number; maxRows: number }
 export type Actions = {
   keep(patternId: string): void
   steer(patternId: string): void          // toggles the Fix… field under the waster's verbs
-  steerDraft(text: string): void          // every keystroke, so redraws keep the text
+  steerDraft(text: string): void          // every keystroke: the state keeps the text and the redraw is what paints it
   steerSubmit(patternId: string, text: string): void  // Enter in the field, or /saver fix <text>
   kill(patternId: string): void
   info(patternId: string): void           // toggles the (i) details

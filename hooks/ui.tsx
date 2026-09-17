@@ -72,6 +72,8 @@ const MIN_ROWS = 8            // however little the surface grants the inline pa
 const HEAD_ROWS = 5           // rows the inline header spends: the mark's own four cell rows and the blank under them
 const LOGO = logoCells()      // packed once: the pane redraws on every ledger row and every keystroke
 const FOOT_ROWS = 2           // the inline footer's own rows: the blank and the counts line
+const KEYS_ROWS = 1           // the keyboard row the inline seat pays for (docked it takes a blank too)
+const EMPTY_ROWS = 3          // the quiet pane's own rows: its frame and the one sentence inside it
 const CARD_BORDER_ROWS = 2    // the card's own '╭───╮' and '╰───╯'
 const VERBS_ROWS = 1
 const STEER_ROWS = 2          // the field and its hint
@@ -111,7 +113,7 @@ const SEP = ' · '                   // between two figures, or between a figure
 const NOTHING_YET = 'nothing stands out yet'   // the tail of a budget row before the judge has spoken
 const DECIDED_LABEL = 'Decided'
 const RULES_LABEL = 'Rules for next session'
-const STEER_HINT = 'Enter sends · Fix… again closes · longer: /saver fix <n> <text>'
+const STEER_HINT = 'Enter sends · Fix… again closes · or /saver fix <n> <text>'
 const EMPTY_TEXT = 'Watching quietly. Nothing repeating yet.'
 const AWAITING_TEXT = 'awaiting the first turn'
 const CHECK_LABEL = `${GLYPHS.check} Check now`
@@ -128,7 +130,21 @@ const BAND_GAP = '  '                         // cells between the mark and the 
 const HOUR_MS = 3_600_000
 const MINUTE_MS = 60_000
 const FULL_PANE_HINT = '/saver for the full pane'
-const VERBS_HINT = '/saver fix|ignore <n>'   // the keyboard route to the verbs, for a pane the Tab ring never reaches
+const VERBS_HINT = '/saver fix|ignore <n>'   // the keyboard route to the verbs, for a pane that lost the keys
+// The keys the pane is worked with, said once in its last row: the person's own chord is what focuses a pane
+// the surface would not hand the keyboard to, and nothing else on screen says so.
+const KEYS_FOCUS = 'ctrl+x tab focuses this pane'
+const KEYS_MOVE = 'Tab moves'
+const KEYS_PRESS = 'Enter presses'
+const KEYS_BACK = 'Esc hands the keys back'
+// The row's phrasings, longest first: the verbs by number are given back first, then the keys the Tab ring
+// makes obvious once the pane holds them. The chord itself is the one clause a narrow pane keeps.
+const KEYS_LINES: readonly (readonly string[])[] = [
+  [KEYS_FOCUS, KEYS_MOVE, KEYS_PRESS, KEYS_BACK],
+  [KEYS_FOCUS, KEYS_MOVE, KEYS_BACK],
+  [KEYS_FOCUS, KEYS_BACK],
+  [KEYS_FOCUS],
+]
 
 // The cells one card's cited calls are laid out against: three columns, the cost's own rung of the ladder.
 type CallColumns = { turn: number; what: number; alias: number; time: number; unit: boolean; cost: boolean }
@@ -547,7 +563,15 @@ const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): Rend
   ]
 }
 
-/** The Fix… field and its hint, opened in place under the verbs. */
+/**
+ * The Fix… field and its hint, opened in place under the verbs.
+ *
+ * `value` is the text the field holds when drawn (d.ts 3756-3760) and the pane's body is this hook's tree,
+ * so the typing is painted by the next draw and a draw that leaves `value` out draws an empty field: every
+ * render carries the text — the draft once a keystroke landed, the fix before that — and the keystroke's own
+ * redraw is what shows it. Verified live at 85 columns: the characters land in the field, and a redraw for
+ * any other reason draws the draft back rather than wiping it.
+ */
 const steerRows = (ui: Ui, card: Card, draft: string | null, actions: Actions, cells: number): RenderElement[] => {
   const { Box, Input, Text } = ui
   const id = card.patternId
@@ -614,8 +638,11 @@ const cardRows = (
     ...(isSteering ? steerRows(ui, card, model.steerDraft, actions, cells) : []),
   ]
   // Inline the verbs and the field come first, so what the seat cannot hold is detail rather than a verb.
-  return isCompact
-    ? [titleRow(ui, card, actions, cells), ...verbs, ...content.slice(0, Math.max(0, budget))]
+  if (isCompact) return [titleRow(ui, card, actions, cells), ...verbs, ...content.slice(0, Math.max(0, budget))]
+  // Docked the verbs sit under the content — except while the field is open, when they rise with it: a field
+  // the eye has to hunt for below the details is the field the person never finds.
+  return isSteering
+    ? [titleRow(ui, card, actions, cells), ...spacer, ...verbs, ...spacer, ...content]
     : [titleRow(ui, card, actions, cells), ...spacer, ...content, ...spacer, ...verbs]
 }
 
@@ -794,13 +821,23 @@ const footerSection = (
   )
 }
 
-/** The pane's last row: the verbs by number, since nothing else on screen says they can be typed. */
-const hintSection = (ui: Ui, cells: number): RenderElement => {
+/** The keys the pane takes, and the verbs by number while a card wears one: the longest phrasing that fits. */
+const keysLine = (cells: number, hasCards: boolean): string => {
+  const lines = KEYS_LINES.map(parts => joined([...parts]))
+  const shortest = lines[lines.length - 1] ?? ''
+  // The verbs by number are given back first, then one clause at a time; the chord itself is never dropped.
+  const wanted = [...(hasCards ? [joined([lines[0] ?? '', VERBS_HINT])] : []), ...lines]
+  return wanted.find(line => line.length <= cells) ?? fit(shortest, cells)
+}
+
+/** The pane's last row: how it is worked from the keyboard, since nothing else on screen says. */
+const hintSection = (ui: Ui, cells: number, hasCards: boolean, isCompact: boolean): RenderElement => {
   const { Box, Text } = ui
   return (
     <Box flexDirection="column" paddingX={1 + HEAD_INDENT}>
-      {blank(ui)}
-      <Text dimColor wrap="truncate-end">{fit(VERBS_HINT, cells)}</Text>
+      {/* Inline the row is one of the few the seat grants, so it spends none of them on a blank. */}
+      {isCompact ? null : blank(ui)}
+      <Text dimColor wrap="truncate-end">{keysLine(cells, hasCards)}</Text>
     </Box>
   )
 }
@@ -889,16 +926,19 @@ export function Pane(props: PaneProps): RenderElement {
   // Inline the drawing is budgeted against the seat the surface really granted, never against a constant.
   const seat = Math.max(MIN_ROWS, Math.min(site.maxRows, PANE_INLINE_ROWS))
   const foot = model.decided.length === 0 && model.artifacts.length === 0 ? 0 : FOOT_ROWS
-  const rows = isCompact ? Math.max(0, seat - HEAD_ROWS - foot) : null
-  // The command hint is the docked pane's last row: inline the seat is counted in rows and the
-  // footer already names a command, and with no card listed there is no number to type.
-  const isHinted = !isCompact && model.wasters.length > 0
+  // The keys are taught at both placements, so inline the row it takes is budgeted for like any other — but
+  // the newest card's own rows are unclippable (a verb and the field are never cut), so on a seat that tight
+  // the lesson is what gives way rather than the drawing running past the seat and being clipped anyway.
+  const newest = model.wasters[0]
+  const fixed = newest === undefined ? EMPTY_ROWS : cardFixedRows(newest, model, cells)
+  const keys = isCompact && seat - HEAD_ROWS - foot - fixed < KEYS_ROWS ? 0 : KEYS_ROWS
+  const rows = isCompact ? Math.max(0, seat - HEAD_ROWS - foot - keys) : null
   return (
     <Box flexDirection="column">
       {headerSection(ui, model.header, actions, indented, isCompact)}
       {wastersSection(ui, model, actions, cells, rows)}
       {footerSection(ui, model, actions, indented, isCompact)}
-      {isHinted ? hintSection(ui, indented) : null}
+      {keys === 0 ? null : hintSection(ui, indented, model.wasters.length > 0, isCompact)}
     </Box>
   )
 }

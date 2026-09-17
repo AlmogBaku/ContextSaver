@@ -112,7 +112,7 @@ describe('demo', () => {
     expect(drawn, 'with the sentence that was sent under it').toContain('run only the tests for the file you just edited')
     expect(drawn).toContain('Rules for next session')
     expect(drawn, 'the rule is labelled by what it tells Claude to do').toContain('Run only the tests for the file')
-    expect(drawn, 'and the verbs are named for the keyboard').toContain('/saver fix|ignore <n>')
+    expect(drawn, 'and the last row says how the pane is worked from the keyboard').toContain('ctrl+x tab focuses this pane')
 
     const debug = await $.command.run(saverRun('debug'))
     expect(debug.text).toContain('rows 7')

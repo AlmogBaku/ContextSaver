@@ -111,10 +111,11 @@ For you, it goes like this.
    doing instead. Press `i` for the receipts: the reasoning in full, then every call behind the claim —
    the turn, the command or file, the loop it ran in, its seconds and its size, and the first line of
    what came back. Each card is numbered, so `/saver ignore 2` decides the one you are looking at.
-6. **You press one of three buttons.** *Fix* sends the suggestion as it stands. *Fix…* opens it as a line
-   you can rewrite first — the field comes pre-filled. *Ignore* if you don't care, and it never mentions
-   it again. The pane's last line names the same verbs for the keyboard — `/saver fix|ignore <n>` —
-   because the composer keeps the Tab ring.
+6. **You press one of three buttons.** *Fix* sends the suggestion as it stands. *Fix…* opens a line right
+   under the verbs, pre-filled with the fix, and puts the cursor in it. *Ignore* if you don't care, and it
+   never mentions it again. The pane's last line says how it is worked from the keyboard — `ctrl+x tab`
+   focuses it, `Tab` moves, `Enter` presses, `Esc` hands the keys back — and names the same verbs by
+   number for the composer, `/saver fix|ignore <n>`.
 7. **Claude changes course in the turn that's already running.** Your words reach it on its very next
    tool result, and ride along with every prompt after that, so it doesn't quietly drift back after a
    compaction. Nothing is blocked, nothing is denied, nothing waits on you.
@@ -158,6 +159,10 @@ guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](do
   occurrences get reported.
 - **A row's `ms` is wall time.** It includes the time a permission prompt sat waiting for you, so a big
   number is not automatically machine cost. The judge's prompt says so.
+- **The pane takes your keyboard when you open it.** `/saver`, `Open` and a check you asked for open it
+  asking for the keys, so `Tab` moves inside the pane and `Enter` presses; `ctrl+x tab` gives them back to
+  it whenever it lost them (the pane's last row says so), `Esc` returns them to the prompt, and
+  `/saver fix <n> <text>` always works from the composer if the field never gets the cursor.
 - **Terminal and desktop only.** On a mobile surface it keeps the ledger and draws nothing.
 - **Hot reload starts a new session.** Under `--plugin-dir`, editing a file reloads the plugin: turn
   tokens, cards and decisions start empty, the ledger is rebuilt from the transcript, and the pattern
@@ -175,10 +180,14 @@ All logic is pure functions over one `State` in `hooks/core/`. `hooks/register.t
 that touches events and `$`, and every hook returns `next(e)` on any path it does not own.
 `hooks/ui.tsx` is pure over two view models (`BandModel`, `PaneModel`) and never reads `State`.
 
-Pressing `Fix…` asks the surface for the keyboard: `autoFocus` only lands where a site takes the
-keyboard fresh, and the click that pressed `Fix…` left the ring on that Button, so the shell calls
-`$.ui.focus({ requestId, key })` for the field it just opened. The ring is the person's to give — a
-surface that will not move it changes nothing, and the field is still there to be clicked.
+Pressing `Fix…` asks the surface for the keyboard and then for the ring, in that order. `focus` on
+`$.ui.open` is a request, not a grant, and re-opening our own id delivers only the focus rewrite, so that
+is how the pane asks; `autoFocus` cannot help, since it lands only where a site takes the keyboard *fresh*.
+The ring itself is asked for one render later: `$.ui.focus({ requestId, key })` lands only on an element the
+*drawn* tree holds, and a tree lands after the hook that built it returns. So the render that first draws
+the field asks for one more draw, and the draw after it moves the ring — verified live at 85 columns, where
+the characters you type land in the field. Both asks are the person's to refuse: where the ring stayed put
+and the pane holds no keys either, one toast names the route that always works, `/saver fix <n> <your note>`.
 
 Every row is assembled and measured before it is drawn: a Button at a row's right edge gets its cells
 reserved first, and a header row that does not fit drops whole segments rather than cutting a number.

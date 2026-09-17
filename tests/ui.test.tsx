@@ -39,6 +39,7 @@ const DOCK_GAUGE = 29                 // and what is left of it beside the mark 
 const PINCHED_GAUGE = 18              // and once the body is 26 columns and the trend has gone
 const TREND = sparkline(twoWasters.header.trend, 10)
 const FIX = 'run only the tests covering the files you changed; run the full suite once when the phase is done'
+const GLYPH_FIELD = '›'               // the glyph leading the Fix… field's own row
 
 // The trees are hosted on `CommandOutput`, the one render component the plugin never hooks: the
 // test's own `on` sits beneath every plugin, so the plugin's own `AbovePrompt` and `Pane` hooks
@@ -610,6 +611,8 @@ describe('ui', () => {
     expect(holds(tree, '↳ "To recap the plan')).toEqual(true)
   })
 
+  // The field holds the text the last render gave it (d.ts 3756-3760) and the pane's body is this tree, so
+  // every render carries the text: the fix until a keystroke lands, the draft from then on.
   test('Fix… opens a field holding the fix, and the draft is drawn back', async ($, on) => {
     const clock = mock.clock(on)
     const { calls, actions } = recorder()
@@ -628,16 +631,56 @@ describe('ui', () => {
     expect(inputValueOf(open, `card:${FIRST}:text`)).toEqual(FIX)
     expect(holds(open, 'Enter sends')).toEqual(true)
     expect(holds(open, 'Fix… again closes')).toEqual(true)
-    expect(holds(open, 'longer: /saver fix <n> <text>')).toEqual(true)
+    expect(holds(open, 'or /saver fix <n> <text>')).toEqual(true)
     expect(keysOf(open)).toContain(`card:${FIRST}:keep`)
 
     const drafted = await $.ui.render(DRAFT_HOST)
 
-    expect(inputValueOf(drafted, `card:${FIRST}:text`)).toEqual(draftPane.steerDraft)
+    expect(keysOf(drafted), 'the field is still the same element').toContain(`card:${FIRST}:text`)
+    expect(inputValueOf(drafted, `card:${FIRST}:text`), 'what the person typed is what the redraw draws')
+      .toEqual(draftPane.steerDraft)
 
     await $.ui.press({ plugin: DRAWER, key: `card:${FIRST}:steer`, requestId: DRAFT_HOST.requestId })
     await clock.settle()
     expect(calls).toEqual([{ name: 'steer', arg: FIRST }])
+  })
+
+  // Bug (b): the field drew below the details on the docked pane, so the person who pressed Fix… saw the
+  // card scroll and typed into the composer instead. It now rises with the verbs at every width.
+  test('the field and its hint sit under the verbs, above any detail, at every width', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      const { Box } = resolved
+      return <Box />
+    })
+
+    await $.ui.render(PANE_HOST)
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the pane drew no elements')
+    // The busiest a card ever is: the details open behind i under a field the person just opened.
+    const busy: PaneModel = { ...steeringPane, expanded: steeringPane.steering }
+    for (const columns of [56, 85, 160]) {
+      for (const placement of ['dock', 'inline'] as const) {
+        const rows = drawnRows(Pane({ ui, model: busy, site: { bodyColumns: columns, maxRows: 30 }, placement, actions }))
+        const seat = `${placement} ${columns}`
+        const verbs = rows.indexOf('– Ignore')
+        const field = rows.indexOf(FIX)
+        const hint = rows.findIndex(row => row.startsWith('Enter sends'))
+        expect(verbs, `${seat}: the verbs are drawn`).toBeGreaterThan(0)
+        // Two rows on: the '›' of the field's own row is drawn before the field it leads.
+        expect(rows[verbs + 1], `${seat}: the field's own row follows the verbs`).toEqual(GLYPH_FIELD)
+        expect(field - verbs, `${seat}: the field follows the verbs`).toEqual(2)
+        expect(hint - field, `${seat}: the hint follows the field`).toEqual(1)
+        expect(rows.indexOf('why'), `${seat}: a detail row is below both`).toBeGreaterThan(hint)
+        expect(rows[rows.length - 1], `${seat}: the keys are the pane's last row`).toContain('ctrl+x tab focuses this pane')
+      }
+    }
+    const wide = drawnRows(Pane({ ui, model: busy, site: { bodyColumns: 160, maxRows: 30 }, placement: 'dock', actions }))
+    expect(wide[wide.length - 1], 'where the row fits, the verbs by number ride along')
+      .toEqual('ctrl+x tab focuses this pane · Tab moves · Enter presses · Esc hands the keys back · /saver fix|ignore <n>')
   })
 
   test('the Fix… field hands every keystroke and the sent text to the actions', async ($, on) => {
@@ -655,11 +698,12 @@ describe('ui', () => {
     const field = nodesOf(Pane({ ui, model: draftPane, site: PANE_SITE, placement: 'dock', actions }))
       .find(node => node.type === 'Input')
 
-    field?.onEvent?.({ kind: 'change', value: 'only the auth tests' })
+    field?.onEvent?.({ kind: 'change', value: 'only the auth' })
+    // Enter carries the field's own text: what the surface holds, not the keystroke the plugin kept.
     field?.onEvent?.({ kind: 'submit', value: 'only the auth tests' })
 
     expect(calls).toEqual([
-      { name: 'steerDraft', arg: 'only the auth tests' },
+      { name: 'steerDraft', arg: 'only the auth' },
       { name: 'steerSubmit', arg: `${FIRST}|only the auth tests` },
     ])
   })
@@ -758,7 +802,9 @@ describe('ui', () => {
     if (ui === null) throw new Error('the pane drew no elements')
     // The worst case the seat ever holds: the details open behind i and the Fix… field open under them.
     const busiest: PaneModel = { ...expandedPane, steering: expandedPane.expanded }
-    const models: PaneModel[] = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, busiest, decidedPane, manyWasters]
+    // And the tightest: a footer under a card whose field is open, where the keyboard row is what gives way.
+    const footed: PaneModel = { ...decidedPane, steering: decidedPane.wasters[0]?.patternId ?? null }
+    const models: PaneModel[] = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, busiest, decidedPane, footed, manyWasters]
     for (const model of models) {
       for (const seat of [14, 16, 18]) {
         for (const columns of [56, 100, 160]) {

@@ -285,9 +285,13 @@ describe('register', () => {
     expect((await $.command.run(saverRun('debug'))).text, 'what the instruction keeps saving is still counted').toContain('saved 0s · ~2% · 16000 chars')
   })
 
-  // The ring the press asks for is the surface's to move: nothing beneath a test answers `ui.focus`, so
-  // what is asserted here is the pane's own half — the field opens, closes, and a refused ring is no error.
-  test('pressing Fix… opens the field it asks the ring for, and pressing it again closes it', async ($, on) => {
+  // Bugs (a) and (b): the pane never held the keyboard, so the arrows were the engine's own navigation and the
+  // Fix… field drew while the typing went to the composer. The press now asks for the keys by re-opening our
+  // own pane (which delivers no second instance, only the focus rewrite), and the render that draws the field
+  // asks for one more draw, whose render moves the ring. Nothing beneath `claude plugin test`
+  // serves the host's `ui.focus`, so the ring never moves in a test: what a test sees is the ask, and the
+  // composer route the plugin owes a person whose pane holds neither the ring nor the keyboard.
+  test('pressing Fix… opens the field, asks for the keyboard, and names the composer route when the ring stays put', async ($, on) => {
     const world = startsSaver(on)
     on('tool.call', () => bashAnswer(OUT_CHARS))
     on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
@@ -297,13 +301,27 @@ describe('register', () => {
     await $.command.run(saverRun('check'))
     await world.clock.settle()
     await $.ui.render(paneRender())
+    const asked = world.opened.length
 
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
     await world.clock.settle()
 
-    expect(textOf(await $.ui.render(paneRender())), 'the field is open under the verbs').toContain('Enter sends · Fix… again closes')
-    expect(world.toasts, 'a ring the surface would not move is nothing to tell the user about beyond what the check found')
-      .toEqual(['ContextSaver: 1 new waster'])
+    expect(world.opened.slice(asked), 'the open pane is re-opened for one reason only: to ask for the keys')
+      .toEqual([{ id: 'saver', title: 'ContextSaver', rows: 18, focus: true }])
+    expect(world.toasts, 'nothing is said before the field is even drawn').toEqual(['ContextSaver: 1 new waster'])
+
+    // The render that draws the field only asks for one more draw: a ring lands on an element the drawn tree
+    // already holds. The draw after it is where the ring is asked for, over a pane drawing unfocused.
+    expect(textOf(await $.ui.render(paneRender())), 'the field is open under the verbs, and stays open')
+      .toContain('Enter sends · Fix… again closes')
+    await world.clock.settle()
+    expect(world.toasts, 'nothing is said while the field is one draw old').toEqual(['ContextSaver: 1 new waster'])
+
+    await $.ui.render(paneRender())
+    await world.clock.settle()
+
+    expect(world.toasts.filter(text => text.includes('has your keys')), 'the route is said once, with the card\'s own number')
+      .toEqual(['ContextSaver: the composer has your keys — type /saver fix 1 <your note>'])
 
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
     await world.clock.settle()
@@ -423,7 +441,8 @@ describe('register', () => {
     await $.session.start(SESSION)
 
     expect((await $.command.run(saverRun())).text).toBe('ContextSaver pane shown')
-    expect(world.opened.map(pane => pane.id)).toEqual(['saver'])
+    // A pane the person called up asks for their keyboard: the surface grants it over an empty composer.
+    expect(world.opened).toEqual([{ id: 'saver', title: 'ContextSaver', rows: 18, focus: true }])
     expect((await $.command.run(saverRun())).text).toBe('ContextSaver pane hidden')
     expect(world.closed.map(pane => pane.id)).toEqual(['saver'])
 
@@ -541,7 +560,8 @@ describe('register', () => {
     await $.ui.render(bandRender(AUTO_OPEN_MIN_COLUMNS))
     await runTurns($, 3, 3)
     await world.clock.settle()
-    expect(world.opened.map(pane => pane.id), 'the fresh card opened the pane').toEqual(['saver'])
+    expect(world.opened, 'the fresh card opened the pane, and an unasked open never asks for the keyboard')
+      .toEqual([{ id: 'saver', title: 'ContextSaver', rows: 18 }])
 
     await runTurns($, 3, 3)
     await world.clock.settle()
@@ -757,8 +777,8 @@ describe('register', () => {
     await world.clock.settle()
 
     expect(world.toasts, 'a check that found something says how much').toEqual(['ContextSaver: 1 new waster'])
-    expect(world.opened.map(pane => pane.id), 'the person is waiting for the answer, so 80 columns is wide enough')
-      .toEqual(['saver'])
+    expect(world.opened, 'the person is waiting for the answer, so 80 columns is wide enough — and it asks for their keys')
+      .toEqual([{ id: 'saver', title: 'ContextSaver', rows: 18, focus: true }])
   })
 
   // What a real reload showed: the store handed back a pattern nobody had decided, the judge re-reported it

@@ -47,10 +47,19 @@ export function register(on: On): void {
   // A check asked for while a run is in flight is answered by that run: cadence runs are frequent now,
   // and the person who pressed Check now would otherwise be told `already checking` and never told more.
   let asked = false
+  // The card whose Fix… field is waiting for the ring, and whether the tree holding it has been drawn: a ring
+  // lands only on an element the drawn tree holds ('no element of its own is drawn under that key'), and a
+  // tree lands after the hook that built it returns — so the ask takes two renders.
+  let ringWanted: { patternId: string; isDrawn: boolean } | null = null
 
   const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
-  const paneArgs = (): PaneOpenArgs => ({ id: PANE_ID, title: PANE_TITLE, rows: PANE_INLINE_ROWS })
+  // `focus` is a request, not a grant (d.ts 4915-4922): the surface hands the pane the keyboard only while
+  // the prompt holds them over an empty composer, and refuses it otherwise — the pane opens either way.
+  const paneArgs = (focus?: true): PaneOpenArgs =>
+    focus === undefined
+      ? { id: PANE_ID, title: PANE_TITLE, rows: PANE_INLINE_ROWS }
+      : { id: PANE_ID, title: PANE_TITLE, rows: PANE_INLINE_ROWS, focus }
 
   const savedToast = (before: State['saved']): void => {
     const ms = state.saved.ms - before.ms
@@ -88,10 +97,12 @@ export function register(on: On): void {
       .catch(() => undefined)
   }
 
+  // An open the person asked for asks for their keyboard too, so the pane they just called up is the pane
+  // they can type in; an unasked one interrupts whatever they were doing and never asks.
   const openPane = async (auto?: true): Promise<void> => {
     const engine = host
     if (engine === null) return
-    await engine.openPane(paneArgs())
+    await engine.openPane(auto === undefined ? paneArgs(true) : paneArgs())
     dispatch(auto === undefined ? { type: 'pane', open: true } : { type: 'pane', open: true, auto })
   }
 
@@ -311,19 +322,58 @@ export function register(on: On): void {
     host?.toast(`Trying "${a.title}" for this session`)
   }
 
-  // `autoFocus` only lands where the site takes the keyboard fresh, and the press that opened the field
-  // left the ring on the Fix… button: the ring is moved by hand, and a refusal is no error of the user's.
-  const focusSteerField = (patternId: string): void => {
-    if (state.steering !== patternId) return
-    void host?.focusElement({ requestId: PANE_ID, key: `card:${patternId}:text` }).catch(() => undefined)
+  // `autoFocus` only lands where the site takes the keyboard fresh, and the press that opened the field left
+  // the ring on the Fix… button: the keys are asked for by re-opening our own pane, which delivers no second
+  // instance, only the focus rewrite (d.ts 4901-4922). A refusal is the person's to make, so it is no error.
+  const wantSteerRing = (patternId: string): void => {
+    const engine = host
+    if (engine === null || state.steering !== patternId) return
+    ringWanted = { patternId, isDrawn: false }
+    void engine.openPane(paneArgs(true)).catch(() => undefined)
+  }
+
+  // Once the field is on screen, the ring is moved onto it. Where it stayed put and the pane does not even
+  // hold the keyboard, the composer is the only way in and the line that says so is owed.
+  const takeSteerRing = (patternId: string, isFocused: boolean): void => {
+    const engine = host
+    ringWanted = null
+    if (engine === null) return
+    const seat = seatOf(patternId)
+    void (async () => {
+      const moved = await engine
+        .focusElement({ requestId: PANE_ID, key: `card:${patternId}:text` })
+        .then(result => result.deny === undefined)
+        .catch(() => false)
+      if (moved || isFocused) return
+      engine.toast(`ContextSaver: the composer has your keys — type /saver fix ${seat} <your note>`)
+    })()
+  }
+
+  // The two renders a ring takes: this one draws the field and asks for one more draw, the next one — where
+  // the field is already on screen — moves the ring onto it.
+  const stepSteerRing = (isFocused: boolean): void => {
+    const wanted = ringWanted
+    if (wanted === null) return
+    if (state.steering !== wanted.patternId) {
+      ringWanted = null
+      return
+    }
+    if (!wanted.isDrawn) {
+      ringWanted = { ...wanted, isDrawn: true }
+      host?.invalidate()
+      return
+    }
+    takeSteerRing(wanted.patternId, isFocused)
   }
 
   const actions: Actions = {
     keep: patternId => decide(patternId, 'keep'),
     steer: patternId => {
       dispatch({ type: 'steer.begin', patternId })
-      focusSteerField(patternId)
+      wantSteerRing(patternId)
     },
+    // The pane's body is this hook's tree, so the redraw is what paints the keystroke; the text it draws
+    // back is this one, which is also what `/saver fix` sends when the keyboard never reaches the field.
     steerDraft: text => dispatch({ type: 'steer.draft', text }),
     steerSubmit: (patternId, text) => steerSubmit(patternId, text),
     kill: patternId => decide(patternId, 'kill'),
@@ -525,6 +575,7 @@ export function register(on: On): void {
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, ($, e, next) => {
     try {
       if (host === null || e.surface === 'mobile') return next(e)
+      stepSteerRing(e.props.isFocused)
       const { Box, Text, Button, Input, Raster } = $.ui.resolve(e) as unknown as Ui
       return Pane({
         ui: { Box, Text, Button, Input, Raster },
