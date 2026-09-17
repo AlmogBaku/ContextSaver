@@ -1,0 +1,4 @@
+node_modules
+.DS_Store
+evals/results
+.claude/scheduled_tasks.lock

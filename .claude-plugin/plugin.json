@@ -1,0 +1,7 @@
+{
+  "name": "contextsaver",
+  "version": "0.1.0",
+  "description": "Watches a session for wasted context and time, shows a one-click card when a waste behaviour repeats, and lets the user steer or stop it.",
+  "author": { "name": "Anakin" },
+  "license": "MIT"
+}

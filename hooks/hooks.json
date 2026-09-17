@@ -1,0 +1,4 @@
+{
+  "description": "ContextSaver: a ledger of tool calls, a judge that names wasteful behaviours, a pane to keep, steer or kill them",
+  "modules": ["./register.ts"]
+}
