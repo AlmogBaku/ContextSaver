@@ -106,6 +106,21 @@ const applyRow = (state: State, row: Omit<Row, 'seq'>): State => {
   }
 }
 
+const grownWith = (p: Pattern, rows: readonly Row[]): Pattern =>
+  rows.filter(row => signatureHit(p, row)).reduce((q, row) => ({ ...q, hits: pushUnique(q.hits, row.id) }), p)
+
+// History, not a live call: no turn stats exist for it, nothing settles on it, and nothing was saved by it.
+const applyAdopt = (state: State, rows: readonly Omit<Row, 'seq'>[]): State => {
+  const seeded = rows.map((row, i) => ({ ...row, seq: state.seq + i + 1 }))
+  return {
+    ...state,
+    seq: state.seq + seeded.length,
+    turn: Math.max(state.turn, ...seeded.map(row => row.turn)),
+    rows: [...state.rows, ...seeded].slice(-ROW_CAP),
+    patterns: state.patterns.map(p => grownWith(p, seeded)),
+  }
+}
+
 const applyTurnComplete = (state: State, stat: Omit<TurnStat, 'turn' | 'calls'>): State => ({
   ...state,
   turns: [...state.turns, { ...stat, turn: state.turn, calls: state.rows.filter(r => r.turn === state.turn).length }],
@@ -198,6 +213,8 @@ export const reduce = (state: State, action: Action): State => {
       return { ...state, turn: state.turn + 1 }
     case 'row':
       return applyRow(state, action.row)
+    case 'adopt':
+      return applyAdopt(state, action.rows)
     case 'turn.complete':
       return applyTurnComplete(state, action.stat)
     case 'usage':
@@ -242,14 +259,14 @@ const shortKey = (r: Row): string => (r.key.startsWith(`${r.cls}:`) ? r.key.slic
 const statsOf = (p: Pattern, state: State): string => {
   const cost = costOf(state, p)
   const pct = pctOf(cost.chars, state.usage.window)
-  const time = duration(cost.ms)
   const turns = turnsCited(p, state)
   const first = turns[0]
   const last = turns[turns.length - 1]
+  // Zero segments are dropped whole: turn handles and rebuilt rows carry no duration, and `0s` would claim a suite that ran for minutes cost nothing.
   return [
     `${p.hits.length}×`,
     ...(pct > 0 ? [`~${pct}% context`] : []),
-    time,
+    ...(cost.ms > 0 ? [duration(cost.ms)] : []),
     ...(first === undefined || last === undefined ? [] : [`turns ${first}…${last}`]),
   ].join(' · ')
 }

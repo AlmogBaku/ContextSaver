@@ -9,6 +9,7 @@ import { bashAnswer } from './fixtures/register/bashAnswer'
 import { CLEAR_RUN } from './fixtures/register/clearRun'
 import { compactedMessage } from './fixtures/register/compactedMessage'
 import { forkAnswer } from './fixtures/register/forkAnswer'
+import { joinedTranscript } from './fixtures/register/joinedTranscript'
 import { paneRender } from './fixtures/register/paneRender'
 import { promptSubmit } from './fixtures/register/promptSubmit'
 import { saverRun } from './fixtures/register/saverRun'
@@ -69,6 +70,68 @@ describe('register', () => {
     expect(debug.text).toContain('overhead memory 1200 · mcp 3400 · agents 800')
     expect(debug.text).toContain(`${SUITE_ID} · hits 0`)
     expect(debug.text).toContain('previous kill')
+  })
+
+  test('session.start adopts the transcript of a session the plugin joined late', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    let atRead: string[] = []
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
+    on('session.messages', () => {
+      atRead = [...world.commands]
+      return { value: joinedTranscript }
+    })
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: forkAnswer(replyText([])) }
+    })
+
+    await $.session.start(SESSION)
+
+    expect(atRead, 'the command was registered before the transcript was read').toEqual(['saver'])
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'the three calls of the three turns already run came back').toContain('turn 3 · seq 3 · rows 3 · turns 0')
+    expect(debug.text).toContain('rows test×3')
+    expect(world.logs, 'the debug flag says what was adopted').toEqual(['ContextSaver adopted 3 rows from the transcript'])
+
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(prompts[0], 'a recovered row says so, with no duration and no loop to reason about')
+      .toContain('r1 | Bash | test:bun test | test | main | 1 | 0 | 8 | recovered | -')
+  })
+
+  test('a reload adopts the same transcript again without doubling the ledger', async ($, on) => {
+    startsSaver(on)
+    on('session.messages', () => ({ value: joinedTranscript }))
+
+    await $.session.start(SESSION)
+    await $.session.start(SESSION)   // a `/reload-plugins` or a `--plugin-dir` save fires `session.start` again (d.ts 3106-3111)
+
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'the reload re-initialises the state before it adopts, so no row and no seq is counted twice')
+      .toContain('turn 3 · seq 3 · rows 3 · turns 0')
+  })
+
+  test('a transcript the host refuses leaves the session standing', async ($, on) => {
+    const world = startsSaver(on)
+    let atRead: string[] = []
+    on('session.messages', () => {
+      atRead = [...world.commands]
+      return { deny: 'no transcript today' }
+    })
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+
+    await $.session.start(SESSION)
+
+    expect(atRead, 'the refusal came after the command was registered').toEqual(['saver'])
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'nothing was adopted').toContain('turn 0 · seq 0 · rows 0 · turns 0')
+    expect(debug.text, 'what the session did report is still there').toContain('usage 12% · 24000 / 200000 tokens')
+
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    expect((await $.command.run(saverRun('debug'))).text, 'the ledger records from here on').toContain('rows 1')
   })
 
   test('tool.call times the call from the clock, sizes it from the text and hands it to the judge', async ($, on) => {

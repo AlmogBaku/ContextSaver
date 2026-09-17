@@ -72,13 +72,14 @@ ContextSaver/
   hooks/core/types.ts                shared contract (section 4)
   hooks/core/text.ts                 pure helpers with fixed signatures (section 5.0)
   hooks/core/ledger.ts               classOf(), normalize(), rowOf()                         (WP1)
+  hooks/core/adopt.ts                adoptRows()                                             (section 5.1a; the transcript of a session joined late)
   hooks/core/evidence.ts             rowsOf(), costOf(), baseline()                          (done; shared by WP2 and WP5)
   hooks/core/patterns.ts             reduce, cardOf, paneModel, bandModel, registry (de)serialisation, debugDump   (WP2)
   hooks/core/blocks.ts               aggregate(), ledgerLine(), summaryLine(), statsLines(), the four prompt blocks   (WP3)
   hooks/core/judge.ts                shouldRun(), buildPrompt(), parseReply(), merge(); JUDGE_PROMPT (Appendix A, verbatim)   (WP3)
   hooks/core/rules.ts                propose(), templates, mergeSettings()
   hooks/ui.tsx                       Band(), RulesPane()
-  tests/{ledger,patterns,judge,rules}.test.ts  tests/ui.test.tsx  tests/register.test.ts  tests/fixtures/*
+  tests/{ledger,adopt,patterns,judge,rules}.test.ts  tests/ui.test.tsx  tests/register.test.ts  tests/fixtures/*
   scripts/check.sh  scripts/smoke.sh  tsconfig.json  README.md  LICENSE  .gitignore
 ```
 
@@ -117,6 +118,7 @@ export const ROW_CAP = 2000
 export const KIND_MAX = 120
 export const ALTERNATIVE_MAX = 200
 export const KEY_MAX = 200
+export const RECOVERED_FLAG = 'recovered'     // `Row.flags` marker for a row rebuilt from the transcript: its `ms` is 0 and its agent reads `main`
 
 export type CommandClass = 'test' | 'lint' | 'format' | 'typecheck' | 'build' | 'install' | 'git' | 'read' | 'search' | 'other'
 export type Category = 'execution' | 'reading' | 'production' | 'behavior' | 'communication' | 'multi-agent' | 'environment' | 'process' | 'other'
@@ -130,7 +132,7 @@ export type Row = {
   turn: number
   ms: number; chars: number
   head: string             // first 80 chars of result.text, control characters stripped; quoted as evidence in the pane, never sent to the judge
-  flags: string[]          // 'err' (tool reported an error) | 'denied' (result.deny: the user or a policy said no) | 'dedup' (Read type 'file_unchanged') | 'trunc' (truncatedByTokenCap) | 'bg' (run_in_background or backgroundTaskId) | 'timeout' (timedOutAfterMs) | `persist=${persistedOutputSize}`
+  flags: string[]          // 'err' (tool reported an error) | 'denied' (result.deny: the user or a policy said no) | 'dedup' (Read type 'file_unchanged') | 'trunc' (truncatedByTokenCap) | 'bg' (run_in_background or backgroundTaskId) | 'timeout' (timedOutAfterMs) | `persist=${persistedOutputSize}` | 'recovered' (rebuilt from the transcript at load: ms is 0 and agent reads 'main')
   lines: { add: number; del: number } | null   // Edit: gitDiff.additions/deletions else counted from structuredPatch; Write: content line count as add
   paths: string[]          // absolute paths this call edited (Edit/Write filePath unless staged; Bash bashEditDiff.changedFiles)
   spawn: { type: string; requested: string | null; resolved: string | null; status: string | null; tokens: number | null; edits: number | null; promptChars: number } | null   // Agent rows only
@@ -200,6 +202,7 @@ export const initialState = (cwd: string, window: number): State => ({
 export type Action =
   | { type: 'turn.start' }
   | { type: 'row'; row: Omit<Row, 'seq'> }
+  | { type: 'adopt'; rows: readonly Omit<Row, 'seq'>[] }      // rows rebuilt from the transcript of a session joined late
   | { type: 'turn.complete'; stat: Omit<TurnStat, 'turn' | 'calls'> }
   | { type: 'usage'; usage: Usage; now: number }
   | { type: 'overhead'; overhead: { memory: number; mcp: number; agents: number } }
@@ -271,14 +274,23 @@ export const killPrompt = (p: StoredPattern): string => `Stop this behaviour for
 - Tests: class table incl. prefixes and the `install`/`search` classes; normalizer gives the same key for a flat `tool.call` envelope (with `tool_use_id`) and for bare args, for Bash, Read, an MCP tool and an unknown tool; `rowOf` on answered / errored / denied / deduped / persisted / background / Agent fixtures (fixtures carry `text`).
 - Rendering rows for the judge (`ledgerLine`, `summaryLine`, `aggregate`, `statsLines`) is the judge's input format and lives in `blocks.ts` (section 5.3), not here.
 
+### 5.1a `hooks/core/adopt.ts` — the transcript of a session joined late
+- `adoptRows(messages: readonly SessionMessage[]): readonly Omit<Row, 'seq'>[]` — every finished `toolUse` of every assistant message becomes a row through `rowOf` (`ms = 0`, `turn` derived below, `RECOVERED_FLAG` appended after `flagsOf` so a flag the call earned — `err`, `dedup` — still reads first); the newest `ROW_CAP` rows are kept. So a plugin enabled mid-session has evidence to judge instead of starting blind.
+- Two rules the derivation encodes, both deliberately conservative:
+  - Only a **prompt** starts a turn — a `role: 'user'` message with typed text and no `toolResults`; a user message of tool_result blocks is the tool loop, and a text-free one is a message the engine queued itself. A row's turn is `max(1, prompts seen so far)`. Truncation, or a call in flight at load, can therefore merge two real turns, but nothing can split one: the judge's "two occurrences in two different turns" shape can only be under-reported from history, never manufactured.
+  - A `toolUse` with neither `result` nor `text` is **still in flight** — no size, no outcome — and is not a row.
+- The transcript records no duration and no agent, so `ms` is 0 (excluded from `baseline().ms`, section 5.2, or the time half of SAVED would collapse to zero) and `agent` reads `main`; a refusal was stored as its error text, so a `recovered` `err` may be a `denied` — Appendix A tells the judge to read it that way and never as waste.
+- Tests (`tests/adopt.test.ts`): a joined transcript becomes rows, one turn per prompt, with the tool loop and a text-free user entry inside the same turn; a call in flight is no row; Edit paths/lines and Agent spawn fields come back; a transcript longer than `ROW_CAP` keeps the newest rows; nothing to adopt yields no rows.
+
 ### 5.2 `hooks/core/patterns.ts` (WP2)
 - No detectors live here (D0). This module keeps the evidence, applies decisions, accounts savings, and computes the UI's view models.
-- `rowsOf`, `costOf`, `baseline` are in `hooks/core/evidence.ts` (already written and tested; import them).
+- `rowsOf`, `costOf`, `baseline` are in `hooks/core/evidence.ts` (already written and tested; import them). `baseline().ms` is the median over the **timed** rows only — a `recovered` row's duration was never recorded, so counting its 0 would drag the time half of SAVED to nothing; `baseline().chars` counts every cited row, since transcript text lengths are real.
 - `paneModel(state, artifacts): PaneModel` and `bandModel(state): BandModel` (types in §4) — the only things `ui.tsx` renders. `header.spark` = `usageSamples.map(s => s.percent)`; `header.judgeTokens = judge.spent` (what the pane shows) and `header.judgeShare = round(judge.spent / max(1, totalTokens) × 1000) / 10` (kept for `/saver debug`); `wasters = cards.map(id => cardOf(pattern, state))`; `decided` = patterns with a decision, newest `decidedAtTurn` first, `savedPct` = `pctOf(baseline.chars, window)` for steer/kill else null; `fresh` = `cards.length`.
-- `cardOf(p, state): Card` — `kind = p.kind` (prefixed `ignored · ` when `p.ignored > 0`); `stats = \`${hits}× · ~${pct(Σchars)}% context · ${duration(Σms)} · turns ${first}…${last}\`` (omit a pct segment that rounds to 0); `why = p.why`; `fix = p.alternative`; `killText = killPrompt(p)`; `evidence` = up to 3 quotes from the cited handles, most recent first: a row → `r${seq} · turn ${turn} · ${tool} ${key without class prefix, ≤ 40} · ${duration(ms)} · ${chars}ch · "${head}"`; a turn handle → `turn ${n} · no tool calls · ${answerChars}ch · "${answerHead}"`.
+- `cardOf(p, state): Card` — `kind = p.kind` (prefixed `ignored · ` when `p.ignored > 0`); `stats = \`${hits}× · ~${pct(Σchars)}% context · ${duration(Σms)} · turns ${first}…${last}\`` (omit a pct segment that rounds to 0, and the duration when the evidence carries none — turn handles, recovered rows — since `0s` would state a suite that ran for minutes cost nothing); `why = p.why`; `fix = p.alternative`; `killText = killPrompt(p)`; `evidence` = up to 3 quotes from the cited handles, most recent first: a row → `r${seq} · turn ${turn} · ${tool} ${key without class prefix, ≤ 40} · ${duration(ms)} · ${chars}ch · "${head}"`; a turn handle → `turn ${n} · no tool calls · ${answerChars}ch · "${answerHead}"`.
 - `reduce(state, action): State` — one case per action:
   - `turn.start` → `turn += 1`.
   - `row` → `seq += 1`, append with that seq (drop oldest past `ROW_CAP`); for every pattern whose `signature` equals `(row.tool,row.key)` push `row.id` to `hits`; **settle instructions** (main-loop rows only, and only rows with `row.turn > openedAtTurn`, since a row in the decision's own turn was already in flight before Claude could read the instruction): for each pattern with `openedAtTurn !== null` and `decision ∈ {steer, kill}`: a row with `row.key === p.signature?.key` → ignored (`ignored += 1`, `openedAtTurn = null`, re-queue the card, every time, so the user can respond again); else a row with `row.cls === cls(p)` and a different key → the alternative: `saved += max(0, baseline − rowCost)`, `openedAtTurn = null`.
+  - `adopt` → the rows of section 5.1a, in order, as `row` numbers them: `seq` continues where the session left it, oldest dropped past `ROW_CAP`, and a matching `signature` grows its `hits` (so a remembered pattern arrives armed). Then `turn = max(turn, newest adopted turn)`. Nothing settles and nothing is credited: the history predates every decision, and no `TurnStat` exists for a rebuilt turn.
   - `turn.complete` → push `{ ...stat, turn, calls: rows recorded this turn }`; for each pattern with `openedAtTurn !== null && turn − openedAtTurn ≥ SETTLE_TURNS` → `saved += baseline`, `openedAtTurn = null`; behavioural patterns with `decision ∈ {steer, kill}` accrue `saved.chars += (estTokensPerTurn ?? 0) × 4`.
   - `usage` → merge (`window`/`compactAt` sticky; `tokens`/`percent` replaced; push `{ turn, percent }` when `percent` is defined, replacing a sample of the same turn; keep the last 30). `overhead` → set. `compact` → `compactions.push(turn)`.
   - `expand` → `expanded = patternId === expanded ? null : patternId`.
@@ -341,13 +353,13 @@ export const killPrompt = (p: StoredPattern): string => `Stop this behaviour for
 ## 6. The shell — `hooks/register.ts` and `hooks/host.ts` (WP6)
 
 `Host` (each member one literal `$.noun.verb`, bound in `session.start` like `mods/diff/hooks/register.ts` lines 594-621):
-(`invalidate`, `toast` and `log` return `void`, not promises; the rest return promises.) `now() → $.clock.now()` · `invalidate() → $.ui.invalidate('ui.render')` · `toast(text) → $.ui.toast(text)` · `log(text) → $.ui.log(text)` · `openPane(args) → $.ui.open(args)` · `closePane(args) → $.ui.close(args)` · `registerCommand(spec) → $.command.register(spec)` · `usage(args?) → $.session.usage(args)` · `storeGet(key) → $.store.get(key)` · `storeSet(key, v) → $.store.set(key, v)` · `fork(prompt) → $.model.fork({ prompt })` · `readFile(p) → $.fs.read(p)` · `writeFile(p, t) → $.fs.write(p, t)` · `exists(p) → $.fs.exists(p)` · `debugFlag() → $.env.get('CONTEXTSAVER_DEBUG')`.
+(`invalidate`, `toast` and `log` return `void`, not promises; the rest return promises.) `now() → $.clock.now()` · `invalidate() → $.ui.invalidate('ui.render')` · `toast(text) → $.ui.toast(text)` · `log(text) → $.ui.log(text)` · `openPane(args) → $.ui.open(args)` · `closePane(args) → $.ui.close(args)` · `registerCommand(spec) → $.command.register(spec)` · `usage(args?) → $.session.usage(args)` · `messages() → $.session.messages()` · `storeGet(key) → $.store.get(key)` · `storeSet(key, v) → $.store.set(key, v)` · `fork(prompt) → $.model.fork({ prompt })` · `readFile(p) → $.fs.read(p)` · `writeFile(p, t) → $.fs.write(p, t)` · `exists(p) → $.fs.exists(p)` · `debugFlag() → $.env.get('CONTEXTSAVER_DEBUG')`.
 
 Closure state: `let state: State`, `let host: Host | null`. `dispatch(a)` = `state = reduce(state, a); host?.invalidate()`; when `state.saved` grew, toast `+${duration} · +~${pct}% context saved`. Every hook body: `try { … } catch { return next(e) }`.
 
 | Event | Matcher | Hook |
 |---|---|---|
-| `session.start` | — | Bind `host`. `cwd = e.cwd`. `u = await host.usage({ breakdown: 'summary' })` → `state = initialState(cwd, u.context.window)`; `dispatch(usage { window, compactAt: u.context.breakdown?.autoCompactThreshold, tokens, percent })`; `dispatch(overhead { memory: Σ breakdown.memoryFiles[].tokens, mcp: Σ mcpTools[].tokens, agents: Σ agents[].tokens })` (6946-7017; zeros when absent). `stored = parseRegistry(await host.storeGet(\`patterns:${cwd}\`))` → patterns = `stored.map(fromStored)`. `await host.registerCommand(COMMAND)` (catch → `host.log`). Debug flag read once. `return next(e)`. |
+| `session.start` | — | Bind `host`. `cwd = e.cwd`. `u = await host.usage({ breakdown: 'summary' })` → `state = initialState(cwd, u.context.window)`; `dispatch(usage { window, compactAt: u.context.breakdown?.autoCompactThreshold, tokens, percent })`; `dispatch(overhead { memory: Σ breakdown.memoryFiles[].tokens, mcp: Σ mcpTools[].tokens, agents: Σ agents[].tokens })` (6946-7017; zeros when absent). `stored = parseRegistry(await host.storeGet(\`patterns:${cwd}\`))` → patterns = `stored.map(fromStored)`. `await host.registerCommand(COMMAND)` (catch → `host.log`). Debug flag read once. Then, last, `dispatch(adopt adoptRows(await host.messages()))` (skipped when it yields no rows): the read comes after the usage, the registry and the command, so a transcript the host refuses or answers slowly costs the session nothing it already has, and awaiting it keeps every adopted row below the live rows in `seq` and ledger order. `return next(e)`. |
 | `turn.start` | — | `dispatch(turn.start)`; `return next(e)`. |
 | `tool.call` | — | Own call (`next.origin.plugin === PLUGIN_NAME`) → `return next(e)`. `t0 = await host.now()`; `r = await next(e)`; `ms = (await host.now()) − t0`. `dispatch(row rowOf(e, r, ms, state.turn))`; debug → `host.log(\`ContextSaver row r${seq} ${tool} ${key} ${ms}ms ${chars}ch\`)`. If `state.notes.length` and `r.deny === undefined`: `const pending = state.notes; dispatch(notes.drained); return { ...r, context: [...(r.context ?? []), ...pending] }`. Else `return r`. |
 | `turn.complete` | — | `e.agentId` → `return next(e)`. `dispatch(turn.complete { input/output/cacheRead/cacheCreate from e.usage (0 when absent), ms: e.durationMs, answerChars: e.answer.length, answerHead: e.answer.slice(0, 100), aborted: e.isAborted })`; `u = await host.usage()` → `dispatch(usage { tokens: u.context.tokens, percent: u.context.percent, now })`; `if (shouldRun(state)) void runJudge()`. `return next(e)`. |
@@ -377,7 +389,7 @@ Actions:
 
 `persist()`: `stored = parseRegistry(await host.storeGet(key))`; `await host.storeSet(key, mergeStored(stored, state.patterns.map(toStored)))`; fire-and-forget with `.catch(() => undefined)`.
 
-Notes: a hot reload (`--plugin-dir` save, `/reload-plugins`) re-runs `register()`; session state is lost, the registry reloads from the store. The only awaited work inside hooks is `next(e)`, two `clock.now()`, and the fast `session.start` calls.
+Notes: a hot reload (`--plugin-dir` save, `/reload-plugins`) re-runs `register()` and fires `session.start` again; the registry reloads from the store and the ledger is rebuilt from the transcript, while turn stats, cards and decisions start empty. `session.start` re-initialises `state` before the `adopt` dispatch, so a reload re-derives the rows rather than doubling them. The only awaited work inside hooks is `next(e)`, two `clock.now()`, and the fast `session.start` calls.
 
 ---
 
@@ -519,6 +531,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - Volume alone. A large read is waste only when a cheaper call would have answered the same question for the same purpose; if the output was the deliverable (the diff under review, the log you were asked to explain, a file about to be rewritten) it is not a finding.
 - Turns spent thinking on a genuinely hard decision.
 - A cue whose evidence is not in these columns (an error message, a file's true size, worktree isolation): if you cannot see it, you cannot evidence it.
+- The duration of a `recovered` row, or which agent ran it: neither was recorded, and its `err` may be a refusal the transcript stored as error text, so treat a `recovered` `err` row as `denied` and never as waste.
 - Anything the user asked for this session, however wasteful it looks. Read the transcript before you accuse.
 
 ## Confidence
@@ -564,7 +577,7 @@ KNOWN PATTERNS lists `execution:full-suite-after-each-edit | … | steer @ 9` an
 ## TURNS — `turn | in | out | cacheCreate | calls | ms | answerChars`, then the facts line (context window, fixed per-turn overhead, turns where a compaction happened)
 {{TURNS}}
 
-## LEDGER — `id | tool | key | cls | agent | turn | ms | chars | flags | paths`, oldest first. `ms` is wall time and includes any wait on a permission prompt, so a long `ms` alone is not machine cost. flags: `err` `denied` `dedup` `trunc` `bg` `timeout` `persist=<bytes>` `+adds/-dels` `agent=<type>/<model>/<status>/<tokens>tok/<edits>edits`, or `-`. Rows older than the window are folded into `~ | tool | key | ×count | Σchars` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
+## LEDGER — `id | tool | key | cls | agent | turn | ms | chars | flags | paths`, oldest first. `ms` is wall time and includes any wait on a permission prompt, so a long `ms` alone is not machine cost. A row flagged `recovered` was rebuilt from the transcript before this plugin joined the session: its `ms` is 0 and its agent reads `main`, so never reason about its duration or which loop ran it. flags: `err` `denied` `dedup` `trunc` `bg` `timeout` `persist=<bytes>` `+adds/-dels` `agent=<type>/<model>/<status>/<tokens>tok/<edits>edits`, or `-`. Rows older than the window are folded into `~ | tool | key | ×count | Σchars` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
 {{LEDGER}}
 
 Return the JSON object only.

@@ -1,5 +1,6 @@
 import type { ModelForkResult, On, PaneOpenArgs, RenderElement } from 'claude-code'
 
+import { adoptRows } from './core/adopt'
 import { buildPrompt, costOf, merge, parseReply, shouldRun } from './core/judge'
 import { rowOf } from './core/ledger'
 import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce, toStored } from './core/patterns'
@@ -213,6 +214,7 @@ export function register(on: On): void {
         closePane: args => $.ui.close(args),
         registerCommand: spec => $.command.register(spec),
         usage: args => $.session.usage(args),
+        messages: () => $.session.messages(),
         storeGet: key => $.store.get(key),
         storeSet: (key, value) => $.store.set(key, value),
         fork: prompt => $.model.fork({ prompt }),
@@ -248,6 +250,11 @@ export function register(on: On): void {
       } catch {
         isDebug = false
       }
+      // Last, so a transcript we cannot read costs the session nothing it already has.
+      const adopted = adoptRows(await engine.messages())
+      if (adopted.length === 0) return next(e)
+      dispatch({ type: 'adopt', rows: adopted })
+      if (isDebug) engine.log(`ContextSaver adopted ${adopted.length} rows from the transcript`)
       return next(e)
     } catch {
       return next(e)

@@ -28,4 +28,13 @@ describe('evidence', () => {
     expect(baseline(state, p)).toEqual({ ms: 200, chars: 20 })
     expect(baseline(state, pattern([]))).toEqual({ ms: 0, chars: 0 })
   })
+
+  test('a rebuilt row lends its size to the baseline but not its unrecorded duration', async () => {
+    const recovered = (seq: number, chars: number): Row => ({ ...row(seq, 0, chars), flags: ['recovered'] })
+    const state = { ...initialState('/w', 200000), rows: [recovered(1, 9_000), recovered(2, 9_000), row(3, 60_000, 9_000)] }
+    expect(baseline(state, pattern(['t1', 't2', 't3'])), 'the one timed row carries the time median').toEqual({ ms: 60_000, chars: 9_000 })
+    expect(costOf(state, pattern(['t1', 't2', 't3'])), 'the sum still only holds what was measured').toEqual({ ms: 60_000, chars: 27_000 })
+    const all = { ...initialState('/w', 200000), rows: [recovered(1, 400), recovered(2, 800)] }
+    expect(baseline(all, pattern(['t1', 't2'])), 'no timed row, no time claimed').toEqual({ ms: 0, chars: 600 })
+  })
 })

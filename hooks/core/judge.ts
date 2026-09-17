@@ -55,6 +55,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - Volume alone. A large read is waste only when a cheaper call would have answered the same question for the same purpose; if the output was the deliverable (the diff under review, the log you were asked to explain, a file about to be rewritten) it is not a finding.
 - Turns spent thinking on a genuinely hard decision.
 - A cue whose evidence is not in these columns (an error message, a file's true size, worktree isolation): if you cannot see it, you cannot evidence it.
+- The duration of a \`recovered\` row, or which agent ran it: neither was recorded, and its \`err\` may be a refusal the transcript stored as error text, so treat a \`recovered\` \`err\` row as \`denied\` and never as waste.
 - Anything the user asked for this session, however wasteful it looks. Read the transcript before you accuse.
 
 ## Confidence
@@ -100,7 +101,7 @@ KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` 
 ## TURNS — \`turn | in | out | cacheCreate | calls | ms | answerChars\`, then the facts line (context window, fixed per-turn overhead, turns where a compaction happened)
 {{TURNS}}
 
-## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first. \`ms\` is wall time and includes any wait on a permission prompt, so a long \`ms\` alone is not machine cost. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
+## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first. \`ms\` is wall time and includes any wait on a permission prompt, so a long \`ms\` alone is not machine cost. A row flagged \`recovered\` was rebuilt from the transcript before this plugin joined the session: its \`ms\` is 0 and its agent reads \`main\`, so never reason about its duration or which loop ran it. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
 {{LEDGER}}
 
 Return the JSON object only.

@@ -25,6 +25,7 @@ export const DEBUG_MAX_LINES = 40             // `/saver debug` ceiling
 export const DEBUG_MAX_PATTERNS = 20          // pattern lines `/saver debug` prints before folding the rest
 export const BRIEF_TOOLS = 'Read, Grep, Glob' // the tools an agent brief allows when the proposal names none
 export const CLAUDE_MD_HEADING = '## ContextSaver'
+export const RECOVERED_FLAG = 'recovered'     // `Row.flags` marker for a row rebuilt from the transcript: its `ms` is 0 and its agent reads `main`
 
 export type CommandClass = 'test' | 'lint' | 'format' | 'typecheck' | 'build' | 'install' | 'git' | 'read' | 'search' | 'other'
 export type Category = 'execution' | 'reading' | 'production' | 'behavior' | 'communication' | 'multi-agent' | 'environment' | 'process' | 'other'
@@ -38,7 +39,7 @@ export type Row = {
   turn: number
   ms: number; chars: number
   head: string             // first 80 chars of result.text, control characters stripped; quoted as evidence in the pane, never sent to the judge
-  flags: string[]          // 'err' (tool reported an error) | 'denied' (result.deny: the user or a policy said no) | 'dedup' (Read type 'file_unchanged') | 'trunc' (truncatedByTokenCap) | 'bg' (run_in_background or backgroundTaskId) | 'timeout' (timedOutAfterMs) | `persist=${persistedOutputSize}`
+  flags: string[]          // 'err' (tool reported an error) | 'denied' (result.deny: the user or a policy said no) | 'dedup' (Read type 'file_unchanged') | 'trunc' (truncatedByTokenCap) | 'bg' (run_in_background or backgroundTaskId) | 'timeout' (timedOutAfterMs) | `persist=${persistedOutputSize}` | 'recovered' (rebuilt from the transcript at load: ms is 0 and agent reads 'main')
   lines: { add: number; del: number } | null   // Edit: gitDiff.additions/deletions else counted from structuredPatch; Write: content line count as add
   paths: string[]          // absolute paths this call edited (Edit/Write filePath unless staged; Bash bashEditDiff.changedFiles)
   spawn: { type: string; requested: string | null; resolved: string | null; status: string | null; tokens: number | null; edits: number | null; promptChars: number } | null   // Agent rows only
@@ -108,6 +109,7 @@ export const initialState = (cwd: string, window: number): State => ({
 export type Action =
   | { type: 'turn.start' }
   | { type: 'row'; row: Omit<Row, 'seq'> }
+  | { type: 'adopt'; rows: readonly Omit<Row, 'seq'>[] }      // rows rebuilt from the transcript of a session joined late
   | { type: 'turn.complete'; stat: Omit<TurnStat, 'turn' | 'calls'> }
   | { type: 'usage'; usage: Usage; now: number }
   | { type: 'overhead'; overhead: { memory: number; mcp: number; agents: number } }

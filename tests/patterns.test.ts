@@ -49,6 +49,45 @@ describe('patterns', () => {
     expect(capped.rows[ROW_CAP - 1]?.id).toBe('r-new')
   })
 
+  test('adopt numbers the recovered rows, catches the turn up and arms a remembered pattern', async () => {
+    const state = seedState({
+      turn: 1, seq: 2, patterns: [suitePattern, chattyPattern], saved: { ms: 5, chars: 50 },
+      rows: [withSeq({ id: 'r-1', key: 'other:x', cls: 'other' }, 1), withSeq({ id: 'r-2', key: 'other:x', cls: 'other' }, 2)],
+    })
+    const rows = [
+      testRow({ id: 'a-1', turn: 1, flags: ['recovered'] }),
+      testRow({ id: 'a-2', key: 'read:cat log', cls: 'read', turn: 2, flags: ['recovered'] }),
+      testRow({ id: 'a-3', turn: 3, flags: ['recovered'] }),
+    ]
+    const joined = reduce(state, { type: 'adopt', rows })
+
+    expect(joined.seq, 'the seq numbering continues where the session left it').toBe(5)
+    expect(joined.rows.map(r => r.seq)).toEqual([1, 2, 3, 4, 5])
+    expect(joined.rows.map(r => r.id)).toEqual(['r-1', 'r-2', 'a-1', 'a-2', 'a-3'])
+    expect(joined.turn, 'the counter catches up to the newest turn adopted').toBe(3)
+    expect(joined.patterns[0]?.hits, 'the remembered pattern is armed by the history').toEqual(['a-1', 'a-3'])
+    expect(joined.patterns[1]?.hits, 'a behavioural pattern matches no row').toEqual(['turn:14', 'turn:15'])
+    expect(joined.turns, 'no token data exists for a rebuilt turn').toEqual([])
+    expect(joined.saved, 'history saved nothing').toEqual({ ms: 5, chars: 50 })
+    expect(joined.cards).toEqual([])
+    expect(state.rows, 'the state handed in is untouched').toHaveLength(2)
+    expect(state.patterns[0]?.hits).toEqual([])
+
+    const behind = reduce(seedState({ turn: 7 }), { type: 'adopt', rows })
+    expect(behind.turn, 'a turn already ahead of the transcript is never wound back').toBe(7)
+
+    const full = seedState({
+      seq: ROW_CAP,
+      rows: Array.from({ length: ROW_CAP }, (_, i) => withSeq({ id: `old-${i + 1}`, key: 'other:x', cls: 'other' }, i + 1)),
+    })
+    const capped = reduce(full, { type: 'adopt', rows })
+    expect(capped.rows).toHaveLength(ROW_CAP)
+    expect(capped.rows[0]?.id).toBe('old-4')
+    expect(capped.rows[ROW_CAP - 1]?.id).toBe('a-3')
+    expect(capped.seq).toBe(ROW_CAP + 3)
+    expect(reduce(seedState(), { type: 'adopt', rows: [] }), 'nothing to adopt changes nothing').toEqual(seedState())
+  })
+
   test('turn.complete records the calls made in that turn', async () => {
     const state = seedState({
       turn: 3,
@@ -167,6 +206,19 @@ describe('patterns', () => {
     const otherClass = reduce(state, { type: 'row', row: testRow({ id: 'r-9', turn: 7, key: 'read:cat log', cls: 'read', ms: 1_000, chars: 100 }) })
     expect(otherClass.saved).toEqual({ ms: 0, chars: 0 })
     expect(otherClass.patterns[0]?.openedAtTurn).toBe(6)
+  })
+
+  test('evidence mostly rebuilt from the transcript still credits the time its one timed row measured', async () => {
+    const rows = [
+      withSeq({ id: 'a-1', turn: 1, ms: 0, chars: 9_000, flags: ['recovered'] }, 1),
+      withSeq({ id: 'a-2', turn: 2, ms: 0, chars: 9_000, flags: ['recovered'] }, 2),
+      withSeq({ id: 'l-1', turn: 5, ms: 60_000, chars: 9_000 }, 3),
+    ]
+    const killed = steered({ decision: 'kill', hits: ['a-1', 'a-2', 'l-1'], decidedAtTurn: 6, openedAtTurn: 6, instruction: killPrompt(suitePattern) })
+    const state = seedState({ turn: 7, rows, patterns: [killed] })
+    const credited = reduce(state, { type: 'row', row: testRow({ id: 'r-4', turn: 7, key: 'test:bun test tests/auth.test.ts', ms: 5_000, chars: 900 }) })
+    expect(credited.saved, 'the adopted rows lend their size; the timed row alone sets the clock').toEqual({ ms: 55_000, chars: 8_100 })
+    expect(credited.saved.ms, 'a session joined late still credits the seconds it saved').toBeGreaterThan(0)
   })
 
   test('two quiet turns credit the whole baseline', async () => {
@@ -350,6 +402,12 @@ describe('patterns', () => {
       ],
     })
     expect(cardOf({ ...p, ignored: 1 }, state).kind).toBe(`ignored · ${suitePattern.kind}`)
+    const rebuilt: Pattern = { ...suitePattern, hits: ['a-1', 'a-2', 'a-3'] }
+    const history = seedState({
+      rows: [1, 2, 3].map(i => withSeq({ id: `a-${i}`, turn: i, ms: 0, chars: 9_000, flags: ['recovered'] }, i)),
+      patterns: [rebuilt],
+    })
+    expect(cardOf(rebuilt, history).stats, 'a card built from history claims no time nobody measured').toBe('3× · ~3.4% context · turns 1…3')
     const quick: Pattern = { ...suitePattern, hits: ['q-1', 'q-2', 'q-3'] }
     const fast = seedState({ rows: [1, 2, 3].map(i => withSeq({ id: `q-${i}`, turn: 4 + i, ms: 100, chars: 40 }, i)), patterns: [quick] })
     expect(cardOf(quick, fast).stats).toBe('3× · 0s · turns 5…7')
@@ -361,7 +419,7 @@ describe('patterns', () => {
       ],
     })
     const card = cardOf(chattyPattern, behavioural)
-    expect(card.stats).toBe('2× · 0s · turns 14…15')
+    expect(card.stats, 'evidence with no recorded duration claims none rather than 0s').toBe('2× · turns 14…15')
     expect(card.evidence).toEqual([
       'turn 15 · no tool calls · 6100ch · "To recap the plan"',
       'turn 14 · no tool calls · 5400ch · "Here is the plan again"',

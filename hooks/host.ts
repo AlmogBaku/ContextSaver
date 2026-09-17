@@ -3,6 +3,7 @@ import type {
   ModelForkResult,
   PaneCloseArgs,
   PaneOpenArgs,
+  SessionMessage,
   SessionUsage,
   SessionUsageArgs,
 } from 'claude-code'
@@ -25,6 +26,8 @@ export type Host = {
   registerCommand(spec: CommandSpec): Promise<{ command: string }>
   /** $.session.usage(args?) — read context window usage. */
   usage(args?: SessionUsageArgs): Promise<SessionUsage>
+  /** $.session.messages() — read the transcript so far, newest 4096 messages. */
+  messages(): Promise<SessionMessage[]>
   /** $.store.get(key) — read a value from the plugin store. */
   storeGet(key: string): Promise<unknown>
   /** $.store.set(key, v) — write a value to the plugin store. */
