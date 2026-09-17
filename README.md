@@ -7,26 +7,13 @@ ContextSaver is a Claude Code function-hooks plugin that watches a session for w
 ## Running
 
 ```sh
-# Validate the plugin manifest and hooks
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate . --strict
-
-# Type-check without emitting
-bun x tsc --noEmit -p .
-
-# Run the test suite
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .
+bun install          # dev tooling only (typescript); the plugin itself has no dependencies
+bun run check        # validate --strict, typecheck, tests
+bun run dev          # start Claude Code with the plugin loaded from this folder
 ```
 
-All three commands are combined in `scripts/check.sh`:
-
-```sh
-./scripts/check.sh
-```
+`bun run check` is `scripts/check.sh`: it validates the manifest and hooks, type-checks with `tsc`, and runs the test suite with `claude plugin test`. Function hooks are early access: every command sets `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
 
 ## Development
 
-The full build spec is at:
-`/home/anakin/.claude/plans/lets-plan-this-mods-playground-prd-md-zany-lighthouse.md`
-
-The product spec (PRD) is at:
-`/home/anakin/projects/mods-playground/PRD.md`
+The build spec (architecture, contracts, the judge prompt, the UX walkthrough) will live in `docs/` once v1 lands. Until then it is tracked outside the repo.

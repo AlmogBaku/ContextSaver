@@ -1,0 +1,21 @@
+{
+  "name": "contextsaver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code mod that finds context-wasting behaviours and lets you keep, steer or kill them.",
+  "license": "MIT",
+  "author": "Almog Baku <almog.baku@gmail.com>",
+  "type": "module",
+  "packageManager": "bun@1.3.10",
+  "scripts": {
+    "check": "scripts/check.sh",
+    "validate": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate . --strict",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .",
+    "smoke": "scripts/smoke.sh",
+    "dev": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir ."
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
