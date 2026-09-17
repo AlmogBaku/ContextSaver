@@ -6,17 +6,30 @@ export const twoWasters: PaneModel = {
     percent: 64,
     tokensToCompaction: 41_000,
     turnsToCompaction: 6,
-    trend: [],
-    time: null,
-    context: null,
-    judgeTime: null,
-    judgeContext: null,
+    trend: [4, 9, 15, 21, 28, 35, 43, 51, 58, 64],
+    time: {
+      total: 11_520_000,
+      sinks: [
+        { label: 'tests', amount: 2_880_000, count: 6 },
+        { label: 'agents', amount: 7_500_000, count: 4 },
+        { label: 'git', amount: 240_000, count: 1 },
+      ],
+    },
+    context: {
+      total: 410_000,
+      sinks: [
+        { label: 'test output', amount: 190_000, count: 6 },
+        { label: 'reads', amount: 120_000, count: 41 },
+      ],
+    },
+    judgeTime: 'the full proxy suite runs after every fix round, 45 min a chunk',
+    judgeContext: 'most of it is test output nobody read past the summary line',
     judgeRuns: 2,
     judgeTokens: 7_400,
     judgeShare: 1.2,
     judgeRunning: false,
     savedPct: 3,
-    savedMs: 180_000,
+    savedMs: 192_000,
   },
   wasters: [
     {

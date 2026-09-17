@@ -197,7 +197,7 @@ describe('register', () => {
 
     const drawn = textOf(await $.ui.render(paneRender()))
     expect(drawn, 'the waster the judge named leads the pane').toContain('Claude keeps running the whole bun test suite')
-    expect(drawn).toContain('Kill')
+    expect(drawn, 'the third verb reads Stop; the key behind it is still kill').toContain('■ Stop')
 
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:kill` })
     await world.clock.settle()

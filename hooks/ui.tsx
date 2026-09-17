@@ -3,8 +3,10 @@
 /* @jsxFrag Fragment */
 import type { RenderElement } from 'claude-code'
 
+import { logoCells } from './core/logo'
 import { collapseWs, duration, fit, gauge, kilo, tokensOf } from './core/text'
-import { NO_CALLS, PANE_INLINE_ROWS, PANE_TITLE } from './core/types'
+import { sparkline } from './core/trend'
+import { NO_CALLS, PANE_INLINE_ROWS, PANE_TITLE, SINKS } from './core/types'
 import type {
   Actions,
   Artifact,
@@ -18,13 +20,19 @@ import type {
   Header,
   PaneModel,
   PaneProps,
+  Sinks,
   Ui,
 } from './core/types'
 
 // Layout numbers of this drawing only. §9.12 puts constants in types.ts; types.ts is the shared
 // contract and carries no layout cells, so these stay private to the drawing (README "Theme"
 // records the divergence; hoisting them is WP6's call at integration).
-const ACCENT = 'suggestion'   // the theme's accent key (the engine's own suggestion blue and gauge fill)
+//
+// The theme keys under `TONES`: `suggestion` is confirmed live, the other three are probed by the
+// design QA. One table, so a key the engine refuses is flipped to the accent in one place.
+const TONES = { accent: 'suggestion', good: 'success', warm: 'warning', hot: 'error' } as const
+const GAUGE_WARM = 70         // the fill turns warm at this share of the window, and hot past GAUGE_HOT
+const GAUGE_HOT = 90
 const GUTTER = 10             // cells of the dim label column inside an opened card
 const NUMBER_CELLS = 3        // the card's dim number and the space after it (two digits and their space fit)
 const GLYPH_CELLS = 2         // the waster's '●' and the space after it
@@ -38,22 +46,31 @@ const FIELD_CELLS = 2         // the Steer row's '›' and the space after it
 const CARD_PAD = 2            // paddingX inside a card's border
 const CARD_CHROME = 6         // what a card's border and padding cost a row: 2 + 2 × 2
 const HEAD_INDENT = 1 + CARD_PAD   // cells the un-framed sections add to paddingX to start at the cards' content column
-const GAUGE_MAX = 16          // §5.5's gauge(percent, 16); it never grows past this, however wide the pane is
+const GAUGE_MAX = 30          // the gauge never grows past this, however wide the header is
 const GAUGE_MIN = 8
-const GAUGE_RESERVE = 6       // cells the gauge row leaves for the two spaces and the percent
+const TREND_CELLS = 10        // cells the sparkline of `header.trend` draws
+const TREND_MIN = 2           // samples before a trend is a shape rather than a dot
+const TREND_GAP = 2           // spaces between the gauge and the trend
+const LOGO_GAP = 3            // cells between the mark and the header's own column
+const LOGO_MIN_CELLS = 40     // header cells below which the mark is dropped whole, like any other segment
 const VERB_GAP = 3
-const RULES_CELLS = 18        // 'Write' + 'Try' + 'Skip' and the gaps around them
+const RULES_CELLS = 22        // '✎ Write' + '▸ Try' + '– Skip' and the gaps between them
 const RULES_MIN_TITLE = 8     // a rule's title keeps this many cells before its kind label is dropped whole
-const CHECK_CELLS = 10        // 'Check now'
+const CHECK_CELLS = 11        // '↻ Check now'
 const INFO_CELLS = 1          // 'i'
 const CONTROL_GAP = 2         // cells between a row's text and the Button at its right edge
+const STATUS_GAP = 4          // cells between what the session saved and what the judge cost
+const TAG_MIN_CELLS = 52      // the card's cells at 60 body columns: under that the category tag is dropped
+const TITLE_MIN = 8           // cells a card's title keeps whatever else the row reserves
 const BAND_RESERVE = 4        // cells the engine's own collapse control '[-]' takes at the band's right edge
 const TITLE_ROWS = 2
 const VALUE_ROWS = 2          // rows the fix keeps under the verbs
+const HINT_ROWS = 2           // rows the judge's one-line explanation keeps under a Time or Context row
 const DETAIL_ROWS_MAX = 4     // rows `why` and `fix` each keep inside the opened details
 const MIN_CELLS = 24
 const MIN_ROWS = 8            // however little the surface grants the inline pane, it is budgeted for this
-const HEAD_ROWS = 3           // the inline header's own rows: the label, the gauge and the blank under them
+const HEAD_ROWS = 5           // rows the inline header spends: the mark's own four cell rows and the blank under them
+const LOGO = logoCells()      // packed once: the pane redraws on every ledger row and every keystroke
 const FOOT_ROWS = 2           // the inline footer's own rows: the blank and the counts line
 const CARD_BORDER_ROWS = 2    // the card's own '╭───╮' and '╰───╯'
 const VERBS_ROWS = 1
@@ -61,8 +78,11 @@ const STEER_ROWS = 2          // the field and its hint
 const COMPACT_ROWS = 1        // rows a value or a cited call gets inside the inline card
 const DETAIL_ROWS = 3         // 'why', 'fix' and the summary row before the cited calls
 const STAT_ROWS = 2           // the stats line and the fix line of a folded card
-const GLYPHS = { live: '●', kept: '✓', steered: '↪', killed: '✕', fix: '→', field: '›', quote: '↳' } as const
-const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.kept, steer: GLYPHS.steered, kill: GLYPHS.killed }
+const GLYPHS = {
+  live: '●', kept: '✓', steered: '↪', stopped: '■', fix: '→', field: '›', quote: '↳',
+  check: '↻', write: '✎', tryOnce: '▸', skip: '–',
+} as const
+const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.kept, steer: GLYPHS.steered, kill: GLYPHS.stopped }
 const ARTIFACT_LABEL: Record<ArtifactKind, string> = {
   'claude-md': 'CLAUDE.md',
   skill: 'skill',
@@ -71,14 +91,24 @@ const ARTIFACT_LABEL: Record<ArtifactKind, string> = {
 }
 const TRYABLE: readonly ArtifactKind[] = ['claude-md', 'skill', 'agent-brief']
 const HITS = /^\d+×$/               // a stats segment that is a hit count, e.g. '3×'
+const TIME_LABEL = 'Time'
 const CONTEXT_LABEL = 'Context'
+const TIME_LEAD = 'in tools'        // '3h 12m in tools', the total before the named sinks
+const CONTEXT_LEAD = 'from tools'   // '410k from tools'
 const SAVED_LABEL = 'Saved '
 const JUDGE_LABEL = 'Judge '
+const TOKENS_UNIT = ' tokens'
 const DECIDED_LABEL = 'Decided'
 const RULES_LABEL = 'Rules for next session'
 const STEER_HINT = 'Enter sends · Steer again closes · longer: /saver steer <n> <text>'
 const EMPTY_TEXT = 'Watching quietly. Nothing repeating yet.'
 const AWAITING_TEXT = 'awaiting the first turn'
+const CHECK_LABEL = `${GLYPHS.check} Check now`
+const CHECKING_LABEL = 'Checking…'
+const CHECKING_TEXT = 'checking this session… usually 10–20 s'
+const BAND_CHECKING = 'checking…'
+const HOUR_MS = 3_600_000
+const MINUTE_MS = 60_000
 const FULL_PANE_HINT = '/saver for the full pane'
 const VERBS_HINT = '/saver keep|steer|kill <n>'   // the keyboard route to the verbs, for a pane the Tab ring never reaches
 
@@ -95,7 +125,10 @@ const linesOf = (text: string, cells: number, rows: number): string[] => {
       const joined = last === '' ? word : `${last} ${word}`
       return joined.length <= width ? [...acc.slice(0, -1), joined] : [...acc, word]
     }, [''])
-  return lines.length <= rows ? lines : [...lines.slice(0, rows - 1), fit(lines.slice(rows - 1).join(' '), width)]
+  // Every line is cut to the width, not only the last: a word longer than the row would otherwise
+  // reach past whatever frames it, and a card's border is what it pokes through.
+  return (lines.length <= rows ? lines : [...lines.slice(0, rows - 1), lines.slice(rows - 1).join(' ')])
+    .map(line => fit(line, width))
 }
 
 /** Joins the segments that carry something with ' · '. */
@@ -113,15 +146,16 @@ const textBlock = (ui: Ui, text: string, cells: number, rows: number, isDim?: tr
   )
 }
 
+/** The cells a gutter row's content column is given. */
+const gutterValue = (cells: number): number => Math.max(TITLE_MIN, cells - GUTTER)
+
 /** One row of an opened card: a dim label in the 10-cell gutter, the value in the content column. */
-const gutterRow = (ui: Ui, label: string, value: RenderElement | string): RenderElement => {
+const gutterRow = (ui: Ui, label: string, value: RenderElement, cells: number): RenderElement => {
   const { Box, Text } = ui
   return (
     <Box flexDirection="row">
       <Box width={GUTTER}><Text dimColor wrap="truncate-end">{label}</Text></Box>
-      <Box flexDirection="column" flexGrow={1}>
-        {typeof value === 'string' ? <Text wrap="truncate-end">{value}</Text> : value}
-      </Box>
+      <Box flexDirection="column" width={gutterValue(cells)}>{value}</Box>
     </Box>
   )
 }
@@ -143,99 +177,168 @@ const blank = (ui: Ui): RenderElement => {
   return <Box height={1} />
 }
 
-/** How wide the header's gauge is drawn: the spec's 16 cells, never past what the row leaves it. */
-const gaugeCells = (cells: number): number =>
-  Math.max(GAUGE_MIN, Math.min(GAUGE_MAX, cells - GAUGE_RESERVE))
+/** A wall time long enough to need its hours: '48m', '3h 12m', '2h 05m'. */
+const span = (ms: number): string => {
+  const minutes = Math.round(ms / MINUTE_MS)
+  if (ms < HOUR_MS) return duration(ms)
+  return `${Math.floor(minutes / 60)}h ${`${minutes % 60}`.padStart(2, '0')}m`
+}
 
-/** The gauge row: accent cells for the context used, dim for what is left, then the percentage in bold. */
-const gaugeRow = (ui: Ui, percent: number, cells: number): RenderElement => {
+/** The tone the gauge's fill takes: the accent while there is room, warm as it fills, hot past GAUGE_HOT. */
+const gaugeTone = (percent: number): string =>
+  percent > GAUGE_HOT ? TONES.hot : percent >= GAUGE_WARM ? TONES.warm : TONES.accent
+
+/** How wide the gauge is drawn: its own cells, less whatever the trend beside it takes. */
+const gaugeCells = (cells: number, trend: string): number =>
+  Math.max(GAUGE_MIN, Math.min(GAUGE_MAX, cells - (trend === '' ? 0 : trend.length + TREND_GAP)))
+
+/** The trend beside the gauge: nothing until two samples make a shape, nothing where both do not fit. */
+const trendOf = (header: Header, cells: number): string => {
+  if (header.trend.length < TREND_MIN) return ''
+  const drawn = sparkline(header.trend, TREND_CELLS)
+  return GAUGE_MIN + TREND_GAP + drawn.length <= cells ? drawn : ''
+}
+
+/** The gauge row: the fill in the tone it has earned, what is left dim, then the session's trend. */
+const gaugeRow = (ui: Ui, header: Header, percent: number, cells: number): RenderElement => {
   const { Text } = ui
-  const drawn = gauge(percent, gaugeCells(cells))
+  const trend = trendOf(header, cells)
+  const drawn = gauge(percent, gaugeCells(cells, trend))
   const filled = drawn.replace(/░+$/, '')
   return (
     <Text wrap="truncate-end">
-      <Text color={ACCENT}>{filled}</Text>
+      <Text color={gaugeTone(percent)}>{filled}</Text>
       <Text dimColor>{drawn.slice(filled.length)}</Text>
-      {'  '}
-      <Text bold>{`${Math.round(percent)}%`}</Text>
+      {trend === '' ? null : <Text dimColor>{`${' '.repeat(TREND_GAP)}${trend}`}</Text>}
     </Text>
   )
 }
 
-/** The run to compaction, in tokens and in turns; segments are dropped whole rather than cut. */
-const compactionText = (header: Header, room: number): string => {
-  const near = header.tokensToCompaction === null || header.tokensToCompaction <= 0
+/**
+ * Where the session stands: the share used, then the run to compaction in tokens and in turns.
+ * A tight row gives back a word before it gives back a figure, and never cuts one.
+ */
+const contextText = (header: Header, room: number): string => {
+  const percent = header.percent === null ? null : `${Math.round(header.percent)}%`
+  const used = percent === null ? null : `${percent} of context`
+  const tokens = header.tokensToCompaction === null || header.tokensToCompaction <= 0
     ? null
-    : `${kilo(header.tokensToCompaction)} tokens to compaction`
+    : kilo(header.tokensToCompaction)
+  const near = tokens === null ? null : `${tokens} tokens to compaction`
+  const nearer = tokens === null ? null : `${tokens} to compaction`
   const turns = near !== null && header.turnsToCompaction !== null && header.turnsToCompaction > 0
     ? `about ${header.turnsToCompaction} turn${header.turnsToCompaction === 1 ? '' : 's'}`
     : null
-  return [joined([near, turns]), joined([near])].find(text => text.length <= room) ?? ''
+  const ladder = [
+    joined([used, near, turns]),
+    joined([used, near]),
+    joined([used, nearer]),
+    joined([percent, nearer]),
+    joined([used]),
+    joined([percent]),
+  ]
+  return ladder.find(text => text.length <= room) ?? ''
 }
 
 /** What the status row draws: the savings, the judge's figures, or as much of them as the row holds. */
-const statusTexts = (header: Header, room: number): { saved: string; judge: string } => {
+const statusTexts = (header: Header, room: number): { saved: string; judge: string; tail: string } => {
   const pct = header.savedPct > 0 ? `~${header.savedPct}%` : null
   const ms = header.savedMs > 0 ? duration(header.savedMs) : null
   const runs = `${header.judgeRuns} run${header.judgeRuns === 1 ? '' : 's'}`
+  const spent = header.judgeTokens > 0 ? kilo(header.judgeTokens) : null
   // A judge that has not run yet is not a figure: 'Check now' already says the run is there to be had.
-  const judge = header.judgeRuns === 0 ? '' : joined([runs, header.judgeTokens > 0 ? kilo(header.judgeTokens) : null])
-  const cells = (row: { saved: string; judge: string }): number =>
+  const judge = header.judgeRuns === 0 ? '' : joined([runs, spent === null ? null : `${spent}${TOKENS_UNIT}`])
+  const shorter = header.judgeRuns === 0 ? '' : joined([runs, spent])
+  const tail = header.judgeRunning ? ` · ${CHECKING_TEXT}` : ''
+  const cells = (row: { saved: string; judge: string; tail: string }): number =>
     (row.saved === '' ? 0 : SAVED_LABEL.length + row.saved.length)
-    + (row.judge === '' ? 0 : JUDGE_LABEL.length + row.judge.length)
-    + (row.saved !== '' && row.judge !== '' ? CONTROL_GAP : 0)
+    + (row.judge === '' ? 0 : (row.saved === '' ? 0 : STATUS_GAP) + JUDGE_LABEL.length + row.judge.length)
+    + row.tail.length
   const ladder = [
-    { saved: joined([pct, ms]), judge },
-    { saved: joined([pct, ms]), judge: '' },
-    { saved: joined([pct ?? ms]), judge: '' },
-    { saved: '', judge: '' },
+    { saved: joined([pct, ms]), judge, tail },
+    { saved: joined([pct, ms]), judge, tail: '' },
+    { saved: joined([pct, ms]), judge: shorter, tail: '' },
+    { saved: joined([pct, ms]), judge: '', tail: '' },
+    { saved: joined([pct ?? ms]), judge: '', tail: '' },
+    { saved: '', judge: '', tail: '' },
   ]
-  return ladder.find(row => cells(row) <= room) ?? { saved: '', judge: '' }
+  return ladder.find(row => cells(row) <= room) ?? { saved: '', judge: '', tail: '' }
 }
 
-/** The 'Check now' button, dim and reading 'checking…' while the judge runs. */
+/** The 'Check now' button; while a run is in flight it says so, dims, and answers no press. */
 const checkButton = (ui: Ui, header: Header, actions: Actions): RenderElement => {
   const { Button } = ui
-  return (
-    <Button key="check" plain dimColor={header.judgeRunning} onPress={() => actions.check()}>
-      {header.judgeRunning ? 'checking…' : 'Check now'}
-    </Button>
-  )
+  return header.judgeRunning
+    ? <Button key="check" plain dimColor onPress={() => undefined}>{CHECKING_LABEL}</Button>
+    : <Button key="check" plain onPress={() => actions.check()}>{CHECK_LABEL}</Button>
 }
 
-/** The header's second block: what the session saved, what the judge cost, and 'Check now' at the right edge. */
-const statusRow = (ui: Ui, header: Header, actions: Actions, cells: number): RenderElement => {
+/** The header's first row: the product's name, and the judge's button at the right edge. */
+const nameRow = (ui: Ui, header: Header, actions: Actions, cells: number): RenderElement => {
   const { Box, Text } = ui
-  const room = Math.max(8, cells - CHECK_CELLS - CONTROL_GAP)
-  const { saved, judge } = statusTexts(header, room)
-  // Whatever the row has kept starts at the left edge; the button holds the right one on its own.
+  // The surface already draws the pane's own title, so a row too tight for both keeps the button.
+  const name = cells >= PANE_TITLE.length + CHECK_CELLS + CONTROL_GAP ? PANE_TITLE : ''
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
-      {saved === '' && judge === '' ? <Box flexGrow={1} /> : null}
-      {saved === ''
-        ? null
-        : (
-          <Box width={SAVED_LABEL.length + saved.length}>
-            <Text wrap="truncate-end"><Text dimColor>{SAVED_LABEL}</Text>{saved}</Text>
-          </Box>
-        )}
-      {judge === ''
-        ? null
-        : (
-          <Box width={JUDGE_LABEL.length + judge.length}>
-            <Text dimColor wrap="truncate-end">{`${JUDGE_LABEL}${judge}`}</Text>
-          </Box>
-        )}
+      {name === '' ? <Box flexGrow={1} /> : <Box width={name.length}><Text bold>{name}</Text></Box>}
       {checkButton(ui, header, actions)}
     </Box>
   )
 }
 
-/** Rows the inline header draws: its three own rows, and the compaction line when it carries one. */
-const headRows = (header: Header, cells: number): number =>
-  HEAD_ROWS + (header.percent !== null && compactionText(header, cells) !== '' ? 1 : 0)
+/**
+ * The header's last rows: what the session saved, what the judge cost, and that a run is in flight —
+ * appended to the figures, or, where the row could not hold it and there are rows to spare, its own.
+ */
+const statusRows = (ui: Ui, header: Header, cells: number, isCompact: boolean): RenderElement[] => {
+  const { Text } = ui
+  const { saved, judge, tail } = statusTexts(header, cells)
+  return [
+    <Text wrap="truncate-end">
+      {saved === '' ? null : <Text dimColor>{SAVED_LABEL}</Text>}
+      {saved === '' ? null : <Text color={TONES.good}>{saved}</Text>}
+      {judge === '' ? null : <Text dimColor>{`${saved === '' ? '' : ' '.repeat(STATUS_GAP)}${JUDGE_LABEL}${judge}`}</Text>}
+      {tail === '' ? null : <Text dimColor>{tail}</Text>}
+    </Text>,
+    ...(header.judgeRunning && tail === '' && !isCompact
+      ? [<Text dimColor wrap="truncate-end">{fit(CHECKING_TEXT, cells)}</Text>]
+      : []),
+  ]
+}
 
-/** The header: the label, the gauge and the run to compaction, then the savings and the judge. */
+/** Where one budget went: the total, then the SINKS largest named consumers, dropped whole while tight. */
+const sinkText = (sinks: Sinks, lead: string, amount: (n: number) => string, room: number): string => {
+  const total = `${amount(sinks.total)} ${lead}`
+  const named = sinks.sinks.slice(0, SINKS)
+    .map(sink => `${sink.label} ${amount(sink.amount)}${sink.count > 1 ? ` (${sink.count})` : ''}`)
+  const ladder = Array.from({ length: named.length + 1 }, (_, back) =>
+    joined([total, ...named.slice(0, named.length - back)]))
+  return ladder.find(text => text.length <= room) ?? fit(total, room)
+}
+
+/** One budget as a row: its label in the gutter, where it went, and the judge's sentence about it. */
+const sinkRow = (
+  ui: Ui,
+  label: string,
+  text: string,
+  hint: string | null,
+  cells: number,
+): RenderElement => {
+  const { Box, Text } = ui
+  const value = gutterValue(cells)
+  return gutterRow(ui, label, (
+    <Box flexDirection="column">
+      <Text wrap="truncate-end">{fit(text, value)}</Text>
+      {hint === null
+        ? null
+        : linesOf(hint, value - FIX_CELLS, HINT_ROWS).map((line, at) => (
+          <Text dimColor wrap="truncate-end">{`${at === 0 ? `${GLYPHS.quote} ` : ' '.repeat(FIX_CELLS)}${line}`}</Text>
+        ))}
+    </Box>
+  ), cells)
+}
+
+/** The header: the mark, the session's four rows beside it, then where the time and the context went. */
 const headerSection = (
   ui: Ui,
   header: Header,
@@ -243,56 +346,78 @@ const headerSection = (
   cells: number,
   isCompact: boolean,
 ): RenderElement => {
-  const { Box, Text } = ui
-  const compaction = header.percent === null ? '' : compactionText(header, cells)
+  const { Box, Raster, Text } = ui
+  const hasLogo = cells >= LOGO_MIN_CELLS
+  const room = hasLogo ? cells - LOGO.columns - LOGO_GAP : cells
+  const context = contextText(header, room)
   // Indented to the cards' content column, so the labels and the card titles start at one x.
   return (
     <Box flexDirection="column" paddingX={1 + HEAD_INDENT}>
-      <Text dimColor wrap="truncate-end">{CONTEXT_LABEL}</Text>
-      {header.percent === null
-        ? <Text dimColor wrap="truncate-end">{fit(AWAITING_TEXT, cells)}</Text>
-        : gaugeRow(ui, header.percent, cells)}
-      {compaction === '' ? null : <Text dimColor wrap="truncate-end">{compaction}</Text>}
-      {isCompact ? null : [blank(ui), statusRow(ui, header, actions, cells)]}
+      <Box flexDirection="row" gap={LOGO_GAP}>
+        {hasLogo ? <Raster key="logo" columns={LOGO.columns} rows={LOGO.rows} cells={LOGO.cells} /> : null}
+        <Box flexDirection="column" width={room}>
+          {nameRow(ui, header, actions, room)}
+          {header.percent === null
+            ? <Text dimColor wrap="truncate-end">{fit(AWAITING_TEXT, room)}</Text>
+            : <Text wrap="truncate-end">{context}</Text>}
+          {header.percent === null ? null : gaugeRow(ui, header, header.percent, room)}
+          {statusRows(ui, header, room, isCompact)}
+        </Box>
+      </Box>
+      {isCompact || header.time === null
+        ? null
+        : sinkRow(ui, TIME_LABEL, sinkText(header.time, TIME_LEAD, span, gutterValue(cells)), header.judgeTime, cells)}
+      {isCompact || header.context === null
+        ? null
+        : sinkRow(ui, CONTEXT_LABEL, sinkText(header.context, CONTEXT_LEAD, kilo, gutterValue(cells)), header.judgeContext, cells)}
       {blank(ui)}
     </Box>
   )
 }
 
-/** The cells a title row has once the 'i' Button and the gap before it are reserved. */
-const titleValue = (cells: number): number =>
-  Math.max(NUMBER_CELLS + GLYPH_CELLS + 8, cells - INFO_CELLS - CONTROL_GAP)
+/** The category tag a title row wears, dropped whole once the card is narrower than TAG_MIN_CELLS. */
+const tagOf = (card: Card, cells: number): string => (cells < TAG_MIN_CELLS ? '' : card.category)
 
-/** A waster's title row: its number, the accent dot, the behaviour in bold, and 'i' at the right edge. */
+/** The cells a title row keeps once its tag, the 'i' Button and the gaps around them are reserved. */
+const titleValue = (cells: number, tag: string): number =>
+  Math.max(
+    NUMBER_CELLS + GLYPH_CELLS + TITLE_MIN,
+    cells - INFO_CELLS - CONTROL_GAP - (tag === '' ? 0 : tag.length + CONTROL_GAP),
+  )
+
+/** A waster's title row: its number, the accent dot, the behaviour in bold, then its tag and 'i'. */
 const titleRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderElement => {
   const { Box, Text, Button } = ui
-  const value = titleValue(cells)
+  const tag = tagOf(card, cells)
+  const value = titleValue(cells, tag)
   const title = value - NUMBER_CELLS - GLYPH_CELLS
+  // The widths add up to the row's own, so the 'i' lands at the right edge without a space-between.
   return (
-    <Box flexDirection="row" width={cells} justifyContent="space-between">
+    <Box flexDirection="row" width={cells} gap={CONTROL_GAP}>
       <Box flexDirection="row" width={value}>
         <Box width={NUMBER_CELLS}><Text dimColor wrap="truncate-end">{`${card.n}`}</Text></Box>
-        <Box width={GLYPH_CELLS}><Text color={ACCENT}>{GLYPHS.live}</Text></Box>
-        <Box flexDirection="column">
+        <Box width={GLYPH_CELLS}><Text color={TONES.accent}>{GLYPHS.live}</Text></Box>
+        <Box flexDirection="column" width={title}>
           {linesOf(card.kind, title, TITLE_ROWS).map(line => (
             <Text bold wrap="truncate-end">{line}</Text>
           ))}
         </Box>
       </Box>
+      {tag === '' ? null : <Box width={tag.length}><Text dimColor wrap="truncate-end">{tag}</Text></Box>}
       <Button key={`card:${card.patternId}:info`} plain dimColor onPress={() => actions.info(card.patternId)}>i</Button>
     </Box>
   )
 }
 
-/** The action row: Keep, Steer and Kill, three cells apart. */
+/** The action row: Keep, Steer and Stop, three cells apart, each behind its own glyph. */
 const verbsRow = (ui: Ui, card: Card, actions: Actions): RenderElement => {
   const { Box, Button } = ui
   const id = card.patternId
   return (
     <Box flexDirection="row" gap={VERB_GAP}>
-      <Button key={`card:${id}:keep`} plain onPress={() => actions.keep(id)}>Keep</Button>
-      <Button key={`card:${id}:steer`} plain onPress={() => actions.steer(id)}>Steer</Button>
-      <Button key={`card:${id}:kill`} plain onPress={() => actions.kill(id)}>Kill</Button>
+      <Button key={`card:${id}:keep`} plain onPress={() => actions.keep(id)}>{`${GLYPHS.kept} Keep`}</Button>
+      <Button key={`card:${id}:steer`} plain onPress={() => actions.steer(id)}>{`${GLYPHS.steered} Steer`}</Button>
+      <Button key={`card:${id}:kill`} plain onPress={() => actions.kill(id)}>{`${GLYPHS.stopped} Stop`}</Button>
     </Box>
   )
 }
@@ -378,7 +503,7 @@ const totalText = (card: Card): string => {
 /** The details behind 'i': why, the fix, the summary, and the calls behind the claim. */
 const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): RenderElement[] => {
   const { Text } = ui
-  const value = Math.max(8, cells - GUTTER)
+  const value = gutterValue(cells)
   // Inline every value is one row and one call, so each row of the card's budget holds one of them.
   const rows = isCompact ? COMPACT_ROWS : DETAIL_ROWS_MAX
   const calls = isCompact ? COMPACT_ROWS : card.evidence.length
@@ -386,8 +511,8 @@ const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): Rend
   const shown = card.evidence.slice(0, calls)
   const cols = callColumns(shown, cells)
   return [
-    gutterRow(ui, 'why', textBlock(ui, card.why, value, rows)),
-    gutterRow(ui, 'fix', textBlock(ui, card.fix, value, rows)),
+    gutterRow(ui, 'why', textBlock(ui, card.why, value, rows), cells),
+    gutterRow(ui, 'fix', textBlock(ui, card.fix, value, rows), cells),
     ...(card.total.calls === 0 ? [] : [<Text dimColor wrap="truncate-end">{fit(totalText(card), cells)}</Text>]),
     ...shown.flatMap(e => callBlock(ui, e, cols, cells, isCompact)),
   ]
@@ -424,7 +549,11 @@ const cardContentRows = (card: Card, model: PaneModel): number =>
 /** Rows an inline card spends on everything but its content: the border, the title, the verbs, the field. */
 const cardFixedRows = (card: Card, model: PaneModel, cells: number): number =>
   CARD_BORDER_ROWS
-  + linesOf(card.kind, titleValue(cells - CARD_CHROME) - NUMBER_CELLS - GLYPH_CELLS, TITLE_ROWS).length
+  + linesOf(
+    card.kind,
+    titleValue(cells - CARD_CHROME, tagOf(card, cells - CARD_CHROME)) - NUMBER_CELLS - GLYPH_CELLS,
+    TITLE_ROWS,
+  ).length
   + VERBS_ROWS
   + (model.steering === card.patternId ? STEER_ROWS : 0)
 
@@ -474,7 +603,7 @@ const cardBlock = (
   const { Box } = ui
   const rows = cardRows(ui, card, model, actions, cells - CARD_CHROME, budget)
   return isNewest
-    ? <Box flexDirection="column" borderStyle="round" borderColor={ACCENT} paddingX={CARD_PAD}>{rows}</Box>
+    ? <Box flexDirection="column" borderStyle="round" borderColor={TONES.accent} paddingX={CARD_PAD}>{rows}</Box>
     : <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={CARD_PAD}>{rows}</Box>
 }
 
@@ -545,9 +674,19 @@ const decidedRow = (ui: Ui, row: DecidedRow, cells: number): RenderElement => {
     <Box flexDirection="column">
       <Box flexDirection="row" width={cells} justifyContent="space-between">
         <Box width={value}>
-          <Text wrap="truncate-end">{fit(`${DECIDED_GLYPH[row.choice]} ${row.kind}`, value)}</Text>
+          <Text wrap="truncate-end">
+            <Text color={row.choice === 'keep' ? TONES.good : undefined}>{DECIDED_GLYPH[row.choice]}</Text>
+            {fit(` ${row.kind}`, value - 1)}
+          </Text>
         </Box>
-        {right === '' ? null : <Box width={right.length}><Text dimColor>{right}</Text></Box>}
+        {right === ''
+          ? null
+          : (
+            <Box width={right.length}>
+              {/* A credit that landed is the one figure in the footer worth a tone; a rate stays dim. */}
+              <Text dimColor={!row.settled || row.ignored > 0} color={row.settled && row.ignored === 0 ? TONES.good : undefined}>{right}</Text>
+            </Box>
+          )}
       </Box>
       {row.instruction === null
         ? null
@@ -574,12 +713,12 @@ const artifactRow = (ui: Ui, artifact: Artifact, actions: Actions, cells: number
           <Text dimColor>{label}</Text>
         </Text>
       </Box>
-      <Box flexDirection="row" gap={2}>
-        <Button key={`write:${id}`} plain onPress={() => actions.write(artifact)}>Write</Button>
+      <Box flexDirection="row" gap={CONTROL_GAP}>
+        <Button key={`write:${id}`} plain onPress={() => actions.write(artifact)}>{`${GLYPHS.write} Write`}</Button>
         {TRYABLE.includes(artifact.kind)
-          ? <Button key={`try:${id}`} plain onPress={() => actions.tryOnce(artifact)}>Try</Button>
+          ? <Button key={`try:${id}`} plain onPress={() => actions.tryOnce(artifact)}>{`${GLYPHS.tryOnce} Try`}</Button>
           : null}
-        <Button key={`skip:${id}`} plain dimColor onPress={() => actions.skip(artifact)}>Skip</Button>
+        <Button key={`skip:${id}`} plain dimColor onPress={() => actions.skip(artifact)}>{`${GLYPHS.skip} Skip`}</Button>
       </Box>
     </Box>
   )
@@ -635,15 +774,22 @@ const hintSection = (ui: Ui, cells: number): RenderElement => {
   )
 }
 
-/** The band's segments, the ones that carry nothing left out. */
-const bandSegments = (model: BandModel): { text: string; isFresh?: true }[] => [
-  ...(model.percent !== null && model.percent > 0 ? [{ text: `${Math.round(model.percent)}%` }] : []),
-  ...(model.tokensToCompaction !== null && model.tokensToCompaction > 0
-    ? [{ text: `${kilo(model.tokensToCompaction)} to compaction` }]
-    : []),
-  ...(model.fresh > 0 ? [{ text: `${model.fresh} new`, isFresh: true as const }] : []),
-  ...(model.savedPct > 0 ? [{ text: `saved ~${model.savedPct}%` }] : []),
-]
+/** The band's segments, the ones that carry nothing left out, dropped from the right while the row is short. */
+const bandSegments = (model: BandModel, room: number): { text: string; isFresh?: true; isDim?: true }[] => {
+  const all = [
+    ...(model.percent !== null && model.percent > 0 ? [{ text: `${Math.round(model.percent)}%` }] : []),
+    ...(model.tokensToCompaction !== null && model.tokensToCompaction > 0
+      ? [{ text: `${kilo(model.tokensToCompaction)} to compaction` }]
+      : []),
+    ...(model.fresh > 0 ? [{ text: `${model.fresh} new`, isFresh: true as const }] : []),
+    ...(model.savedPct > 0 ? [{ text: `saved ~${model.savedPct}%` }] : []),
+    ...(model.checking ? [{ text: BAND_CHECKING, isDim: true as const }] : []),
+  ]
+  const cells = (kept: typeof all): number =>
+    PANE_TITLE.length + kept.reduce((sum, segment, at) => sum + segment.text.length + (at === 0 ? 2 : 3), 0)
+  return Array.from({ length: all.length + 1 }, (_, back) => all.slice(0, all.length - back))
+    .find(kept => cells(kept) <= room) ?? []
+}
 
 /** The AbovePrompt band: one line of session state and the pane's own button. */
 export function Band(props: BandProps): RenderElement {
@@ -651,16 +797,17 @@ export function Band(props: BandProps): RenderElement {
   const { Box, Text, Button } = ui
   const label = model.paneOpen ? 'Close' : 'Open'
   const cells = Math.max(MIN_CELLS, site.bodyColumns - BAND_RESERVE)   // the engine draws its own '[-]' past them
+  const room = cells - label.length - CONTROL_GAP
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
-      <Box width={cells - label.length - CONTROL_GAP}>
+      <Box width={room}>
         <Text wrap="truncate-end">
           <Text dimColor>{PANE_TITLE}</Text>
-          {bandSegments(model).map((segment, at) =>
-            segment.isFresh === true
-              ? <Text color={ACCENT}>{`${at === 0 ? '  ' : ' · '}${segment.text}`}</Text>
-              : `${at === 0 ? '  ' : ' · '}${segment.text}`,
-          )}
+          {bandSegments(model, room).map((segment, at) => {
+            const text = `${at === 0 ? '  ' : ' · '}${segment.text}`
+            if (segment.isFresh === true) return <Text color={TONES.accent}>{text}</Text>
+            return segment.isDim === true ? <Text dimColor>{text}</Text> : text
+          })}
         </Text>
       </Box>
       <Button key="toggle" plain onPress={() => actions.togglePane()}>{label}</Button>
@@ -678,7 +825,7 @@ export function Pane(props: PaneProps): RenderElement {
   // Inline the drawing is budgeted against the seat the surface really granted, never against a constant.
   const seat = Math.max(MIN_ROWS, Math.min(site.maxRows, PANE_INLINE_ROWS))
   const foot = model.decided.length === 0 && model.artifacts.length === 0 ? 0 : FOOT_ROWS
-  const rows = isCompact ? Math.max(0, seat - headRows(model.header, indented) - foot) : null
+  const rows = isCompact ? Math.max(0, seat - HEAD_ROWS - foot) : null
   // The command hint is the docked pane's last row: inline the seat is counted in rows and the
   // footer already names a command, and with no card listed there is no number to type.
   const isHinted = !isCompact && model.wasters.length > 0
