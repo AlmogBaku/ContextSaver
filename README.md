@@ -208,11 +208,12 @@ default text or dim. `Button` has no `color` prop, so the verbs take their tone 
 carry a glyph instead: `✓ Fix`, `✎ Fix…`, `– Ignore`, `↻ Check now`, `✎ Write`, `▸ Try`, `– Skip`; the
 band's own four marks are `◐` checking, `●` found, `✓` saved and `◌` watching.
 
-The mark in the header is a `Raster`, the terminal's cell-grid leaf: an 8×8 two-tone bitmap of
-`assets/logo.png`, derived once offline and stored in `hooks/core/logo.ts` as eight lines of `.` `d` `l`,
-then packed into 8 columns × 4 rows of half-block cells. Its upper arc is drawn in the terminal's own
-default foreground rather than as an rgb value, so the ring reads on a light theme and a dark one alike;
-only the lower arc names a colour. The whole drawing contract is Appendix D of the spec.
+The mark in the header is a `Raster`, the terminal's cell-grid leaf: an 8×8 three-tone bitmap of
+`assets/logo.png`, derived once offline and stored in `hooks/core/logo.ts` as eight lines of `.` `d` `b`
+`l`, then packed into 8 columns × 4 rows of half-block cells. It is the ring open on the right, read as a
+gauge: its navy is drawn in the terminal's own default foreground rather than as an rgb value, so the ring
+reads on a light theme and a dark one alike, and only the arc from 9 o'clock to 12 (`#1AA7F0`) and the one
+from 12 to the open end (`#22D3EE`) name a colour. The whole drawing contract is Appendix D of the spec.
 
 The build spec — architecture, module contracts, the judge prompt, the design brief, the UX
 walkthrough — is [`docs/SPEC.md`](docs/SPEC.md); the product spec it implements is
