@@ -91,7 +91,7 @@ const settleWithRow = (state: State, p: Pattern, row: Omit<Row, 'seq'>): Settle 
   if (row.agent !== 'main' || p.openedAtTurn === null || !isSent(p.decision)) return still
   // A row in the decision's own turn was already in flight before Claude could read the instruction.
   if (row.turn <= p.openedAtTurn) return still
-  // D4: every ignored instruction brings the card back, so the user can Keep or say something else.
+  // D4: every ignored instruction brings the card back, so the user can Ignore it or say something else.
   if (p.signature !== null && row.key === p.signature.key) {
     return { pattern: { ...grown, ignored: p.ignored + 1, openedAtTurn: null }, ms: 0, chars: 0, requeue: p.id }
   }
@@ -170,7 +170,7 @@ const applyDecide = (state: State, id: string, choice: Choice, text: string | un
   const instruction = choice === 'kill' ? killPrompt(p) : (text ?? '')
   if (choice !== 'keep' && instruction.trim() === '') return state
   const sending = choice !== 'keep'
-  // Kill rides the same wrapper as Steer (§5.2 "same with killPrompt(p)", Appendix C 5c "the same way"):
+  // Fix rides the same wrapper as Fix… (§5.2 "same with killPrompt(p)", Appendix C 5c "the same way"):
   // Claude reads `Instruction from the user (via ContextSaver): Stop this behaviour …`.
   const note = instructionOf(instruction)
   const decided: Pattern = {
@@ -394,7 +394,7 @@ const decidedRowOf = (state: State, p: Decided): DecidedRow => ({
   // D4: the figure is a projection of one avoided repeat until the instruction settled — nothing ignored
   // it and nothing is still in flight — so the drawing can say `per repeat` before it says `saved`.
   settled: isSent(p.decision) && p.openedAtTurn === null && p.ignored === 0,
-  // What Kill sends is the kind and the fix the row already carries; only a steer's own sentence is news.
+  // What Fix sends is the kind and the fix the row already carries; only a note of the user's own is news.
   instruction: p.decision === 'steer' && p.instruction !== null && collapseWs(p.instruction) !== collapseWs(p.alternative)
     ? p.instruction
     : null,
@@ -404,7 +404,7 @@ const decidedRowOf = (state: State, p: Decided): DecidedRow => ({
 /** Builds everything the pane renders: header, wasters, decisions and rules. */
 export const paneModel = (state: State, artifacts: Artifact[]): PaneModel => {
   // One alias table for the whole draw: the naming is the ledger's, not a card's, and the pane
-  // redraws on every ledger row and every keystroke in the Steer field.
+  // redraws on every ledger row and every keystroke in the Fix… field.
   const aliases = agentAliases(state.rows)
   return {
     header: headerOf(state),
@@ -424,15 +424,41 @@ export const paneModel = (state: State, artifacts: Artifact[]): PaneModel => {
   }
 }
 
-/** Builds the one summary line the band shows above the prompt. */
-export const bandModel = (state: State): BandModel => ({
-  percent: state.usage.percent ?? null,
-  tokensToCompaction: tokensToCompaction(state),
-  fresh: state.cards.length,
-  savedPct: pctOf(state.saved.chars, state.usage.window),
-  paneOpen: state.paneOpen,
-  checking: state.judge.running,
-})
+// What the cards still awaiting a decision have already cost: the figures the band's teaser states.
+const waitingCost = (state: State): { ms: number; chars: number } =>
+  state.cards
+    .map(id => patternById(state.patterns, id))
+    .filter((p): p is Pattern => p !== undefined)
+    .reduce(
+      (sum, p) => {
+        const total = totalOf(p, state, rowsOf(state, p))
+        return { ms: sum.ms + total.ms, chars: sum.chars + total.chars }
+      },
+      { ms: 0, chars: 0 },
+    )
+
+// The first state that applies wins: a run in flight, then cards waiting, then a saving to show off.
+const bandState = (state: State): BandModel['state'] => {
+  if (state.judge.running) return 'checking'
+  if (state.cards.length > 0) return 'found'
+  if (state.saved.chars > 0 || state.saved.ms > 0) return 'saved'
+  return 'watching'
+}
+
+/** Builds the one teaser line the band shows above the prompt. */
+export const bandModel = (state: State): BandModel => {
+  const cost = waitingCost(state)
+  return {
+    state: bandState(state),
+    fresh: state.cards.length,
+    costPct: pctOf(cost.chars, state.usage.window),
+    costMs: cost.ms,
+    savedPct: pctOf(state.saved.chars, state.usage.window),
+    savedMs: state.saved.ms,
+    calls: state.rows.length,
+    paneOpen: state.paneOpen,
+  }
+}
 
 const isFilled = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0
 

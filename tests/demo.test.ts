@@ -112,7 +112,7 @@ describe('demo', () => {
     expect(drawn, 'with the sentence that was sent under it').toContain('run only the tests for the file you just edited')
     expect(drawn).toContain('Rules for next session')
     expect(drawn, 'the rule is labelled by what it tells Claude to do').toContain('Run only the tests for the file')
-    expect(drawn, 'and the verbs are named for the keyboard').toContain('/saver keep|steer|kill <n>')
+    expect(drawn, 'and the verbs are named for the keyboard').toContain('/saver fix|ignore <n>')
 
     const debug = await $.command.run(saverRun('debug'))
     expect(debug.text).toContain('rows 7')
@@ -126,6 +126,6 @@ describe('demo', () => {
     await $.session.start(SESSION)
 
     expect((await $.command.run(saverRun('demo'))).text)
-      .toBe('Usage: /saver [check | steer [n] <text> | keep <n> | kill <n> | debug | reset]')
+      .toBe('Usage: /saver [check | fix [n] [text] | ignore <n> | debug | reset]')
   })
 })

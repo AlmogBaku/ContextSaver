@@ -1,5 +1,5 @@
 import type { BandModel } from '../../../hooks/core/types'
-import { bandFull } from './band-full'
+import { bandFound } from './band-found'
 
-/** The band while a judge run is in flight, which it says with the pane closed. */
-export const bandChecking: BandModel = { ...bandFull, checking: true }
+/** A judge run in flight, which the band says with the pane closed. */
+export const bandChecking: BandModel = { ...bandFound, state: 'checking' }

@@ -5,7 +5,7 @@ export const PANE_ID = 'saver'
 export const PANE_TITLE = 'ContextSaver'
 export const PANE_INLINE_ROWS = 18            // body rows requested when seated inline above the prompt (the compact card is framed)
 export const AUTO_OPEN_MIN_COLUMNS = 144      // unasked opens wait undrawn below this width (d.ts 1943-1945)
-export const COMMAND = { name: 'saver', description: 'ContextSaver: toggle the pane · check | steer [n] <text> | keep <n> | kill <n> | debug | reset', argumentHint: '[check | steer [n] <text> | keep <n> | kill <n> | debug | reset]' } as const
+export const COMMAND = { name: 'saver', description: 'ContextSaver: toggle the pane · check | fix [n] [text] | ignore <n> | debug | reset', argumentHint: '[check | fix [n] [text] | ignore <n> | debug | reset]' } as const
 export const SETTLE_TURNS = 2                 // an instruction not ignored for this many turns is credited
 export const JUDGE_MIN_NEW_TOKENS = 30_000
 export const JUDGE_MIN_TURNS = 3
@@ -64,7 +64,7 @@ export type StoredPattern = {
   kind: string                     // the behaviour, one sentence ≤ 120 chars: "Claude keeps running `bun test` after every step"
   signature: Signature | null      // null = behavioural, no single command carries it
   why: string
-  alternative: string              // the fix, one imperative sentence ≤ 200 chars written for Claude; pre-fills Steer, completes Kill
+  alternative: string              // the fix, one imperative sentence ≤ 200 chars written for Claude; pre-fills Fix…, completes Fix
   confidence: number               // 0.5..1
   proposal: Proposal | null
   estTokensPerTurn: number | null  // judge's estimate for behavioural patterns; null when a signature exists
@@ -119,7 +119,7 @@ export type State = {
   patterns: Pattern[]
   cards: string[]                  // pattern ids awaiting a decision, newest first (the pane's WASTERS list)
   expanded: string | null          // pattern id whose (i) details are open; one at a time
-  steering: string | null          // pattern id whose Steer field is open
+  steering: string | null          // pattern id whose Fix… field is open
   steerDraft: string | null        // the field's current text (kept in state so redraws never wipe it)
   notes: string[]                  // one-shot texts: drained into the next tool result or prompt
   standing: string[]               // texts re-sent with every prompt this session
@@ -165,9 +165,9 @@ export type Ui = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Input' 
 export type Site = { bodyColumns: number; maxRows: number }
 export type Actions = {
   keep(patternId: string): void
-  steer(patternId: string): void          // toggles the Steer field under the waster's verbs
+  steer(patternId: string): void          // toggles the Fix… field under the waster's verbs
   steerDraft(text: string): void          // every keystroke, so redraws keep the text
-  steerSubmit(patternId: string, text: string): void  // Enter in the field, or /saver steer <text>
+  steerSubmit(patternId: string, text: string): void  // Enter in the field, or /saver fix <text>
   kill(patternId: string): void
   info(patternId: string): void           // toggles the (i) details
   togglePane(): void
@@ -213,6 +213,16 @@ export type PaneModel = {
   decided: DecidedRow[]             // newest first
   artifacts: Artifact[]
 }
-export type BandModel = { percent: number | null; tokensToCompaction: number | null; fresh: number; savedPct: number; paneOpen: boolean; checking: boolean }   // checking: a judge run is in flight, shown even with the pane closed
+/** The band's one teaser line: which of the four states the session is in, and the figures that state names. */
+export type BandModel = {
+  state: 'checking' | 'found' | 'saved' | 'watching'   // the first that applies: a judge run in flight, cards waiting, a saving credited, else watching
+  fresh: number            // cards awaiting a decision
+  costPct: number          // what those cards have already cost, as a share of the window
+  costMs: number           // and in wall time
+  savedPct: number
+  savedMs: number
+  calls: number            // ledger rows watched this session
+  paneOpen: boolean
+}
 export type BandProps = { ui: Ui; model: BandModel; site: Site; actions: Actions }
 export type PaneProps = { ui: Ui; model: PaneModel; site: Site; placement: 'dock' | 'inline'; actions: Actions }

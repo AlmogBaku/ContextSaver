@@ -42,7 +42,7 @@ const CALL_SEP = ' · '        // between a cited call's wall time and its size
 const CALL_UNIT = ' ch'       // the unit the widest rung of the cost ladder spells out
 const QUOTE_MAX = 60          // characters of a result quoted under the call that produced it
 const FIX_CELLS = 2           // the fix row's '→' and the space after it
-const FIELD_CELLS = 2         // the Steer row's '›' and the space after it
+const FIELD_CELLS = 2         // the Fix… row's '›' and the space after it
 const CARD_PAD = 2            // paddingX inside a card's border
 const CARD_CHROME = 6         // what a card's border and padding cost a row: 2 + 2 × 2
 const HEAD_INDENT = 1 + CARD_PAD   // cells the un-framed sections add to paddingX to start at the cards' content column
@@ -63,6 +63,7 @@ const STATUS_GAP = 4          // cells between what the session saved and what t
 const TAG_MIN_CELLS = 52      // the card's cells at 60 body columns: under that the category tag is dropped
 const TITLE_MIN = 8           // cells a card's title keeps whatever else the row reserves
 const BAND_RESERVE = 4        // cells the engine's own collapse control '[-]' takes at the band's right edge
+const BAND_LEAD = PANE_TITLE.length + 4   // the name, the space before the mark, the mark itself and the two cells after it
 const TITLE_ROWS = 2
 const VALUE_ROWS = 2          // rows the fix keeps under the verbs
 const HINT_ROWS = 2           // rows the judge's one-line explanation keeps under a Time or Context row
@@ -79,10 +80,19 @@ const COMPACT_ROWS = 1        // rows a value or a cited call gets inside the in
 const DETAIL_ROWS = 3         // 'why', 'fix' and the summary row before the cited calls
 const STAT_ROWS = 2           // the stats line and the fix line of a folded card
 const GLYPHS = {
-  live: '●', kept: '✓', steered: '↪', stopped: '■', fix: '→', field: '›', quote: '↳',
-  check: '↻', write: '✎', tryOnce: '▸', skip: '–',
+  live: '●', fixed: '✓', noted: '✎', ignored: '–', fix: '→', field: '›', quote: '↳',
+  check: '↻', write: '✎', tryOnce: '▸', skip: '–', checking: '◐', watching: '◌',
 } as const
-const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.kept, steer: GLYPHS.steered, kill: GLYPHS.stopped }
+const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.ignored, steer: GLYPHS.noted, kill: GLYPHS.fixed }
+// What a decision is called once it is taken: the same three words the verbs, the toasts and the replies use.
+const DECIDED_WORD: Record<Choice, string> = { keep: 'ignored', steer: 'fixed with a note', kill: 'fixed' }
+// The band's mark, one per state: a run in flight, cards waiting, a saving to show off, or a quiet watch.
+const BAND_MARK: Record<BandModel['state'], { text: string; color?: string; isDim?: true }> = {
+  checking: { text: GLYPHS.checking, isDim: true },
+  found: { text: GLYPHS.live, color: TONES.accent },
+  saved: { text: GLYPHS.fixed, color: TONES.good },
+  watching: { text: GLYPHS.watching, isDim: true },
+}
 const ARTIFACT_LABEL: Record<ArtifactKind, string> = {
   'claude-md': 'CLAUDE.md',
   skill: 'skill',
@@ -100,20 +110,30 @@ const JUDGE_LABEL = 'Judge '
 const TOKENS_UNIT = ' tokens'
 const DECIDED_LABEL = 'Decided'
 const RULES_LABEL = 'Rules for next session'
-const STEER_HINT = 'Enter sends · Steer again closes · longer: /saver steer <n> <text>'
+const STEER_HINT = 'Enter sends · Fix… again closes · longer: /saver fix <n> <text>'
 const EMPTY_TEXT = 'Watching quietly. Nothing repeating yet.'
 const AWAITING_TEXT = 'awaiting the first turn'
 const CHECK_LABEL = `${GLYPHS.check} Check now`
 const CHECKING_LABEL = 'Checking…'
 const CHECKING_TEXT = 'checking this session… usually 10–20 s'
-const BAND_CHECKING = 'checking…'
+const BAND_CHECKING = 'checking this session…'
+const BAND_WATCHING = 'watching'              // before the first row there is nothing to count
+const BAND_QUIET = 'nothing wasteful yet'
+const BAND_WATCHED = 'calls watched'
+const BAND_SAVED = 'saved '
+const BAND_CONTEXT = ' of context'
+const BAND_SESSION = ' this session'
+const BAND_GAP = '  '                         // cells between the mark and the teaser line
 const HOUR_MS = 3_600_000
 const MINUTE_MS = 60_000
 const FULL_PANE_HINT = '/saver for the full pane'
-const VERBS_HINT = '/saver keep|steer|kill <n>'   // the keyboard route to the verbs, for a pane the Tab ring never reaches
+const VERBS_HINT = '/saver fix|ignore <n>'   // the keyboard route to the verbs, for a pane the Tab ring never reaches
 
 // The cells one card's cited calls are laid out against: three columns, the cost's own rung of the ladder.
 type CallColumns = { turn: number; what: number; alias: number; time: number; unit: boolean; cost: boolean }
+
+// One run of the band's teaser: the words and the tone they carry. A segment with neither is plain text.
+type BandSegment = { text: string; color?: string; isDim?: true }
 
 /** Wraps text into at most `rows` lines of `cells` characters, the last cut with '…'. */
 const linesOf = (text: string, cells: number, rows: number): string[] => {
@@ -409,15 +429,16 @@ const titleRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderEl
   )
 }
 
-/** The action row: Keep, Steer and Stop, three cells apart, each behind its own glyph. */
+/** The action row: Fix, Fix… and Ignore, three cells apart, each behind its own glyph. */
 const verbsRow = (ui: Ui, card: Card, actions: Actions): RenderElement => {
   const { Box, Button } = ui
   const id = card.patternId
+  // The labels are the person's words; the keys stay the decisions' own, so a press is still a kill or a keep.
   return (
     <Box flexDirection="row" gap={VERB_GAP}>
-      <Button key={`card:${id}:keep`} plain onPress={() => actions.keep(id)}>{`${GLYPHS.kept} Keep`}</Button>
-      <Button key={`card:${id}:steer`} plain onPress={() => actions.steer(id)}>{`${GLYPHS.steered} Steer`}</Button>
-      <Button key={`card:${id}:kill`} plain onPress={() => actions.kill(id)}>{`${GLYPHS.stopped} Stop`}</Button>
+      <Button key={`card:${id}:kill`} plain onPress={() => actions.kill(id)}>{`${GLYPHS.fixed} Fix`}</Button>
+      <Button key={`card:${id}:steer`} plain onPress={() => actions.steer(id)}>{`${GLYPHS.noted} Fix…`}</Button>
+      <Button key={`card:${id}:keep`} plain onPress={() => actions.keep(id)}>{`${GLYPHS.ignored} Ignore`}</Button>
     </Box>
   )
 }
@@ -518,7 +539,7 @@ const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): Rend
   ]
 }
 
-/** The Steer field and its hint, opened in place under the verbs. */
+/** The Fix… field and its hint, opened in place under the verbs. */
 const steerRows = (ui: Ui, card: Card, draft: string | null, actions: Actions, cells: number): RenderElement[] => {
   const { Box, Input, Text } = ui
   const id = card.patternId
@@ -665,18 +686,20 @@ const creditText = (row: DecidedRow): string => {
   return row.settled ? `saved ~${row.savedPct}%` : `~${row.savedPct}% per repeat`
 }
 
-/** One decided pattern: its glyph and behaviour, what it is worth, and the sentence the user sent. */
+/** One decided pattern: what was done about it, the behaviour, what it is worth, and the sentence the user sent. */
 const decidedRow = (ui: Ui, row: DecidedRow, cells: number): RenderElement => {
   const { Box, Text } = ui
   const right = row.ignored > 0 ? `ignored ${row.ignored}×` : creditText(row)
   const value = Math.max(8, cells - right.length - CONTROL_GAP)
+  // The glyph alone left the reader to remember what it meant, so the row says the word too.
+  const lead = `${DECIDED_GLYPH[row.choice]} ${DECIDED_WORD[row.choice]}`
   return (
     <Box flexDirection="column">
       <Box flexDirection="row" width={cells} justifyContent="space-between">
         <Box width={value}>
           <Text wrap="truncate-end">
-            <Text color={row.choice === 'keep' ? TONES.good : undefined}>{DECIDED_GLYPH[row.choice]}</Text>
-            {fit(` ${row.kind}`, value - 1)}
+            <Text color={row.choice === 'kill' ? TONES.good : undefined}>{lead}</Text>
+            {fit(` · ${row.kind}`, Math.max(1, value - lead.length))}
           </Text>
         </Box>
         {right === ''
@@ -774,40 +797,72 @@ const hintSection = (ui: Ui, cells: number): RenderElement => {
   )
 }
 
-/** The band's segments, the ones that carry nothing left out, dropped from the right while the row is short. */
-const bandSegments = (model: BandModel, room: number): { text: string; isFresh?: true; isDim?: true }[] => {
-  const all = [
-    ...(model.percent !== null && model.percent > 0 ? [{ text: `${Math.round(model.percent)}%` }] : []),
-    ...(model.tokensToCompaction !== null && model.tokensToCompaction > 0
-      ? [{ text: `${kilo(model.tokensToCompaction)} to compaction` }]
-      : []),
-    ...(model.fresh > 0 ? [{ text: `${model.fresh} new`, isFresh: true as const }] : []),
-    ...(model.savedPct > 0 ? [{ text: `saved ~${model.savedPct}%` }] : []),
-    ...(model.checking ? [{ text: BAND_CHECKING, isDim: true as const }] : []),
+/** '2 ways', '1 waster': the count and the word it takes. */
+const counted = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/**
+ * What the waiting cards are worth, longest phrasing first: the row takes the first that fits, so a narrow
+ * band gives back the time, then the sentence itself, and never a cut figure.
+ */
+const foundLines = (model: BandModel): string[] => {
+  const pct = model.costPct > 0 ? `~${model.costPct}% of your context` : null
+  // Seconds are no promise worth making, and a behavioural card carries no wall time at all.
+  const time = model.costMs >= MINUTE_MS ? duration(model.costMs) : null
+  if (pct === null && time === null) return [`Found ${counted(model.fresh, 'thing')} worth a look`]
+  const save = `Found ${counted(model.fresh, 'way')} to save`
+  return [
+    ...(pct !== null && time !== null ? [`${save} ${pct} and ${time}`] : []),
+    `${save} ${pct ?? time}`,
+    `Found ${counted(model.fresh, 'waster')}`,
   ]
-  const cells = (kept: typeof all): number =>
-    PANE_TITLE.length + kept.reduce((sum, segment, at) => sum + segment.text.length + (at === 0 ? 2 : 3), 0)
-  return Array.from({ length: all.length + 1 }, (_, back) => all.slice(0, all.length - back))
-    .find(kept => cells(kept) <= room) ?? []
 }
 
-/** The AbovePrompt band: one line of session state and the pane's own button. */
+/** What the session got back: the figures in the good tone, the words around them dim. */
+const savedLine = (model: BandModel): BandSegment[] => [
+  { text: BAND_SAVED, isDim: true },
+  ...(model.savedPct > 0
+    ? [{ text: `${model.savedPct}%`, color: TONES.good }, { text: BAND_CONTEXT, isDim: true as const }]
+    : []),
+  ...(model.savedMs > 0
+    ? [
+      ...(model.savedPct > 0 ? [{ text: ' · ', isDim: true as const }] : []),
+      { text: duration(model.savedMs), color: TONES.good },
+      { text: BAND_SESSION, isDim: true as const },
+    ]
+    : []),
+]
+
+/** The teaser for the state the session is in, longest phrasing first. */
+const bandLines = (model: BandModel): BandSegment[][] => {
+  if (model.state === 'checking') return [[{ text: BAND_CHECKING, isDim: true }]]
+  if (model.state === 'found') return foundLines(model).map(text => [{ text, color: TONES.accent }])
+  if (model.state === 'saved') return [savedLine(model)]
+  return [[{ text: model.calls === 0 ? BAND_WATCHING : joined([`${model.calls} ${BAND_WATCHED}`, BAND_QUIET]), isDim: true }]]
+}
+
+/** The cells a teaser draws. */
+const lineCells = (line: readonly BandSegment[]): number => line.reduce((sum, segment) => sum + segment.text.length, 0)
+
+/** The AbovePrompt band: the mark, one line that says where the session stands, and the pane's own button. */
 export function Band(props: BandProps): RenderElement {
   const { ui, model, site, actions } = props
   const { Box, Text, Button } = ui
   const label = model.paneOpen ? 'Close' : 'Open'
   const cells = Math.max(MIN_CELLS, site.bodyColumns - BAND_RESERVE)   // the engine draws its own '[-]' past them
   const room = cells - label.length - CONTROL_GAP
+  const mark = BAND_MARK[model.state]
+  const lines = bandLines(model)
+  // The shortest phrasing is the floor; whatever a very narrow band still cannot hold, `truncate-end` takes.
+  const line = lines.find(kept => lineCells(kept) <= room - BAND_LEAD) ?? lines[lines.length - 1] ?? []
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
       <Box width={room}>
         <Text wrap="truncate-end">
           <Text dimColor>{PANE_TITLE}</Text>
-          {bandSegments(model, room).map((segment, at) => {
-            const text = `${at === 0 ? '  ' : ' · '}${segment.text}`
-            if (segment.isFresh === true) return <Text color={TONES.accent}>{text}</Text>
-            return segment.isDim === true ? <Text dimColor>{text}</Text> : text
-          })}
+          {' '}
+          <Text dimColor={mark.isDim} color={mark.color}>{mark.text}</Text>
+          {BAND_GAP}
+          {line.map(segment => <Text dimColor={segment.isDim} color={segment.color}>{segment.text}</Text>)}
         </Text>
       </Box>
       <Button key="toggle" plain onPress={() => actions.togglePane()}>{label}</Button>

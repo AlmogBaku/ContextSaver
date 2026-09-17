@@ -9,8 +9,9 @@ import { sparkline } from '../hooks/core/trend'
 import type { Actions, PaneModel, Site, Ui } from '../hooks/core/types'
 import { awaitingPane } from './fixtures/ui/awaiting-pane'
 import { bandChecking } from './fixtures/ui/band-checking'
-import { bandFull } from './fixtures/ui/band-full'
-import { bandQuiet } from './fixtures/ui/band-quiet'
+import { bandFound } from './fixtures/ui/band-found'
+import { bandSaved } from './fixtures/ui/band-saved'
+import { bandWatching } from './fixtures/ui/band-watching'
 import { chattyPane } from './fixtures/ui/chatty-pane'
 import { checkingPane } from './fixtures/ui/checking-pane'
 import { decidedPane } from './fixtures/ui/decided-pane'
@@ -221,20 +222,16 @@ const recorder = (): { calls: Call[]; actions: Actions } => {
 }
 
 describe('ui', () => {
-  test('the band draws every segment that carries something and toggles the pane', async ($, on) => {
+  test('the band teases what is waiting and toggles the pane', async ($, on) => {
     const clock = mock.clock(on)
     const { calls, actions } = recorder()
     on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
-      Band({ ui: $.ui.resolve(e), model: bandFull, site: BAND_SITE, actions }))
+      Band({ ui: $.ui.resolve(e), model: bandFound, site: BAND_SITE, actions }))
 
     const tree = await $.ui.render(BAND_HOST)
 
-    expect(holds(tree, 'ContextSaver')).toEqual(true)
-    expect(holds(tree, '29%')).toEqual(true)
-    expect(holds(tree, '133k to compaction')).toEqual(true)
-    expect(holds(tree, '2 new')).toEqual(true)
-    expect(holds(tree, 'saved ~3%')).toEqual(true)
-    expect(keysOf(tree)).toEqual(['toggle'])
+    expect(holds(tree, 'ContextSaver ●  Found 2 ways to save ~12% of your context and 51m')).toEqual(true)
+    expect(keysOf(tree), 'no hotkey: a bare digit typed into an empty composer would fire it').toEqual(['toggle'])
     expect(drawnRows(tree)).toContain('Open')
     expect(cellsOf(tree)).toEqual(BAND_SITE.bodyColumns - BAND_RESERVE)   // the engine's '[-]' draws past them
     expect(overrun(tree)).toEqual([])
@@ -244,15 +241,26 @@ describe('ui', () => {
     expect(calls).toEqual([{ name: 'togglePane', arg: undefined }])
   })
 
-  test('the band omits the segments that are zero or unknown', async ($, on) => {
+  test('the band gives back the time first, then the sentence, and never a cut figure', async ($, on) => {
     const { actions } = recorder()
-    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
-      Band({ ui: $.ui.resolve(e), model: bandQuiet, site: BAND_SITE, actions }))
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      return Band({ ui: resolved, model: bandFound, site: BAND_SITE, actions })
+    })
 
-    const tree = await $.ui.render(BAND_HOST)
+    await $.ui.render(BAND_HOST)
 
-    expect(drawnRows(tree)).toEqual(['ContextSaver', 'Close'])
-    expect(holds(tree, '·')).toEqual(false)
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the band drew no elements')
+    const at = (columns: number, model = bandFound): unknown =>
+      Band({ ui, model, site: { bodyColumns: columns, maxRows: 8 }, actions })
+
+    expect(holds(at(70), 'Found 2 ways to save ~12% of your context'), 'the figure it can hold, stays').toEqual(true)
+    expect(holds(at(70), '51m'), 'the time is the first thing the row gives back').toEqual(false)
+    expect(holds(at(40), 'Found 2 wasters'), 'then the sentence itself shortens').toEqual(true)
+    expect(holds(at(160, { ...bandFound, fresh: 1, costPct: 0, costMs: 0 }), 'Found 1 thing worth a look'),
+      'a behavioural card costs nothing the ledger measured, so the line promises nothing').toEqual(true)
   })
 
   test('the band says a judge run is in flight, with the pane closed', async ($, on) => {
@@ -262,9 +270,33 @@ describe('ui', () => {
 
     const tree = await $.ui.render(BAND_HOST)
 
-    expect(holds(tree, 'saved ~3% · checking…')).toEqual(true)
+    expect(holds(tree, 'ContextSaver ◐  checking this session…')).toEqual(true)
+    expect(drawnRows(tree)).toContain('Open')
     expect(cellsOf(tree)).toEqual(BAND_SITE.bodyColumns - BAND_RESERVE)
     expect(overrun(tree)).toEqual([])
+  })
+
+  test('the band shows off what the session got back, and counts the calls when there is nothing to say', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      return Band({ ui: resolved, model: bandSaved, site: BAND_SITE, actions })
+    })
+
+    const saved = await $.ui.render(BAND_HOST)
+
+    expect(holds(saved, 'ContextSaver ✓  saved 24% of context · 45m this session')).toEqual(true)
+    expect(drawnRows(saved), 'the pane is open, so the button closes it').toContain('Close')
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the band drew no elements')
+    const watching = Band({ ui, model: bandWatching, site: BAND_SITE, actions })
+    const cold = Band({ ui, model: { ...bandWatching, calls: 0 }, site: BAND_SITE, actions })
+
+    expect(holds(watching, 'ContextSaver ◌  312 calls watched · nothing wasteful yet')).toEqual(true)
+    expect(holds(cold, 'ContextSaver ◌  watching'), 'before the first row there is nothing to count').toEqual(true)
+    expect(holds(cold, 'calls watched')).toEqual(false)
   })
 
   test('the empty pane is one quiet frame, and Check now stays in the header', async ($, on) => {
@@ -307,14 +339,14 @@ describe('ui', () => {
     expect(drawnRows(tree)).toContain('reading')
     expect(drawnRows(tree), 'the fix is drawn behind its own glyph').toContain('→')
     expect(drawnRows(tree).some(row => row.startsWith(FIX.slice(0, 28))), 'the fix has a row of its own').toEqual(true)
-    expect(drawnRows(tree), 'each verb wears its own glyph, and Kill reads Stop').toContain('✓ Keep')
-    expect(drawnRows(tree)).toContain('↪ Steer')
-    expect(drawnRows(tree)).toContain('■ Stop')
-    expect(holds(tree, 'Kill')).toEqual(false)
+    expect(drawnRows(tree), 'the fix leads the verbs, each behind its own glyph').toContain('✓ Fix')
+    expect(drawnRows(tree)).toContain('✎ Fix…')
+    expect(drawnRows(tree)).toContain('– Ignore')
+    expect(['Keep', 'Steer', 'Kill', 'Stop'].some(word => holds(tree, word)), 'the old verbs are gone').toEqual(false)
     expect(keysOf(tree)).toEqual([
       'check',
-      `card:${FIRST}:info`, `card:${FIRST}:keep`, `card:${FIRST}:steer`, `card:${FIRST}:kill`,
-      'card:reading:api-logs:info', 'card:reading:api-logs:keep', 'card:reading:api-logs:steer', 'card:reading:api-logs:kill',
+      `card:${FIRST}:info`, `card:${FIRST}:kill`, `card:${FIRST}:steer`, `card:${FIRST}:keep`,
+      'card:reading:api-logs:info', 'card:reading:api-logs:kill', 'card:reading:api-logs:steer', 'card:reading:api-logs:keep',
     ])
 
     await $.ui.press({ plugin: DRAWER, key: `card:${FIRST}:kill` })
@@ -530,7 +562,7 @@ describe('ui', () => {
 
     expect(texts).toContain('why')
     expect(texts).toContain('fix')
-    expect(texts, 'what Kill sends is the fix already on screen, so it has no row of its own').not.toContain('kill →')
+    expect(texts, 'what Fix sends is the fix already on screen, so it has no row of its own').not.toContain('kill →')
     expect(texts, 'one dim row says what the cited calls add up to').toContain('3 calls · 3m 12s · 72k chars of context')
     expect(holds(tree, 'turn 8   bun test'), 'a cited call names its turn and what ran, nothing else').toEqual(true)
     const cited = citedCalls(tree)
@@ -569,7 +601,7 @@ describe('ui', () => {
     expect(holds(tree, '↳ "To recap the plan')).toEqual(true)
   })
 
-  test('Steer opens a field holding the fix, and the draft is drawn back', async ($, on) => {
+  test('Fix… opens a field holding the fix, and the draft is drawn back', async ($, on) => {
     const clock = mock.clock(on)
     const { calls, actions } = recorder()
     on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
@@ -586,7 +618,8 @@ describe('ui', () => {
     expect(keysOf(open)).toContain(`card:${FIRST}:text`)
     expect(inputValueOf(open, `card:${FIRST}:text`)).toEqual(FIX)
     expect(holds(open, 'Enter sends')).toEqual(true)
-    expect(holds(open, 'longer: /saver steer <n> <text>')).toEqual(true)
+    expect(holds(open, 'Fix… again closes')).toEqual(true)
+    expect(holds(open, 'longer: /saver fix <n> <text>')).toEqual(true)
     expect(keysOf(open)).toContain(`card:${FIRST}:keep`)
 
     const drafted = await $.ui.render(DRAFT_HOST)
@@ -598,7 +631,7 @@ describe('ui', () => {
     expect(calls).toEqual([{ name: 'steer', arg: FIRST }])
   })
 
-  test('the Steer field hands every keystroke and the sent text to the actions', async ($, on) => {
+  test('the Fix… field hands every keystroke and the sent text to the actions', async ($, on) => {
     const { calls, actions } = recorder()
     let resolved: Ui | null = null
     on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
@@ -639,7 +672,7 @@ describe('ui', () => {
     expect(holds(tree, '41k tokens to compaction')).toEqual(true)
     expect(holds(tree, 'Judge 2 runs'), 'the mark pays for four rows, so the figures ride along').toEqual(true)
     expect(drawnRows(tree), 'where the budget went is the docked pane\'s, not the seat\'s').not.toContain('Time')
-    expect(keysOf(tree)).toEqual(['check', `card:${FIRST}:info`, `card:${FIRST}:keep`, `card:${FIRST}:steer`, `card:${FIRST}:kill`])
+    expect(keysOf(tree)).toEqual(['check', `card:${FIRST}:info`, `card:${FIRST}:kill`, `card:${FIRST}:steer`, `card:${FIRST}:keep`])
     expect(framesOf(tree), 'the compact card keeps its frame').toHaveLength(1)
     expect(holds(tree, '● Claude keeps reading 2000 lines of api logs')).toEqual(true)
     expect(holds(tree, 'api logs instead of grepping for the error · 2×')).toEqual(true)
@@ -670,12 +703,16 @@ describe('ui', () => {
         const site = { bodyColumns: columns, maxRows: 30 }
         const dock = Pane({ ui, model, site, placement: 'dock', actions })
         const inline = Pane({ ui, model, site, placement: 'inline', actions })
-        const band = Band({ ui, model: bandFull, site, actions })
         expect(cellsOf(dock), `dock ${columns}`).toBeLessThanOrEqual(columns)
         expect(cellsOf(inline), `inline ${columns}`).toBeLessThanOrEqual(columns)
-        expect(cellsOf(band), `band ${columns}`).toBeLessThanOrEqual(columns - BAND_RESERVE)
         expect(overrun(dock), `dock ${columns} controls`).toEqual([])
         expect(overrun(inline), `inline ${columns} controls`).toEqual([])
+      }
+    }
+    for (const model of [bandFound, bandSaved, bandChecking, bandWatching]) {
+      for (const columns of [40, 56, 60, 70, 80, 100, 120, 160]) {
+        const band = Band({ ui, model, site: { bodyColumns: columns, maxRows: 8 }, actions })
+        expect(cellsOf(band), `band ${columns}`).toBeLessThanOrEqual(columns - BAND_RESERVE)
         expect(overrun(band), `band ${columns} controls`).toEqual([])
       }
     }
@@ -710,7 +747,7 @@ describe('ui', () => {
 
     const ui: Ui | null = resolved
     if (ui === null) throw new Error('the pane drew no elements')
-    // The worst case the seat ever holds: the details open behind i and the Steer field open under them.
+    // The worst case the seat ever holds: the details open behind i and the Fix… field open under them.
     const busiest: PaneModel = { ...expandedPane, steering: expandedPane.expanded }
     const models: PaneModel[] = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, busiest, decidedPane, manyWasters]
     for (const model of models) {
@@ -724,12 +761,12 @@ describe('ui', () => {
       if (model === emptyPane) continue
       // However little the surface grants, the three verbs are drawn: detail is what the budget drops.
       const cramped = Pane({ ui, model, site: { bodyColumns: 100, maxRows: 10 }, placement: 'inline', actions })
-      expect(drawnRows(cramped), 'Keep survives a cramped seat').toContain('✓ Keep')
-      expect(drawnRows(cramped), 'Steer survives a cramped seat').toContain('↪ Steer')
-      expect(drawnRows(cramped), 'Stop survives a cramped seat').toContain('■ Stop')
+      expect(drawnRows(cramped), 'Fix survives a cramped seat').toContain('✓ Fix')
+      expect(drawnRows(cramped), 'Fix… survives a cramped seat').toContain('✎ Fix…')
+      expect(drawnRows(cramped), 'Ignore survives a cramped seat').toContain('– Ignore')
     }
     const opened = drawnRows(Pane({ ui, model: expandedPane, site: { bodyColumns: 100, maxRows: 14 }, placement: 'inline', actions }))
-    expect(opened.indexOf('✓ Keep'), 'the verbs are drawn above the details, so a clipped seat costs detail')
+    expect(opened.indexOf('✓ Fix'), 'the verbs are drawn above the details, so a clipped seat costs detail')
       .toBeLessThan(opened.indexOf('why'))
   })
 
@@ -744,9 +781,9 @@ describe('ui', () => {
 
     expect(texts).toContain('Decided')
     expect(texts).toContain('Rules for next session')
-    expect(holds(tree, '↪ re-reading src/auth.ts')).toEqual(true)
+    expect(holds(tree, '✎ fixed with a note · re-reading src/auth.ts'), 'a decided row says the word, not only the glyph').toEqual(true)
     expect(texts).toContain('saved ~1%')
-    expect(holds(tree, '■ re-summarising the plan every turn'), 'a killed pattern reads as stopped').toEqual(true)
+    expect(holds(tree, '✓ fixed · re-summarising the plan every turn'), 'a sent fix reads as fixed').toEqual(true)
     expect(holds(tree, '✕')).toEqual(false)
     expect(texts).toContain('ignored 1×')
     expect(holds(tree, 'Re-read only after edits · CLAUDE.md')).toEqual(true)
@@ -783,7 +820,7 @@ describe('ui', () => {
     if (ui === null) throw new Error('the pane drew no elements')
     const band = Band({
       ui,
-      model: bandFull,
+      model: bandFound,
       site: { bodyColumns: BAND_PROPS.bodyColumns, maxRows: BAND_PROPS.maxRows },
       actions,
     })
@@ -796,11 +833,11 @@ describe('ui', () => {
     })
 
     expect(holds(band, 'ContextSaver')).toEqual(true)
-    expect(holds(band, '133k to compaction')).toEqual(true)
+    expect(holds(band, 'Found 2 ways to save')).toEqual(true)
     expect(cellsOf(band)).toBeLessThanOrEqual(BAND_PROPS.bodyColumns)
     expect(holds(pane, 'ContextSaver')).toEqual(true)
     expect(holds(pane, 'Claude keeps running the whole')).toEqual(true)
-    expect(drawnRows(pane)).toContain('✓ Keep')
+    expect(drawnRows(pane)).toContain('✓ Fix')
     expect(cellsOf(pane)).toBeLessThanOrEqual(PANE_PROPS.bodyColumns)
   })
 })

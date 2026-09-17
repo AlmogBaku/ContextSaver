@@ -23,11 +23,11 @@ circles?** The answers land in a pane next to your transcript, with three button
      tmux capture-pane -e -p -t <session> | python3 scripts/screenshot.py docs/screenshot.png --cols 160 -->
 <p align="center">
   <img src="docs/screenshot.png" width="880"
-       alt="The ContextSaver pane docked beside the transcript: two live wasters, each with its cost and Keep, Steer and Stop">
+       alt="The ContextSaver pane docked beside the transcript: two live wasters, each with its cost and Fix, Fix… and Ignore">
 </p>
 
-**Keep** shuts it up. **Steer** sends the line you write. **Stop** sends the fix. Nothing gets blocked,
-nothing waits on you, and nothing reaches Claude unless you click it.
+**Fix** sends the fix. **Fix…** opens it as a line you can rewrite first. **Ignore** shuts it up. Nothing
+gets blocked, nothing waits on you, and nothing reaches Claude unless you click it.
 
 ## Install
 
@@ -46,8 +46,9 @@ Then, inside Claude Code:
 ```
 
 That's it. No config, no API key, no dependencies, no build step. One line shows up above your prompt
-after the first turn, and in a wide terminal the pane opens itself the first time the model catches
-something. `/saver` opens it at any width.
+after the first turn — `ContextSaver ●  Found 2 ways to save ~12% of your context and 51m`, or the calls
+it is quietly watching until then — and in a wide terminal the pane opens itself the first time the model
+catches something. `/saver` opens it at any width.
 
 > [!NOTE]
 > Needs Claude Code 2.1.273 or newer (verified on 2.1.274). Install it mid-session if you want: the
@@ -106,11 +107,11 @@ For you, it goes like this.
    you so far — how many times, how much of your context, how much of your life — and what it should be
    doing instead. Press `i` for the receipts: the reasoning in full, then every call behind the claim —
    the turn, the command or file, the loop it ran in, its seconds and its size, and the first line of
-   what came back. Each card is numbered, so `/saver keep 2` decides the one you are looking at.
-6. **You press one of three buttons.** *Keep* if you don't care, and it never mentions it again. *Steer*
-   to type what Claude should do instead, the field pre-filled with the suggestion. *Kill* to send that
-   suggestion as it stands. The pane's last line names the same three verbs for the keyboard —
-   `/saver keep|steer|kill <n>` — because the composer keeps the Tab ring.
+   what came back. Each card is numbered, so `/saver ignore 2` decides the one you are looking at.
+6. **You press one of three buttons.** *Fix* sends the suggestion as it stands. *Fix…* opens it as a line
+   you can rewrite first — the field comes pre-filled. *Ignore* if you don't care, and it never mentions
+   it again. The pane's last line names the same verbs for the keyboard — `/saver fix|ignore <n>` —
+   because the composer keeps the Tab ring.
 7. **Claude changes course in the turn that's already running.** Your words reach it on its very next
    tool result, and ride along with every prompt after that, so it doesn't quietly drift back after a
    compaction. Nothing is blocked, nothing is denied, nothing waits on you.
@@ -134,9 +135,9 @@ guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](do
 |---|---|
 | `/saver` | Shows or hides the pane. |
 | `/saver check` | Runs the judge now instead of waiting for the cadence, and tells you what it found — `2 new wasters`, `nothing new`, or why it failed — and if it found something the pane opens at any width. |
-| `/saver steer [n] <text>` | Sends an instruction for card `n` — a leading number is always read as the card the pane draws, and without one it is the waster whose Steer field is open, else card 1. The multi-line way to steer, from the composer. |
-| `/saver keep <n>` | Keeps card `n`: nothing is sent, and it stays quiet for the session. |
-| `/saver kill <n>` | Kills card `n`: sends the fix as a stop instruction. |
+| `/saver fix <n>` | Fixes card `n`: sends the fix the card offers, as it stands. |
+| `/saver fix [n] <text>` | Fixes card `n` with your own note instead — a leading number is always read as the card the pane draws, and without one it is the waster whose `Fix…` field is open, else card 1. The multi-line way to write one, from the composer. |
+| `/saver ignore <n>` | Ignores card `n`: nothing is sent, and it stays quiet for the session. |
 | `/saver debug` | Dumps the whole session state: rows, patterns, decisions, the judge's runs and cost, usage, savings. |
 | `/saver reset` | Clears this session's ledger and decisions; the pattern registry survives. |
 
@@ -162,7 +163,7 @@ guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](do
 
 ```sh
 git clone https://github.com/AlmogBaku/ContextSaver && cd ContextSaver
-./scripts/check.sh                                          # validate --strict, typecheck, 187 tests
+./scripts/check.sh                                          # validate --strict, typecheck, 201 tests
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .    # run with the plugin loaded from this folder
 ```
 
@@ -170,18 +171,22 @@ All logic is pure functions over one `State` in `hooks/core/`. `hooks/register.t
 that touches events and `$`, and every hook returns `next(e)` on any path it does not own.
 `hooks/ui.tsx` is pure over two view models (`BandModel`, `PaneModel`) and never reads `State`.
 
-Pressing `Steer` asks the surface for the keyboard: `autoFocus` only lands where a site takes the
-keyboard fresh, and the click that pressed `Steer` left the ring on that Button, so the shell calls
+Pressing `Fix…` asks the surface for the keyboard: `autoFocus` only lands where a site takes the
+keyboard fresh, and the click that pressed `Fix…` left the ring on that Button, so the shell calls
 `$.ui.focus({ requestId, key })` for the field it just opened. The ring is the person's to give — a
 surface that will not move it changes nothing, and the field is still there to be clicked.
 
 Every row is assembled and measured before it is drawn: a Button at a row's right edge gets its cells
 reserved first, and a header row that does not fit drops whole segments rather than cutting a number.
-The band is drawn `BAND_RESERVE` cells short of `site.bodyColumns` because the engine draws its own
-collapse control `[-]` over the last cells of that row.
+The band is one teaser, never a dashboard: a mark and one sentence, whichever of the four applies first —
+a check in flight, what the waiting cards would save, what the session has already saved, else the calls
+it is watching. Below 70 columns that sentence gives back the time before it gives back a word, because a
+cut figure lies. It is drawn `BAND_RESERVE` cells short of `site.bodyColumns` because the engine draws
+its own collapse control `[-]` over the last cells of that row, and it carries no hotkey: a bare digit
+typed into an empty composer would fire it.
 
 With `CONTEXTSAVER_DEBUG` set, `/saver demo` fills the pane with three sample wasters from
-`hooks/core/demo.ts` — two awaiting a decision, one already steered so the decisions and the rules draw
+`hooks/core/demo.ts` — two awaiting a decision, one already fixed with a note so the decisions and the rules draw
 too — against a sample usage and four sample turns carrying the context the window held after each, so the
 header's gauge, its trend and its run to compaction draw as well, and opens it, so the design can be looked at without waiting for a real finding. One sample call
 ran inside a subagent, which is where the pane's `a1` loop column comes from. Nothing is sent to Claude
@@ -192,13 +197,14 @@ ledger the judge reads. The rows keep the real agent id, so matching stays stabl
 `toolu`-style hashes to see which loop ran a call.
 
 The pane's accent is the theme key `suggestion` (rgb(87,105,247), ansi blue), on the newest card's
-border, a live waster's `●` and the band's `n new`. Three keys past it carry a fact rather than a
+border, a live waster's `●` and the band's mark and line while a card waits. Three keys past it carry a fact rather than a
 decoration: `success` on what the session got back (the header's `Saved` figure, a `✓` in Decided, a
 credit that settled), and `warning` above 70% of the window with `error` above 90% on the gauge's fill —
 the one place in the pane where a number is a warning. All four live behind one `TONES` table in
 `hooks/ui.tsx`, so a key a theme refuses is flipped to the accent in one edit. Everything else is
 default text or dim. `Button` has no `color` prop, so the verbs take their tone from the surface and
-carry a glyph instead: `✓ Keep`, `↪ Steer`, `■ Stop`, `↻ Check now`, `✎ Write`, `▸ Try`, `– Skip`.
+carry a glyph instead: `✓ Fix`, `✎ Fix…`, `– Ignore`, `↻ Check now`, `✎ Write`, `▸ Try`, `– Skip`; the
+band's own four marks are `◐` checking, `●` found, `✓` saved and `◌` watching.
 
 The mark in the header is a `Raster`, the terminal's cell-grid leaf: an 8×8 two-tone bitmap of
 `assets/logo.png`, derived once offline and stored in `hooks/core/logo.ts` as eight lines of `.` `d` `l`,

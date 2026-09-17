@@ -52,7 +52,7 @@ const artifactsOf = (state: State, p: Pattern): Artifact[] => {
   }]
 }
 
-// Two decisions where D2 wins over 5.4's wording: a Keep is final for the session, so it proposes nothing even
+// Two decisions where D2 wins over 5.4's wording: an Ignore is final for the session, so it proposes nothing even
 // when the judge attached a proposal; and a kill's permanent line is the scoped alternative, never its kill prompt.
 const proposalOf = (p: Pattern): Proposal | null => {
   if (p.decision === null || p.decision === 'keep') return null

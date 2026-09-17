@@ -566,12 +566,16 @@ describe('patterns', () => {
     expect(suggested.decided[0], 'a steer that sent the fix as it stood is no second sentence to show')
       .toMatchObject({ instruction: null })
     expect(model.artifacts).toEqual([claudeMdArtifact])
-    expect(bandModel(state)).toEqual({ percent: 64, tokensToCompaction: 52_000, fresh: 1, savedPct: 4.5, paneOpen: false, checking: true })
+    // A run in flight wins over a card waiting, a card waiting over a saving to show off (§5.5).
+    expect(bandModel(state)).toEqual({ state: 'checking', fresh: 1, costPct: 1.1, costMs: 60_000, savedPct: 4.5, savedMs: 192_000, calls: 2, paneOpen: false })
+    const quietJudge = { ...state, judge: { ...state.judge, running: false } }
+    expect(bandModel(quietJudge), 'the waiting card and what it has already cost').toMatchObject({ state: 'found', costPct: 1.1, costMs: 60_000 })
+    expect(bandModel({ ...quietJudge, cards: [] }), 'nothing waiting, so the saving is the news').toMatchObject({ state: 'saved', costPct: 0, costMs: 0 })
     const empty = paneModel(seedState(), [])
     expect(empty.wasters).toEqual([])
     expect(empty.decided).toEqual([])
     expect(empty.header).toMatchObject({ percent: null, tokensToCompaction: null, turnsToCompaction: null, savedPct: 0 })
-    expect(bandModel(seedState())).toEqual({ percent: null, tokensToCompaction: null, fresh: 0, savedPct: 0, paneOpen: false, checking: false })
+    expect(bandModel(seedState())).toEqual({ state: 'watching', fresh: 0, costPct: 0, costMs: 0, savedPct: 0, savedMs: 0, calls: 0, paneOpen: false })
   })
 
   test('tokensToCompaction and turnsToCompaction fall back and go null', async () => {
