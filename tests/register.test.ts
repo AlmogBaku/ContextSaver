@@ -696,12 +696,12 @@ describe('register', () => {
     expect((await $.command.run(saverRun('check'))).text, 'the second ask is answered, not obeyed').toBe('ContextSaver: already checking')
     await $.ui.render(paneRender())
     await $.ui.press({ plugin: 'contextsaver', key: 'check' })
-    expect(world.toasts, 'Check now has no reply to write in, so the press is toasted').toEqual(['ContextSaver: already checking'])
+    expect(world.toasts, 'Check now dims while the run is in flight, so the press says nothing').toEqual([])
 
     release()
     await world.clock.settle()
 
-    expect(forks, 'one fork for the three asks').toBe(1)
+    expect(forks, 'one fork for the two asks and the press').toBe(1)
     expect(world.toasts.at(-1), 'a run that found nothing says that too').toBe('ContextSaver: nothing new')
     expect(world.opened, 'nothing found, nothing to show').toEqual([])
   })

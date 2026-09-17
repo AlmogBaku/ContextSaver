@@ -4,7 +4,7 @@
 
 **Stop Claude Code from wasting tokens doing useless shit, in realtime.**
 
-[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-187%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-200%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
@@ -23,10 +23,10 @@ circles?** The answers land in a pane next to your transcript, with three button
      tmux capture-pane -e -p -t <session> | python3 scripts/screenshot.py docs/screenshot.png --cols 160 -->
 <p align="center">
   <img src="docs/screenshot.png" width="880"
-       alt="The ContextSaver pane docked beside the transcript: two live wasters, each with its cost and Keep, Steer and Kill">
+       alt="The ContextSaver pane docked beside the transcript: two live wasters, each with its cost and Keep, Steer and Stop">
 </p>
 
-**Keep** shuts it up. **Steer** sends the line you write. **Kill** sends the fix. Nothing gets blocked,
+**Keep** shuts it up. **Steer** sends the line you write. **Stop** sends the fix. Nothing gets blocked,
 nothing waits on you, and nothing reaches Claude unless you click it.
 
 ## Install
