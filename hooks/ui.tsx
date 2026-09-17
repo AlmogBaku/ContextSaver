@@ -27,11 +27,15 @@ const ACCENT = 'suggestion'   // the theme's accent key (the engine's own sugges
 const GUTTER = 10             // cells of the dim label column
 const GLYPH_CELLS = 2         // the waster's '●' and the space after it
 const GAUGE_CELLS = 16
+const HALF_GAUGE_CELLS = 8    // the gauge once the row has to give something up
 const SPARK_CELLS = 10
 const VERB_GAP = 4
 const VERBS_CELLS = 21        // 'Keep' + 'Steer' + 'Kill' and the two gaps between them
 const RULES_CELLS = 18        // 'Write' + 'Try' + 'Skip' and the gaps around them
 const CHECK_CELLS = 10        // 'Check now'
+const INFO_CELLS = 1          // 'i'
+const CONTROL_GAP = 2         // cells between a row's text and the Button at its right edge
+const BAND_RESERVE = 4        // cells the engine's own collapse control '[-]' takes at the band's right edge
 const TITLE_ROWS = 2
 const VALUE_ROWS = 2
 const EVIDENCE_ROWS = 3
@@ -50,6 +54,7 @@ const TRYABLE: readonly ArtifactKind[] = ['claude-md', 'skill', 'agent-brief']
 const HITS = /^\d+×$/               // a stats segment that is a hit count, e.g. '3×'
 const STEER_HINT = 'Enter sends · Steer again closes · multi-line: /saver steer in the prompt'
 const EMPTY_TEXT = 'Nothing repeating yet.'
+const AWAITING_TEXT = 'awaiting the first turn'
 const FULL_PANE_HINT = '/saver for the full pane'
 
 /** Truncates text to `cells` characters, ending it with '…' when it is cut. */
@@ -126,29 +131,45 @@ const gaugeText = (ui: Ui, percent: number, cells: number): RenderElement => {
   )
 }
 
-/** The header's CONTEXT row: the gauge, the percentage, the sparkline and the run to compaction. */
-const contextRow = (ui: Ui, header: Header, cells: number): RenderElement => {
-  const { Text } = ui
-  const value = Math.max(8, cells - GUTTER)
-  const bar = value >= GAUGE_CELLS + SPARK_CELLS + 18 ? GAUGE_CELLS : GAUGE_CELLS / 2
-  const head = header.percent === null ? '' : `  ${Math.round(header.percent)}%`
-  const used = (header.percent === null ? 0 : bar) + head.length
+/** What the CONTEXT row draws at one rung of its ladder: the gauge's cells and the three texts after it. */
+type ContextCells = { bar: number; pct: string; spark: string; tail: string }
+
+const contextCells = (row: ContextCells): number => row.bar + row.pct.length + row.spark.length + row.tail.length
+
+/** The CONTEXT row measured whole: the sparkline goes first, then the run, then half the gauge, then the compaction figure. */
+const contextFit = (header: Header, percent: number, room: number): ContextCells => {
+  const pct = `  ${Math.round(percent)}%`
   const near = header.tokensToCompaction === null || header.tokensToCompaction <= 0
     ? ''
     : `${kilo(header.tokensToCompaction)} to compaction`
   const run = near !== '' && header.turnsToCompaction !== null ? `${near} ≈ ${header.turnsToCompaction} turns` : near
-  const spark = header.spark.length > 0 && value - used - run.length >= SPARK_CELLS + 3
-    ? `   ${sparkline(header.spark, SPARK_CELLS)}`
-    : ''
-  const room = Math.max(0, value - used - spark.length - 3)
-  const shown = run.length <= room ? run : near.length <= room ? near : fit(near, room)
-  const tail = near === '' ? '' : `   ${shown}`
+  const spark = header.spark.length > 0 ? `   ${sparkline(header.spark, SPARK_CELLS)}` : ''
+  const gap = (text: string): string => (text === '' ? '' : `   ${text}`)
+  const bare: ContextCells = { bar: HALF_GAUGE_CELLS, pct, spark: '', tail: '' }
+  const ladder: ContextCells[] = [
+    { bar: GAUGE_CELLS, pct, spark, tail: gap(run) },
+    { bar: GAUGE_CELLS, pct, spark: '', tail: gap(run) },
+    { bar: GAUGE_CELLS, pct, spark: '', tail: gap(near) },
+    { bar: HALF_GAUGE_CELLS, pct, spark: '', tail: gap(near) },
+    bare,
+  ]
+  return ladder.find(row => contextCells(row) <= room) ?? { ...bare, bar: 0 }
+}
+
+/** The header's CONTEXT row: the gauge, the percentage, the sparkline and the run to compaction. */
+const contextRow = (ui: Ui, header: Header, cells: number): RenderElement => {
+  const { Text } = ui
+  const room = Math.max(8, cells - GUTTER)
+  if (header.percent === null) {
+    return gutterRow(ui, 'CONTEXT', <Text dimColor wrap="truncate-end">{fit(AWAITING_TEXT, room)}</Text>)
+  }
+  const shown = contextFit(header, header.percent, room)
   return gutterRow(ui, 'CONTEXT', (
     <Text wrap="truncate-end">
-      {header.percent === null ? '' : gaugeText(ui, header.percent, bar)}
-      {head}
-      <Text dimColor>{spark}</Text>
-      <Text dimColor>{tail}</Text>
+      {shown.bar === 0 ? '' : gaugeText(ui, header.percent, shown.bar)}
+      {shown.pct}
+      <Text dimColor>{shown.spark}</Text>
+      <Text dimColor>{shown.tail}</Text>
     </Text>
   ))
 }
@@ -161,20 +182,25 @@ const savedBlock = (header: Header, room: number): string => {
   return blocks.find(text => text.length <= room) ?? ''
 }
 
-/** The header's JUDGE row: the judge's runs and share, the savings, and 'Check now'. */
+/** The JUDGE row's own figures: the runs and what the judge has spent, dropped whole rather than cut. */
+const judgeText = (header: Header, room: number): string => {
+  const runs = `${header.judgeRuns} run${header.judgeRuns === 1 ? '' : 's'}`
+  const tokens = header.judgeTokens > 0 ? `${kilo(header.judgeTokens)} tokens` : null
+  return [joined([runs, tokens]), runs].find(text => text.length <= room) ?? ''
+}
+
+/** The header's JUDGE row: the judge's runs and tokens, the savings, and 'Check now' at the right edge. */
 const judgeRow = (ui: Ui, header: Header, actions: Actions, cells: number, hasCheck: boolean): RenderElement => {
   const { Box, Text } = ui
-  const value = Math.max(8, cells - GUTTER - (hasCheck ? CHECK_CELLS : 0))
-  const runs = `${header.judgeRuns} run${header.judgeRuns === 1 ? '' : 's'}`
-  const judge = joined([runs, header.judgeShare > 0 ? `${header.judgeShare}%` : null])
+  const value = Math.max(8, cells - GUTTER - (hasCheck ? CHECK_CELLS + CONTROL_GAP : 0))
+  const judge = judgeText(header, value)
   const saved = savedBlock(header, Math.max(0, value - judge.length))
   return (
-    <Box flexDirection="row" justifyContent="space-between">
-      {gutterRow(ui, 'JUDGE', (
-        <Box width={value}>
-          <Text wrap="truncate-end">{judge}<Text dimColor>{saved}</Text></Text>
-        </Box>
-      ))}
+    <Box flexDirection="row" justifyContent="space-between" width={cells}>
+      <Box flexDirection="row" width={GUTTER + value}>
+        <Box width={GUTTER}><Text dimColor wrap="truncate-end">JUDGE</Text></Box>
+        <Box flexGrow={1}><Text wrap="truncate-end">{judge}<Text dimColor>{saved}</Text></Text></Box>
+      </Box>
       {hasCheck ? checkButton(ui, header, actions) : null}
     </Box>
   )
@@ -212,10 +238,11 @@ const headerSection = (
 /** A waster's title row: the accent dot, the behaviour in bold, and 'i' at the right edge. */
 const titleRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderElement => {
   const { Box, Text, Button } = ui
-  const title = Math.max(8, cells - GLYPH_CELLS - 2)   // 2: the 'i' button and the space before it
+  const value = Math.max(GLYPH_CELLS + 8, cells - INFO_CELLS - CONTROL_GAP)
+  const title = value - GLYPH_CELLS
   return (
-    <Box flexDirection="row" justifyContent="space-between">
-      <Box flexDirection="row" width={cells - 2}>
+    <Box flexDirection="row" justifyContent="space-between" width={cells}>
+      <Box flexDirection="row" width={value}>
         <Box width={GLYPH_CELLS}><Text color={ACCENT}>{GLYPHS.live}</Text></Box>
         <Box flexDirection="column">
           {linesOf(card.kind, title, TITLE_ROWS).map(line => (
@@ -351,10 +378,12 @@ const decidedRow = (ui: Ui, row: DecidedRow, isFirst: boolean, cells: number): R
 const artifactRow = (ui: Ui, artifact: Artifact, isFirst: boolean, actions: Actions, cells: number): RenderElement => {
   const { Box, Button } = ui
   const id = artifact.patternId
-  const value = Math.max(8, cells - GUTTER - RULES_CELLS)
+  const value = Math.max(8, cells - GUTTER - RULES_CELLS - CONTROL_GAP)
   return (
-    <Box flexDirection="row" justifyContent="space-between">
-      {gutterRow(ui, isFirst ? 'RULES' : '', fit(joined([artifact.title, ARTIFACT_LABEL[artifact.kind]]), value))}
+    <Box flexDirection="row" justifyContent="space-between" width={cells}>
+      <Box width={GUTTER + value}>
+        {gutterRow(ui, isFirst ? 'RULES' : '', fit(joined([artifact.title, ARTIFACT_LABEL[artifact.kind]]), value))}
+      </Box>
       <Box flexDirection="row" gap={2}>
         <Button key={`write:${id}`} plain onPress={() => actions.write(artifact)}>Write</Button>
         {TRYABLE.includes(artifact.kind)
@@ -408,10 +437,10 @@ export function Band(props: BandProps): RenderElement {
   const { ui, model, site, actions } = props
   const { Box, Text, Button } = ui
   const label = model.paneOpen ? 'Close' : 'Open'
-  const cells = Math.max(MIN_CELLS, site.bodyColumns)
+  const cells = Math.max(MIN_CELLS, site.bodyColumns - BAND_RESERVE)   // the engine draws its own '[-]' past them
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
-      <Box width={cells - label.length - 1}>
+      <Box width={cells - label.length - CONTROL_GAP}>
         <Text wrap="truncate-end">
           <Text dimColor>{PANE_TITLE}</Text>
           {bandSegments(model).map((segment, at) =>

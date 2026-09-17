@@ -1,0 +1,15 @@
+import type { PaneModel } from '../../../hooks/core/types'
+import { twoWasters } from './two-wasters'
+
+/** The pane before the first turn has been measured: no percentage yet, one judge run behind it. */
+export const awaitingPane: PaneModel = {
+  ...twoWasters,
+  header: {
+    ...twoWasters.header,
+    percent: null,
+    spark: [],
+    tokensToCompaction: null,
+    turnsToCompaction: null,
+    judgeRuns: 1,
+  },
+}

@@ -279,13 +279,17 @@ export const cardOf = (p: Pattern, state: State): Card => ({
   evidence: evidenceOf(p, state),
 })
 
+const judgeShare = (state: State): number =>
+  Math.round((state.judge.spent / Math.max(1, totalTokens(state))) * 1000) / 10
+
 const headerOf = (state: State): Header => ({
   percent: state.usage.percent ?? null,
   spark: state.usageSamples.map(s => s.percent),
   tokensToCompaction: tokensToCompaction(state),
   turnsToCompaction: turnsToCompaction(state),
   judgeRuns: state.judge.runs,
-  judgeShare: Math.round((state.judge.spent / Math.max(1, totalTokens(state))) * 1000) / 10,
+  judgeTokens: state.judge.spent,
+  judgeShare: judgeShare(state),
   judgeRunning: state.judge.running,
   savedPct: pctOf(state.saved.chars, state.usage.window),
   savedMs: state.saved.ms,
@@ -454,7 +458,7 @@ export const debugDump = (state: State): string => {
     ...patternLines(state),
     `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
     `notes ${state.notes.length} · standing ${state.standing.length} · written ${state.written.length}${state.written.length === 0 ? '' : `: ${state.written.join(', ')}`}`,
-    `judge runs ${j.runs} · spent ${j.spent} · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
+    `judge runs ${j.runs} · spent ${j.spent} tokens (${judgeShare(state)}% of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,
     `compactions ${state.compactions.length === 0 ? 'none' : state.compactions.join(', ')}`,

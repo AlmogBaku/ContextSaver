@@ -5,6 +5,7 @@ import type { RenderPropsOf } from 'claude-code'
 import { Band, Pane } from '../hooks/ui'
 import { gauge, sparkline } from '../hooks/core/text'
 import type { Actions, Site, Ui } from '../hooks/core/types'
+import { awaitingPane } from './fixtures/ui/awaiting-pane'
 import { bandFull } from './fixtures/ui/band-full'
 import { bandQuiet } from './fixtures/ui/band-quiet'
 import { checkingPane } from './fixtures/ui/checking-pane'
@@ -12,6 +13,7 @@ import { decidedPane } from './fixtures/ui/decided-pane'
 import { draftPane } from './fixtures/ui/draft-pane'
 import { emptyPane } from './fixtures/ui/empty-pane'
 import { expandedPane } from './fixtures/ui/expanded-pane'
+import { millionPane } from './fixtures/ui/million-pane'
 import { overrunPane } from './fixtures/ui/overrun-pane'
 import { steeringPane } from './fixtures/ui/steering-pane'
 import { twoWasters } from './fixtures/ui/two-wasters'
@@ -21,6 +23,7 @@ const BAND_SITE: Site = { bodyColumns: 100, maxRows: 8 }
 const PANE_SITE: Site = { bodyColumns: 60, maxRows: 30 }
 const WIDE_SITE: Site = { bodyColumns: 100, maxRows: 30 }
 const FIRST = 'execution:full-suite'
+const BAND_RESERVE = 4                // cells ui.tsx leaves the engine's own collapse control '[-]'
 const FIX = 'run only the tests covering the files you changed; run the full suite once when the phase is done'
 
 // The trees are hosted on `CommandOutput`, the one render component the plugin never hooks: the
@@ -102,6 +105,32 @@ const cellsOf = (value: unknown): number => {
   return own + 2 * number('paddingX') + number('paddingLeft') + number('paddingRight')
 }
 
+const controlCells = (value: unknown): number =>
+  nodesOf(value)
+    .filter(node => node.type === 'Button' || node.type === 'Input')
+    .reduce<number>((sum, node) => sum + textOf(node).length, 0)
+
+// What a child of a sized row claims: its own width when it has one, else the labels of the controls
+// inside it (its text truncates, a Button does not).
+const claimOf = (kid: unknown): number => {
+  if (typeof kid !== 'object' || kid === null) return 0
+  const node = kid as Node
+  return typeof node.props?.width === 'number' ? cellsOf(node) : controlCells(node)
+}
+
+// Every row that seats a control at its right edge sizes itself: the row's own width against what its
+// sized children and its controls claim. An overflow here is a clipped control on the real surface.
+const overrun = (value: unknown): number[] =>
+  nodesOf(value)
+    .filter(node => node.type === 'Box' && typeof node.props?.width === 'number' && node.props?.flexDirection !== 'column')
+    .flatMap(node => {
+      const width = Number(node.props?.width)
+      const gap = typeof node.props?.gap === 'number' ? Number(node.props.gap) : 0
+      const kids = kidsOf(node)
+      const inner = kids.reduce<number>((sum, kid) => sum + claimOf(kid), 0) + gap * Math.max(0, kids.length - 1)
+      return inner > width ? [inner - width] : []
+    })
+
 const recorder = (): { calls: Call[]; actions: Actions } => {
   const calls: Call[] = []
   const record = (name: string) => (arg?: unknown) => { calls.push({ name, arg }) }
@@ -139,6 +168,8 @@ describe('ui', () => {
     expect(holds(tree, 'saved ~3%')).toEqual(true)
     expect(keysOf(tree)).toEqual(['toggle'])
     expect(drawnRows(tree)).toContain('Open')
+    expect(cellsOf(tree)).toEqual(BAND_SITE.bodyColumns - BAND_RESERVE)   // the engine's '[-]' draws past them
+    expect(overrun(tree)).toEqual([])
 
     await $.ui.press({ plugin: DRAWER, key: 'toggle' })
     await clock.settle()
@@ -230,7 +261,8 @@ describe('ui', () => {
     expect(holds(wide, '64%')).toEqual(true)
     expect(holds(wide, '41k to compaction ≈ 6 turns')).toEqual(true)
     expect(holds(wide, sparkline(twoWasters.header.spark, 10))).toEqual(true)
-    expect(holds(wide, '2 runs · 1.2%')).toEqual(true)
+    expect(holds(wide, '2 runs · 7.4k tokens')).toEqual(true)
+    expect(holds(wide, '1.2%')).toEqual(false)                            // the share is a developer metric
     expect(holds(wide, 'SAVED  ~3% · 3m')).toEqual(true)
 
     const dock = at(56)
@@ -248,6 +280,25 @@ describe('ui', () => {
     expect(holds(past, 'to compaction')).toEqual(false)   // the run went negative once the threshold passed
     expect(holds(past, '~0%')).toEqual(false)
     expect(holds(past, 'SAVED  3m')).toEqual(true)
+
+    const million = at(70, millionPane)
+    expect(holds(million, '914k to compaction ≈ 33 turns')).toEqual(true)
+    const cramped = at(40, millionPane)
+    expect(holds(cramped, gauge(5, 8))).toEqual(true)
+    expect(holds(cramped, '914')).toEqual(false)          // the figure is dropped whole, never cut mid-number
+  })
+
+  test('before the first turn the context row says so instead of drawing an empty gauge', async ($, on) => {
+    const { actions } = recorder()
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
+      Pane({ ui: $.ui.resolve(e), model: awaitingPane, site: PANE_SITE, placement: 'dock', actions }))
+
+    const tree = await $.ui.render(PANE_HOST)
+
+    expect(holds(tree, 'CONTEXT')).toEqual(true)
+    expect(holds(tree, 'awaiting the first turn')).toEqual(true)
+    expect(holds(tree, '░')).toEqual(false)
+    expect(holds(tree, '1 run · 7.4k tokens')).toEqual(true)
   })
 
   test('i opens why, fix, what Kill sends and the evidence in place', async ($, on) => {
@@ -364,15 +415,18 @@ describe('ui', () => {
 
     const ui: Ui | null = resolved
     if (ui === null) throw new Error('the pane drew no elements')
-    for (const model of [emptyPane, twoWasters, expandedPane, steeringPane, decidedPane, overrunPane]) {
-      for (const columns of [56, 80, 120]) {
+    for (const model of [emptyPane, twoWasters, expandedPane, steeringPane, decidedPane, overrunPane, awaitingPane, millionPane]) {
+      for (const columns of [40, 56, 70, 80, 120]) {
         const site = { bodyColumns: columns, maxRows: 30 }
-        expect(cellsOf(Pane({ ui, model, site, placement: 'dock', actions })), `dock ${columns}`)
-          .toBeLessThanOrEqual(columns)
-        expect(cellsOf(Pane({ ui, model, site, placement: 'inline', actions })), `inline ${columns}`)
-          .toBeLessThanOrEqual(columns)
-        expect(cellsOf(Band({ ui, model: bandFull, site, actions })), `band ${columns}`)
-          .toBeLessThanOrEqual(columns)
+        const dock = Pane({ ui, model, site, placement: 'dock', actions })
+        const inline = Pane({ ui, model, site, placement: 'inline', actions })
+        const band = Band({ ui, model: bandFull, site, actions })
+        expect(cellsOf(dock), `dock ${columns}`).toBeLessThanOrEqual(columns)
+        expect(cellsOf(inline), `inline ${columns}`).toBeLessThanOrEqual(columns)
+        expect(cellsOf(band), `band ${columns}`).toBeLessThanOrEqual(columns - BAND_RESERVE)
+        expect(overrun(dock), `dock ${columns} controls`).toEqual([])
+        expect(overrun(inline), `inline ${columns} controls`).toEqual([])
+        expect(overrun(band), `band ${columns} controls`).toEqual([])
       }
     }
   })

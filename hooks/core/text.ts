@@ -1,6 +1,6 @@
 import type { Usage, StoredPattern } from './types'
 
-/** Returns the median of an array; 0 for an empty array. */
+/** Returns the median of the numbers; 0 when there are none. */
 export const median = (xs: number[]): number => {
   if (xs.length === 0) return 0
   const sorted = [...xs].sort((a, b) => a - b)
@@ -25,7 +25,7 @@ export const duration = (ms: number): string => {
   return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`
 }
 
-/** Returns a kebab-case slug of at most 40 characters. */
+/** Returns a kebab-case slug of at most forty characters. */
 export const slug = (s: string): string =>
   s
     .toLowerCase()

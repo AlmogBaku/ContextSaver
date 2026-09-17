@@ -100,7 +100,7 @@ KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` 
 ## TURNS — \`turn | in | out | cacheCreate | calls | ms | answerChars\`, then the facts line (context window, fixed per-turn overhead, turns where a compaction happened)
 {{TURNS}}
 
-## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
+## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first. \`ms\` is wall time and includes any wait on a permission prompt, so a long \`ms\` alone is not machine cost. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
 {{LEDGER}}
 
 Return the JSON object only.

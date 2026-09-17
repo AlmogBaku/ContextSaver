@@ -8,6 +8,7 @@ export const emptyPane: PaneModel = {
     tokensToCompaction: null,
     turnsToCompaction: null,
     judgeRuns: 0,
+    judgeTokens: 0,
     judgeShare: 0,
     judgeRunning: false,
     savedPct: 0,

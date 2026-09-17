@@ -41,6 +41,8 @@ describe('judge', () => {
     expect(JUDGE_PROMPT).toContain('{{STATS}}')
     expect(JUDGE_PROMPT).toContain('{{TURNS}}')
     expect(JUDGE_PROMPT).toContain('{{LEDGER}}')
+    expect(JUDGE_PROMPT)
+      .toContain('`ms` is wall time and includes any wait on a permission prompt, so a long `ms` alone is not machine cost.')
   })
 
   test('buildPrompt fills every block, keeping the contract and the five headers', ($, _on) => {

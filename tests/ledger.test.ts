@@ -47,6 +47,25 @@ describe('ledger', () => {
     expect(table.map(([command]) => classOf(command))).toEqual(table.map(([, cls]) => cls))
   })
 
+  test('classOf classifies a compound command by its first segment that names something', () => {
+    const table: readonly (readonly [string, CommandClass])[] = [
+      ["printf '\\n' >> README.md && ./scripts/check.sh", 'other'],
+      ["printf '\\n' >> README.md && bun test", 'test'],
+      ['echo hi; git status', 'git'],
+      ['./scripts/check.sh || cat log', 'read'],
+      ['mkdir -p dist && cd dist && cargo build --release', 'build'],
+      ['bun test && git commit -m wip', 'test'],
+      ['echo one && echo two', 'other'],
+      ['grep -rn TODO . ; echo done', 'search'],
+    ]
+    expect(table.map(([command]) => classOf(command))).toEqual(table.map(([, cls]) => cls))
+  })
+
+  test('the key of a compound command stays the whole command', () => {
+    expect(normalize('Bash', { command: "printf '\\n' >> README.md && bun test" }))
+      .toEqual({ key: "test:printf '\\n' >> README.md && bun test", cls: 'test' })
+  })
+
   test('normalize keys each tool family and caps the key', () => {
     expect(normalize('Bash', { command: 'cd x &&  bun   test' })).toEqual({ key: 'test:cd x && bun test', cls: 'test' })
     expect(normalize('Bash', {})).toEqual({ key: 'other:', cls: 'other' })

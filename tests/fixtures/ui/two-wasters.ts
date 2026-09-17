@@ -8,6 +8,7 @@ export const twoWasters: PaneModel = {
     tokensToCompaction: 41_000,
     turnsToCompaction: 6,
     judgeRuns: 2,
+    judgeTokens: 7_400,
     judgeShare: 1.2,
     judgeRunning: false,
     savedPct: 3,

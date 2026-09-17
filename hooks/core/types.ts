@@ -151,7 +151,8 @@ export type Header = {
   tokensToCompaction: number | null // exact: threshold - tokens
   turnsToCompaction: number | null  // estimate at the recent pace
   judgeRuns: number
-  judgeShare: number                // judge tokens as a percentage of session tokens, 1 decimal
+  judgeTokens: number               // tokens the judge has spent this session; the pane's JUDGE row
+  judgeShare: number                // those tokens as a percentage of the session's, 1 decimal; `/saver debug` only
   judgeRunning: boolean
   savedPct: number
   savedMs: number

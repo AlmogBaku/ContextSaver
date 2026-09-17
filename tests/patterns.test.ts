@@ -393,7 +393,7 @@ describe('patterns', () => {
     const model = paneModel(state, [claudeMdArtifact])
     expect(model.header).toEqual({
       percent: 64, spark: [60, 64], tokensToCompaction: 52_000, turnsToCompaction: 5,
-      judgeRuns: 2, judgeShare: 2, judgeRunning: true, savedPct: 4.5, savedMs: 192_000,
+      judgeRuns: 2, judgeTokens: 600, judgeShare: 2, judgeRunning: true, savedPct: 4.5, savedMs: 192_000,
     })
     expect(model.wasters.map(c => c.patternId)).toEqual([waster.id])
     expect(model).toMatchObject({ expanded: waster.id, steering: waster.id, steerDraft: 'draft' })

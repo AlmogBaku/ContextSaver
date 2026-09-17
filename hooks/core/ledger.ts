@@ -14,6 +14,9 @@ const HEAD_MAX = 80   // characters of result.text quoted as evidence (Row.head)
 // A leading `cd <dir> &&` or `VAR=value` is noise in front of the command that matters.
 const NOISE = /^(?:cd\s+[^\s&|;]+\s*&&\s*|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)/
 
+// `a && b`, `a; b`, `a || b`: one call can carry several commands, and quoting is not worth parsing.
+const CHAIN = /&&|\|\||;/
+
 // Script runners: what follows them is the command that matters (longest first).
 const RUNNERS = ['npm run', 'bun run', 'bun x', 'pnpm run', 'yarn run', 'npx', 'bunx', 'pnpm', 'yarn'] as const
 
@@ -56,9 +59,8 @@ const headToken = (command: string): string => command.split(' ')[0] ?? ''
 const tableClass = (command: string): CommandClass | null =>
   COMMANDS.find(([head]) => command === head || command.startsWith(`${head} `))?.[1] ?? null
 
-/** Classifies a shell command by what it does, seeing through cd, env and script-runner prefixes. */
-export const classOf = (command: string): CommandClass => {
-  const bare = stripNoise(collapseWs(command))
+const segmentClass = (segment: string): CommandClass => {
+  const bare = stripNoise(collapseWs(segment))
   const direct = tableClass(bare)
   if (direct !== null) return direct
   const runner = RUNNERS.find(r => bare === r || bare.startsWith(`${r} `))
@@ -66,6 +68,13 @@ export const classOf = (command: string): CommandClass => {
   const script = bare.slice(runner.length).trim()
   return tableClass(script) ?? SCRIPTS[headToken(script)] ?? 'other'
 }
+
+/** Classifies a shell command by what it does, seeing through cd, env, runner prefixes and `&&`/`;`/`||` chains. */
+export const classOf = (command: string): CommandClass =>
+  collapseWs(command)
+    .split(CHAIN)
+    .map(segmentClass)
+    .find(cls => cls !== 'other') ?? 'other'
 
 /** Computes the ledger key and command class of a call from its arguments alone. */
 export const normalize = (tool: string, input: unknown): { key: string; cls: CommandClass } => {
