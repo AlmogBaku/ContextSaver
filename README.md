@@ -8,10 +8,8 @@
 
 </div>
 
-ContextSaver is a Claude Code plugin that watches your session for repeated waste — the full test suite
-after every edit, the same file read four times, a 2,000-line log dumped into the window — and shows it
-to you as a card with a fix. One click sends the fix to Claude mid-turn. Nothing is blocked, nothing is
-sent without a click.
+A Claude Code plugin that catches Claude repeating wasteful behaviour in your session and lets you stop
+it with one click.
 
 <p align="center">
   <img src="docs/screenshot.png" width="880"
