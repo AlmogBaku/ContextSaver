@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_ROWS } from '../hooks/core/types'
+import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS } from '../hooks/core/types'
 import { rawFinding } from './fixtures/judge/rawFinding'
 import { replyText } from './fixtures/judge/replyText'
 import { bandRender } from './fixtures/register/bandRender'
@@ -195,7 +195,8 @@ describe('register', () => {
 
     expect(world.toasts.join(' ')).toContain('ContextSaver: told Claude to stop —')
     const debug = await $.command.run(saverRun('debug'))
-    expect(debug.text).toContain(`${SUITE_ID} · hits 2`)
+    // Two rows were cited; the third `bun test` of the turn landed under the signature after the run.
+    expect(debug.text).toContain(`${SUITE_ID} · hits 3`)
     expect(debug.text).toContain('kill @ 3')
     expect(debug.text).toContain('cards 0')
 
@@ -279,7 +280,8 @@ describe('register', () => {
     await world.clock.settle()
 
     expect(textOf(await $.ui.render(paneRender())), 'the field is open under the verbs').toContain('Enter sends · Steer again closes')
-    expect(world.toasts, 'a ring the surface would not move is nothing to tell the user about').toEqual([])
+    expect(world.toasts, 'a ring the surface would not move is nothing to tell the user about beyond what the check found')
+      .toEqual(['ContextSaver: 1 new waster'])
 
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
     await world.clock.settle()
@@ -473,7 +475,7 @@ describe('register', () => {
     expect(own).not.toContain('beneath')
   })
 
-  test('a fresh card opens the pane once, and only where the surface would draw it', async ($, on) => {
+  test('a cadence run opens the pane once, and only where the surface would draw it', async ($, on) => {
     const world = startsSaver(on)
     const replies = [
       replyText([rawFinding({ evidence: ['r1', 'r2'] })]),
@@ -488,22 +490,110 @@ describe('register', () => {
     })
 
     await $.session.start(SESSION)
-    await runTurns($, 1, 4)
 
     await $.ui.render(bandRender(AUTO_OPEN_MIN_COLUMNS - 1))
-    await $.command.run(saverRun('check'))
+    await runTurns($, 3, 3)
     await world.clock.settle()
     expect(world.opened, 'too narrow for an unasked pane: the band is the only signal').toEqual([])
 
     await $.ui.render(bandRender(AUTO_OPEN_MIN_COLUMNS))
-    await $.command.run(saverRun('check'))
+    await runTurns($, 3, 3)
     await world.clock.settle()
     expect(world.opened.map(pane => pane.id), 'the fresh card opened the pane').toEqual(['saver'])
 
-    await $.command.run(saverRun('check'))
+    await runTurns($, 3, 3)
     await world.clock.settle()
     expect(world.opened, 'the pane opens itself once a session').toHaveLength(1)
     expect((await $.command.run(saverRun('debug'))).text).toContain('cards 3')
+    expect(world.toasts.filter(text => text.startsWith('ContextSaver: ')), 'a cadence run says nothing about itself')
+      .toEqual([])
+  })
+
+  // The judge never ran through a three-hour agentic turn: `turn.complete` was the only cadence there was.
+  test('a storm of tool calls inside one long turn is judged mid-turn, once', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: forkAnswer(SUITE_REPLY) }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy layer', turnId: 't1' })
+    await world.clock.advance(JUDGE_MIN_GAP_MS)
+    for (let call = 1; call <= JUDGE_MIN_NEW_ROWS + 5; call += 1) await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(prompts, 'one fork, from the rows and the clock alone').toHaveLength(1)
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'no turn ever completed').toContain(`turn 1 · seq ${JUDGE_MIN_NEW_ROWS + 5} · rows ${JUDGE_MIN_NEW_ROWS + 5} · turns 0`)
+    expect(debug.text, 'the run is dated by the row it started at').toContain(`/ row ${JUDGE_MIN_NEW_ROWS} / ${JUDGE_MIN_GAP_MS}ms`)
+    expect(debug.text, 'and the card is in front of the user while the turn is still running').toContain('cards 1')
+  })
+
+  test('a check the user asked for says what it found and opens the pane at any width', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await $.ui.render(bandRender(80))
+    await runTurns($, 1, 4)
+
+    expect((await $.command.run(saverRun('check'))).text).toBe('ContextSaver: checking this session for waste…')
+    await world.clock.settle()
+
+    expect(world.toasts, 'a check that found something says how much').toEqual(['ContextSaver: 1 new waster'])
+    expect(world.opened.map(pane => pane.id), 'the person is waiting for the answer, so 80 columns is wide enough')
+      .toEqual(['saver'])
+  })
+
+  test('a check that found nothing says so, and a second one while it runs forks nothing', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    let release = (): void => undefined
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return new Promise(resolve => {
+        release = () => resolve({ value: forkAnswer(replyText([])) })
+      })
+    })
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+
+    expect((await $.command.run(saverRun('check'))).text).toBe('ContextSaver: checking this session for waste…')
+    expect((await $.command.run(saverRun('check'))).text, 'the second ask is answered, not obeyed').toBe('ContextSaver: already checking')
+    await $.ui.render(paneRender())
+    await $.ui.press({ plugin: 'contextsaver', key: 'check' })
+    expect(world.toasts, 'Check now has no reply to write in, so the press is toasted').toEqual(['ContextSaver: already checking'])
+
+    release()
+    await world.clock.settle()
+
+    expect(forks, 'one fork for the three asks').toBe(1)
+    expect(world.toasts.at(-1), 'a run that found nothing says that too').toBe('ContextSaver: nothing new')
+    expect(world.opened, 'nothing found, nothing to show').toEqual([])
+  })
+
+  test('a check the fork refused says why it failed', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ deny: 'no forking today' }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(world.toasts.join(' ')).toContain('ContextSaver: check failed — ')
+    expect((await $.command.run(saverRun('debug'))).text, 'and the judge is not left running').toContain('running false')
   })
 
   test('a stub that throws or denies beneath a hook leaves the session standing', async ($, on) => {

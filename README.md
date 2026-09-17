@@ -4,7 +4,7 @@
 
 **Stop Claude Code from wasting tokens doing useless shit, in realtime.**
 
-[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-173%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-187%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
@@ -15,9 +15,9 @@ were doing. You paid for all of it.
 
 Your options right now: hit Esc, and type the same correction for the fourth time.
 
-ContextSaver logs every tool call, then asks the model one question: **what has Claude already done
-more than once that was a waste, and what should it do instead?** The answers land in a pane next to
-your transcript, with three buttons.
+ContextSaver logs every tool call, then asks the model three questions: **what has Claude already done
+more than once that was a waste, where did your time and your context actually go, and what is going in
+circles?** The answers land in a pane next to your transcript, with three buttons.
 
 <!-- A real 160-column capture of `/saver demo`:
      tmux capture-pane -e -p -t <session> | python3 scripts/screenshot.py docs/screenshot.png --cols 160 -->
@@ -94,37 +94,46 @@ For you, it goes like this.
    interruptions. It watches quietly and says nothing.
 2. **It waits for a habit, not a spike.** One big command is not a problem. The same pointless command
    for the third time is. Only behaviours that already repeated ever reach you.
-3. **A card shows up in the pane, next to your transcript.** What Claude keeps doing, what it has cost
+3. **It answers "what took so long".** The header says where the wall-clock and the window went — `tests
+   ×12 · 22m`, `reads ×30 · 41% of your context` — and the model writes one plain line under each: what
+   those minutes were, in the words of your own work. An explanation is not an accusation: a long session
+   can be an honest one, and it says so.
+4. **It doesn't wait for the turn to end.** A three-hour agentic turn is checked while it runs, every 40
+   tool calls and at most every five minutes, so the card arrives while there is still time to change
+   course. The run to compaction is paced by how fast the window is actually filling, not by what a turn
+   was billed.
+5. **A card shows up in the pane, next to your transcript.** What Claude keeps doing, what it has cost
    you so far — how many times, how much of your context, how much of your life — and what it should be
    doing instead. Press `i` for the receipts: the reasoning in full, then every call behind the claim —
    the turn, the command or file, the loop it ran in, its seconds and its size, and the first line of
    what came back. Each card is numbered, so `/saver keep 2` decides the one you are looking at.
-4. **You press one of three buttons.** *Keep* if you don't care, and it never mentions it again. *Steer*
+6. **You press one of three buttons.** *Keep* if you don't care, and it never mentions it again. *Steer*
    to type what Claude should do instead, the field pre-filled with the suggestion. *Kill* to send that
    suggestion as it stands. The pane's last line names the same three verbs for the keyboard —
    `/saver keep|steer|kill <n>` — because the composer keeps the Tab ring.
-5. **Claude changes course in the turn that's already running.** Your words reach it on its very next
+7. **Claude changes course in the turn that's already running.** Your words reach it on its very next
    tool result, and ride along with every prompt after that, so it doesn't quietly drift back after a
    compaction. Nothing is blocked, nothing is denied, nothing waits on you.
-6. **You see what you got back.** When Claude does the cheap thing instead, the pane credits the
+8. **You see what you got back.** When Claude does the cheap thing instead, the pane credits the
    difference against what that behaviour normally costs you in this session: context and minutes. If
    Claude ignores you, it says so, and the card comes back so you can say it harder.
-7. **Next session starts smarter.** A decision worth keeping becomes a CLAUDE.md rule, a skill, an agent
+9. **Next session starts smarter.** A decision worth keeping becomes a CLAUDE.md rule, a skill, an agent
    brief or a permission rule — written only when you press `Write`.
 
 **The technical bit,** briefly. Every tool call becomes a row: what ran, how long it took, how much it
-dumped into your context, which files it touched. Every ~30k new tokens, one detached model fork reads
-the session's own transcript plus that ledger and answers a single question — what has already repeated
-that was a waste, and what should happen instead. There are no pattern rules or thresholds in the code
-to tune; the numbers on a card are computed from the rows, not from the model's guess. The full
-architecture, and the judge's prompt, are in [`docs/SPEC.md`](docs/SPEC.md).
+dumped into your context, which files it touched. Every ~30k new tokens, and inside a long turn every 40
+rows and five minutes, one detached model fork reads the session's own transcript plus that ledger and
+the minutes and characters totalled by consumer, then answers three questions — what has already
+repeated, where the time and the context went, and what is going in circles. There are no pattern rules
+or thresholds in the code to tune; the numbers on a card are computed from the rows, not from the model's
+guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `/saver` | Shows or hides the pane. |
-| `/saver check` | Runs the judge now instead of waiting for the cadence. |
+| `/saver check` | Runs the judge now instead of waiting for the cadence, and tells you what it found — `2 new wasters`, `nothing new`, or why it failed. Found something, and the pane opens at any width. |
 | `/saver steer [n] <text>` | Sends an instruction for card `n` — a leading number is always read as the card the pane draws, and without one it is the waster whose Steer field is open, else card 1. The multi-line way to steer, from the composer. |
 | `/saver keep <n>` | Keeps card `n`: nothing is sent, and it stays quiet for the session. |
 | `/saver kill <n>` | Kills card `n`: sends the fix as a stop instruction. |
@@ -153,7 +162,7 @@ architecture, and the judge's prompt, are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ```sh
 git clone https://github.com/AlmogBaku/ContextSaver && cd ContextSaver
-./scripts/check.sh                                          # validate --strict, typecheck, 173 tests
+./scripts/check.sh                                          # validate --strict, typecheck, 187 tests
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .    # run with the plugin loaded from this folder
 ```
 
@@ -173,8 +182,8 @@ collapse control `[-]` over the last cells of that row.
 
 With `CONTEXTSAVER_DEBUG` set, `/saver demo` fills the pane with three sample wasters from
 `hooks/core/demo.ts` — two awaiting a decision, one already steered so the decisions and the rules draw
-too — against a sample usage and three sample turns, so the header's gauge and its run to compaction draw
-as well, and opens it, so the design can be looked at without waiting for a real finding. One sample call
+too — against a sample usage and four sample turns carrying the context the window held after each, so the
+header's gauge, its trend and its run to compaction draw as well, and opens it, so the design can be looked at without waiting for a real finding. One sample call
 ran inside a subagent, which is where the pane's `a1` loop column comes from. Nothing is sent to Claude
 and nothing is written; without the flag the command is not there.
 

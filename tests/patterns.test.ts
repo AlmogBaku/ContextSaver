@@ -284,6 +284,30 @@ describe('patterns', () => {
     expect(reduce(done, { type: 'reset' }).judge.last, 'a reset knows of no run').toBe(null)
   })
 
+  test('the judge run remembers when and where it ran, and what it said about the time and the context', async () => {
+    const started = reduce(seedState({ turn: 4, seq: 61 }), { type: 'judge.start', now: 1_700_000_000_000, seq: 61 })
+    expect(started.judge, 'the row and the clock the mid-turn cadence counts from')
+      .toMatchObject({ running: true, lastAtSeq: 61, lastAtMs: 1_700_000_000_000 })
+    const done = reduce(started, {
+      type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: 'a proxy rewrite',
+      time: '2h 10m, most of it four full suite runs.', context: '410k chars, half of it one log dump.',
+      spent: 900, error: null, returned: 0, kept: 0, dropped: [],
+    })
+    expect(done.judge, 'a run that finished keeps the cadence it started under').toMatchObject({
+      running: false, lastAtSeq: 61, lastAtMs: 1_700_000_000_000,
+      time: '2h 10m, most of it four full suite runs.', context: '410k chars, half of it one log dump.',
+    })
+    expect(paneModel(done, []).header, 'the header quotes the judge verbatim').toMatchObject({
+      judgeTime: '2h 10m, most of it four full suite runs.', judgeContext: '410k chars, half of it one log dump.',
+    })
+    const dump = debugDump(done)
+    expect(dump).toContain('judge time: "2h 10m, most of it four full suite runs."')
+    expect(dump).toContain('judge context: "410k chars, half of it one log dump."')
+    expect(dump, 'the cadence fields are in the dump too').toContain('/ row 61 / 1700000000000ms')
+    expect(reduce(done, { type: 'reset' }).judge, 'a reset knows of no explanation')
+      .toMatchObject({ time: null, context: null, lastAtSeq: 0, lastAtMs: 0 })
+  })
+
   test('judge.done drops a card whose pattern the registry no longer carries', async () => {
     const state = seedState({ turn: 9, patterns: [suitePattern], cards: [suitePattern.id] })
     const pruned = reduce(state, { type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [] })
@@ -498,7 +522,8 @@ describe('patterns', () => {
         withSeq({ id: 'r-1', turn: 5, ms: 60_000, chars: 9_000 }, 1),
         withSeq({ id: 'r-3', turn: 11, key: 'read:cat api.log', cls: 'read', ms: 2_000, chars: 40_000, head: 'INFO booting' }, 3),
       ],
-      turns: [1, 2, 3].map(turn => ({ ...turnEnd(), turn, calls: 2 })),
+      // The window filling up turn by turn: 12k of growth a turn is the pace to compaction.
+      turns: [80_000, 92_000, 104_000, 116_000, 128_000].map((context, at) => ({ ...turnEnd({ context }), turn: at + 1, calls: 2 })),
       usage: { window: 200_000, tokens: 128_000, percent: 64, compactAt: 180_000 },
       patterns: [waster, steeredLog, keptChat],
       cards: [waster.id], expanded: waster.id, steering: waster.id, steerDraft: 'draft',
@@ -507,9 +532,12 @@ describe('patterns', () => {
     })
     const model = paneModel(state, [claudeMdArtifact])
     expect(model.header).toEqual({
-      percent: 64, tokensToCompaction: 52_000, turnsToCompaction: 5,
-      trend: [], time: null, context: null, judgeTime: null, judgeContext: null,
-      judgeRuns: 2, judgeTokens: 600, judgeShare: 2, judgeRunning: true, savedPct: 4.5, savedMs: 192_000,
+      percent: 64, tokensToCompaction: 52_000, turnsToCompaction: 4,
+      trend: [40, 46, 52, 58, 64],
+      time: { total: 62_000, sinks: [{ label: 'tests', amount: 60_000, count: 1 }, { label: 'reads', amount: 2_000, count: 1 }] },
+      context: { total: 49_000, sinks: [{ label: 'reads', amount: 40_000, count: 1 }, { label: 'tests', amount: 9_000, count: 1 }] },
+      judgeTime: null, judgeContext: null,
+      judgeRuns: 2, judgeTokens: 600, judgeShare: 1.2, judgeRunning: true, savedPct: 4.5, savedMs: 192_000,
     })
     expect(model.wasters.map(c => c.patternId)).toEqual([waster.id])
     expect(model.wasters.map(c => c.n), 'the cards are numbered as they are drawn, top to bottom').toEqual([1])
@@ -538,15 +566,34 @@ describe('patterns', () => {
   })
 
   test('tokensToCompaction and turnsToCompaction fall back and go null', async () => {
+    const grew = (state: State, contexts: (number | null)[]): State =>
+      ({ ...state, turns: contexts.map((context, at) => ({ ...turnEnd({ context }), turn: at + 1, calls: 1 })) })
     expect(tokensToCompaction(seedState())).toBeNull()
     expect(turnsToCompaction(seedState())).toBeNull()
     const noThreshold = seedState({ usage: { window: 200_000, tokens: 50_000 } })
     expect(tokensToCompaction(noThreshold)).toBe(130_000)
     expect(turnsToCompaction(noThreshold)).toBeNull()
-    expect(turnsToCompaction({ ...noThreshold, turns: [1, 2].map(turn => ({ ...turnEnd(), turn, calls: 1 })) })).toBeNull()
-    expect(turnsToCompaction({ ...noThreshold, turns: [1, 2, 3].map(turn => ({ ...turnEnd(), turn, calls: 1 })) })).toBe(13)
-    expect(turnsToCompaction({ ...noThreshold, turns: [1, 2, 3].map(turn => ({ ...turnEnd({ input: 0, output: 0, cacheCreate: 0 }), turn, calls: 1 })) })).toBeNull()
+    expect(turnsToCompaction(grew(noThreshold, [null, null, null])), 'turns nobody sized are no pace').toBeNull()
+    expect(turnsToCompaction(grew(noThreshold, [20_000, 30_000, 40_000])), 'two growth samples state nothing').toBeNull()
+    expect(turnsToCompaction(grew(noThreshold, [20_000, 30_000, 40_000, 50_000]))).toBe(13)
+    expect(turnsToCompaction(grew(noThreshold, [20_000, 20_000, 20_000, 20_000])), 'a window that stopped growing has no pace').toBeNull()
+    expect(turnsToCompaction(grew(noThreshold, [20_000, 30_000, 12_000, 22_000, 32_000, 42_000])), 'a compaction drop is skipped, not averaged in')
+      .toBe(13)
     expect(tokensToCompaction(seedState({ usage: { window: 200_000, tokens: 100_000, compactAt: 150_000 } }))).toBe(50_000)
+  })
+
+  // The user's own session: 38% of a million-token window, and the old estimate said three turns.
+  test('the run to compaction is paced by the window growing, not by what a turn was billed', async () => {
+    const state = seedState({
+      usage: { window: 1_000_000, tokens: 380_000, percent: 38, compactAt: 963_000 },
+      turns: [260_000, 290_000, 320_000, 350_000, 380_000].map((context, at) => ({
+        // 60k of billed tokens a turn, 30k of it growth: the tokens would have claimed compaction was three turns away.
+        ...turnEnd({ input: 55_000, output: 5_000, context }), turn: at + 1, calls: 4,
+      })),
+    })
+    expect(tokensToCompaction(state)).toBe(583_000)
+    expect(turnsToCompaction(state) ?? 0).toBeGreaterThanOrEqual(10)
+    expect(turnsToCompaction(state)).toBe(19)
   })
 
   test('debugDump stays inside 40 lines and shows hits, decisions and instructions', async () => {
@@ -569,8 +616,12 @@ describe('patterns', () => {
     expect(dump).toContain('toCompaction 90000')
     expect(dump).toContain('notes 1 · standing 1')
     expect(dump).toContain('saved 3m 12s · ~4.5% · 36000 chars')
-    const crowded = seedState({ patterns: Array.from({ length: 60 }, (_, i) => ({ ...suitePattern, id: `execution:waster-${i}` })) })
-    expect(debugDump(crowded).split('\n').length).toBeLessThanOrEqual(40)
+    expect(dump, 'nothing said about the time reads as nothing').toContain('judge time: -')
+    const crowded = seedState({
+      patterns: Array.from({ length: 60 }, (_, i) => ({ ...suitePattern, id: `execution:waster-${i}` })),
+      judge: { ...seedState().judge, last: { returned: 8, kept: 1, dropped: Array.from({ length: 7 }, (_, i) => `execution:waster-${i}: dropped`) } },
+    })
+    expect(debugDump(crowded).split('\n').length, 'sixty patterns and six reasons still fit the forty').toBeLessThanOrEqual(40)
     expect(debugDump(crowded)).toContain('… 40 more patterns')
   })
 

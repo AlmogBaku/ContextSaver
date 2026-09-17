@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
-  aggregate, decisionsBlock, knownPatternsBlock, ledgerBlock, ledgerLine, statsLines, summaryLine, turnsBlock,
+  aggregate, decisionsBlock, knownPatternsBlock, ledgerBlock, ledgerLine, sinksBlock, statsLines, summaryLine,
+  turnsBlock,
 } from '../hooks/core/blocks'
 import { agentAliases } from '../hooks/core/evidence'
 import { initialState } from '../hooks/core/types'
@@ -109,6 +110,29 @@ describe('blocks', () => {
     ])
     expect(lines[2]).toBe('r11 | Bash | read:cat notes.md | read | main | 11 | 10 | 100 | - | -')
     expect(ledgerBlock(judgeState())).toBe(rows.map(row => ledgerLine(row, aliases)).join('\n'))
+  })
+
+  test('sinksBlock states the total, the largest sinks with their share, then the largest rows', ($, _on) => {
+    expect(sinksBlock(rows, 'ms').split('\n')).toEqual([
+      // The spawn row is named at 16% of a total it is not in: its own loop's rows are already counted.
+      'total Σ183360ms',
+      'tests | ×3 | Σ180000ms | 98%',
+      'agents | ×1 | Σ30000ms | 16%',
+      'reads | ×2 | Σ3040ms | 2%',
+      'largest rows:',
+      'r1 | Bash | test:bun test | Σ61000ms',
+      'r6 | Bash | test:bun test | Σ60000ms',
+      'r3 | Bash | test:bun test | Σ59000ms',
+      'r7 | Agent | agent:explorer | Σ30000ms',
+      'r5 | Bash | read:docker compose logs api --tail 2000 | Σ3000ms',
+    ])
+    expect(sinksBlock(rows, 'chars').split('\n').slice(0, 4)).toEqual([
+      'total Σ76160ch',
+      'reads | ×2 | Σ46200ch | 61%',
+      'tests | ×3 | Σ29400ch | 39%',
+      'agents | ×1 | Σ2000ch | 3%',
+    ])
+    expect(sinksBlock([], 'chars')).toBe('(none)')
   })
 
   test('the blocks say (none) for an empty session', ($, _on) => {

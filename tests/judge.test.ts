@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { JUDGE_PROMPT, buildPrompt, costOf, merge, parseReply, shouldRun } from '../hooks/core/judge'
 import { debugDump } from '../hooks/core/patterns'
-import { MAX_PATTERNS } from '../hooks/core/types'
+import { JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, MAX_PATTERNS } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
 import { judgeFinding } from './fixtures/judge/judgeFinding'
 import { judgePattern } from './fixtures/judge/judgePattern'
@@ -25,16 +25,28 @@ const filler = (seq: number): Row => ({
 
 describe('judge', () => {
   test('shouldRun gates on new tokens, turns, rows and the running flag', ($, _on) => {
-    expect(shouldRun(judgeState())).toBe(true)
-    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, running: true } }))).toBe(false)
-    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, lastAtTokens: 20_000 } }))).toBe(false)
-    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, lastAtTurn: 5 } }))).toBe(false)
-    expect(shouldRun(judgeState({ rows: rows.slice(0, 7) }))).toBe(false)
+    expect(shouldRun(judgeState(), 0)).toBe(true)
+    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, running: true } }), 0)).toBe(false)
+    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, lastAtTokens: 20_000 } }), 0)).toBe(false)
+    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, lastAtTurn: 5 } }), 0)).toBe(false)
+    expect(shouldRun(judgeState({ rows: rows.slice(0, 7) }), 0)).toBe(false)
   })
 
   test('shouldRun demands proportionally more new tokens after a backoff', ($, _on) => {
-    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, backoff: 1 } }))).toBe(true)
-    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, backoff: 2 } }))).toBe(false)
+    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, backoff: 1 } }), 0)).toBe(true)
+    expect(shouldRun(judgeState({ judge: { ...judgeState().judge, backoff: 2 } }), 0)).toBe(false)
+  })
+
+  // One agentic turn can run for hours: `turn.complete` never fires, so the rows and the clock are the cadence.
+  test('shouldRun runs mid-turn on new rows plus a gap, and on neither alone', ($, _on) => {
+    const midTurn = (seq: number, backoff = 1) =>
+      judgeState({ turn: 1, turns: [], seq, judge: { ...judgeState().judge, backoff } })
+    expect(shouldRun(midTurn(JUDGE_MIN_NEW_ROWS), JUDGE_MIN_GAP_MS), 'forty new rows and five minutes').toBe(true)
+    expect(shouldRun(midTurn(JUDGE_MIN_NEW_ROWS), JUDGE_MIN_GAP_MS - 1), 'the rows are there, the gap is not').toBe(false)
+    expect(shouldRun(midTurn(JUDGE_MIN_NEW_ROWS - 1), JUDGE_MIN_GAP_MS * 9), 'a long quiet turn is no new evidence').toBe(false)
+    expect(shouldRun(midTurn(JUDGE_MIN_NEW_ROWS * 2 - 1, 2), JUDGE_MIN_GAP_MS), 'a backoff doubles the rows it wants').toBe(false)
+    expect(shouldRun(midTurn(JUDGE_MIN_NEW_ROWS * 2, 2), JUDGE_MIN_GAP_MS)).toBe(true)
+    expect(shouldRun({ ...midTurn(JUDGE_MIN_NEW_ROWS), rows: rows.slice(0, 7) }, JUDGE_MIN_GAP_MS), 'a short ledger is judged by nobody').toBe(false)
   })
 
   test('JUDGE_PROMPT is the Appendix A text with the five placeholders', ($, _on) => {
@@ -92,6 +104,40 @@ describe('judge', () => {
     expect(prompt).not.toContain('{{')
   })
 
+  test('the prompt asks the three questions, states the ladder and reserves the two sentences', ($, _on) => {
+    expect(JUDGE_PROMPT, 'the question the user asked their agent is one of ours now')
+      .toContain('Answer three narrow questions. What repeated:')
+    expect(JUDGE_PROMPT).toContain('Where the time and the context went:')
+    expect(JUDGE_PROMPT).toContain('What is going in circles: the same failing command retried with no diagnostic step between')
+    expect(JUDGE_PROMPT, 'the ladder from nothing to a finding')
+      .toContain('- The legitimacy ladder. A sink needed once is nothing, however large.')
+    expect(JUDGE_PROMPT).toContain('is a finding, and the excuse you considered is written into `why`.')
+    expect(JUDGE_PROMPT, 'and one long call, needed once, is never one')
+      .toContain('- A single long call that was needed once, however long it ran:')
+    expect(JUDGE_PROMPT).toContain('{{TIME}}')
+    expect(JUDGE_PROMPT).toContain('{{CONTEXT}}')
+    expect(JUDGE_PROMPT).toContain('"time": "<one sentence, at most 200 chars: where the wall-clock went>"')
+    expect(JUDGE_PROMPT).toContain('"context": "<one sentence, at most 200 chars: where the context went>"')
+    expect(JUDGE_PROMPT, 'the explanation is neutral, so it is not a finding by itself')
+      .toContain('Neither is an accusation and neither is a finding by itself')
+    expect(JUDGE_PROMPT, 'a long legitimate session answers with the sentences and no findings')
+      .toContain('"findings":[]}` — a long session is not a wasteful one.')
+    expect(JUDGE_PROMPT).toContain('— every repeat had changed inputs, so the ladder stops at nothing.')
+  })
+
+  test('buildPrompt states where the wall-clock and the context went', ($, _on) => {
+    const prompt = buildPrompt(judgeState())
+    expect(prompt).toContain('## TIME — where the wall-clock went.')
+    expect(prompt).toContain('## CONTEXT — where the context went.')
+    expect(prompt, 'the total leaves the spawn rows out, since they hold their own loops rows')
+      .toContain('total Σ183360ms\ntests | ×3 | Σ180000ms | 98%\nagents | ×1 | Σ30000ms | 16%\nreads | ×2 | Σ3040ms | 2%')
+    expect(prompt, 'the longest rows are named so the sinks can be read back to single calls')
+      .toContain('largest rows:\nr1 | Bash | test:bun test | Σ61000ms')
+    expect(prompt).toContain('total Σ76160ch\nreads | ×2 | Σ46200ch | 61%\ntests | ×3 | Σ29400ch | 39%')
+    expect(prompt).toContain('r5 | Bash | read:docker compose logs api --tail 2000 | Σ41000ch')
+    expect(prompt).not.toContain('{{')
+  })
+
   test('the LEDGER header names the loops the agent column holds', ($, _on) => {
     const prompt = buildPrompt(judgeState())
     expect(JUDGE_PROMPT).toContain(' Agents are named `a1`, `a2`… in order of first appearance; `main` is the main loop.')
@@ -118,9 +164,27 @@ describe('judge', () => {
     const wrapped = `Here is what I found.\n\n${replyText([rawFinding()])}\n\nHope that helps.`
     expect(parseReply(wrapped, judgeState()).findings.length).toBe(1)
     expect(parseReply('{"focus": "x", "findings": [', judgeState()))
-      .toEqual({ findings: [], focus: null, dropped: ['reply was not JSON'], returned: 0 })
+      .toEqual({ findings: [], focus: null, time: null, context: null, dropped: ['reply was not JSON'], returned: 0 })
     expect(parseReply('no json at all', judgeState()))
-      .toEqual({ findings: [], focus: null, dropped: ['reply was not JSON'], returned: 0 })
+      .toEqual({ findings: [], focus: null, time: null, context: null, dropped: ['reply was not JSON'], returned: 0 })
+  })
+
+  test('parseReply keeps the time and context sentences and refuses an essay', ($, _on) => {
+    const said = JSON.stringify({
+      focus: 'a proxy rewrite in four chunks',
+      time: '45 min per chunk: the full proxy suite runs after every fix round and each chunk gets two review rounds.',
+      context: '  310k chars,\n over half of it three reads of the same generated client. ',
+      findings: [],
+    })
+    const parsed = parseReply(said, judgeState())
+    expect(parsed.time).toBe('45 min per chunk: the full proxy suite runs after every fix round and each chunk gets two review rounds.')
+    expect(parsed.context, 'one line, whatever the model wrapped it as')
+      .toBe('310k chars, over half of it three reads of the same generated client.')
+    const bad = JSON.stringify({ focus: 'x', time: 'x'.repeat(201), context: 42, findings: [] })
+    expect(parseReply(bad, judgeState()), 'an essay and a number are no sentence to draw')
+      .toMatchObject({ time: null, context: null })
+    expect(parseReply(replyText([]), judgeState()), 'a reply that said nothing about them says nothing')
+      .toMatchObject({ time: null, context: null })
   })
 
   test('parseReply reports one reason per dropped finding, so silence is readable', ($, _on) => {
@@ -145,7 +209,7 @@ describe('judge', () => {
     expect(parseReply(replyText([rawFinding()]), judgeState()).dropped, 'a clean reply drops nothing').toEqual([])
     expect(parseReply(replyText(many), judgeState()).returned, 'returned is what the reply carried, not what survived').toBe(8)
     expect(parseReply(JSON.stringify({ focus: 'x' }), judgeState()), 'a reply with no findings key returned none of them')
-      .toEqual({ findings: [], focus: 'x', dropped: ['findings was not an array'], returned: 0 })
+      .toEqual({ findings: [], focus: 'x', time: null, context: null, dropped: ['findings was not an array'], returned: 0 })
   })
 
   test('a reason quoting a multi-line key stays one line, so /saver debug keeps its forty', ($, _on) => {

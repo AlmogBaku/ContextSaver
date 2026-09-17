@@ -1,18 +1,18 @@
 import type { ModelForkUsage } from 'claude-code'
 
-import { decisionsBlock, knownPatternsBlock, ledgerBlock, statsLines, turnsBlock } from './blocks'
+import { decisionsBlock, knownPatternsBlock, ledgerBlock, sinksBlock, statsLines, turnsBlock } from './blocks'
 import { totalTokens } from './patterns'
 import { collapseWs, median } from './text'
 import {
-  ALTERNATIVE_MAX, JUDGE_LEDGER_ROWS, JUDGE_MIN_NEW_TOKENS, JUDGE_MIN_ROWS, JUDGE_MIN_TURNS, KIND_MAX,
-  MAX_BEHAVIORAL_FINDINGS, MAX_FINDINGS, MAX_PATTERNS,
+  ALTERNATIVE_MAX, JUDGE_LEDGER_ROWS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_NEW_TOKENS,
+  JUDGE_MIN_ROWS, JUDGE_MIN_TURNS, KIND_MAX, MAX_BEHAVIORAL_FINDINGS, MAX_FINDINGS, MAX_PATTERNS,
 } from './types'
 import type { ArtifactKind, Category, Finding, Pattern, Proposal, Row, Signature, State } from './types'
 
-/** The judge prompt (build spec Appendix A, verbatim) with the five evidence placeholders. */
+/** The judge prompt (build spec Appendix A, verbatim) with the seven evidence placeholders. */
 export const JUDGE_PROMPT = `You are auditing THIS session for wasted context and wasted time. The transcript above is your own: read it for intent — what the user asked for, what you were told, what you already decided. The blocks below are the only evidence of what actually ran; nothing outside them exists for this audit.
 
-Answer one narrow question: which behaviours in this session have already repeated, separated by other work, or have you said you will keep doing — and what should be done instead?
+Answer three narrow questions. What repeated: which behaviours have already happened more than once, separated by other work, or have you said you will keep doing — and what should be done instead? Where the time and the context went: which of the largest sinks below are repetition or work nobody asked for rather than the work this session needed. What is going in circles: the same failing command retried with no diagnostic step between, read/edit/read on one path with nothing finished, an edit failing on one path over and over.
 
 You are writing an interruption. Every finding can put a card in front of the user mid-work and can become a standing instruction that constrains you for the rest of the session. A wrong finding costs more than a missed one: it interrupts correct work, teaches a bad rule, and makes the user distrust the next card. Prefer silence to a guess. \`"findings": []\` is a correct and common answer.
 
@@ -34,6 +34,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - Same behaviour, not the same shape. For a signature finding that means the same \`key\`; two Read keys differing only in \`:offset-limit\` are different slices, not a repeat. For a null-signature finding you must name one behaviour and show it in each cited turn; do not staple unrelated expensive turns together.
 - Agents are loops of their own. The \`agent\` column names the loop; a repeat inside one agent's rows counts exactly like a repeat in the main loop, and the main loop re-doing after an agent returns what that agent's rows show it already did (the same Read key, the same check) is a repeat across loops.
 - Short ledgers. With fewer than about 12 rows or fewer than 4 turns, report only behaviours with three or more surviving occurrences, or one plus explicit stated intent.
+- The legitimacy ladder. A sink needed once is nothing, however large. A sink repeated because its inputs changed between the runs — an edit, an install, a migration — is nothing. A sink repeated with nothing changed between, or work the transcript shows nobody asked for, is a finding, and the excuse you considered is written into \`why\`.
 
 ## Categories — the nine names are the whole enum; the cues are examples and \`kind\` is free text
 - execution — the whole suite/build/typecheck after each edit; re-running a check with nothing edited since it last passed; the same failing command retried with no diagnostic step between; \`sleep\` polling or a watch/dev server run as a blocking call (\`bg\` absent, large \`ms\`). Not: a run after any intervening edit, install, migration or config change; the session's baseline run; broad verification after shared code changed; the last check before a commit; one retry of a transient failure. The error text is not in these blocks, so you cannot claim two failures were the same failure.
@@ -48,6 +49,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 
 ## Never report
 - A first occurrence, or anything with fewer than two unexcused occurrences after the Counting rules.
+- A single long call that was needed once, however long it ran: the largest row in TIME or CONTEXT is a fact to explain, never a finding on its own.
 - Orientation: the first look at any file, directory or log, an unfamiliar area, or a scope the user left open ("audit every call site", "review the repo").
 - Parallelism: calls issued together with nothing between them, and agents on disjoint scopes at once, are one decision each.
 - Occurrences a compaction separates, and any re-read a compaction made necessary. Compaction, prompt-cache reads and the host's own truncation are the harness working as designed.
@@ -69,6 +71,8 @@ You are writing an interruption. Every finding can put a card in front of the us
 ## Contract — the shape of your reply, stated once (documentation, not a template to echo)
 \`\`\`json
 {"focus": "<one line: what this session is doing>",
+ "time": "<one sentence, at most 200 chars: where the wall-clock went>",
+ "context": "<one sentence, at most 200 chars: where the context went>",
  "findings": [{"id": "<category>:<kebab-slug, at most 40 chars>",
    "category": "execution|reading|production|behavior|communication|multi-agent|environment|process|other",
    "kind": "<one sentence, at most 120 chars, starts 'Claude keeps '>",
@@ -80,6 +84,8 @@ You are writing an interruption. Every finding can put a card in front of the us
    "est_tokens_per_turn": null,
    "proposal": null}]}
 \`\`\`
+\`time\` and \`context\` explain where each went, for the user to read and in the words of the work: "45 min per chunk: the full proxy suite runs after every fix round and each chunk gets two review rounds". Neither is an accusation and neither is a finding by itself, so write both even when \`findings\` is \`[]\`.
+
 \`findings\` may be \`[]\`. \`signature\` is that object or \`null\`. No other keys, and never null where a string is specified. Reply with one JSON object: first character \`{\`, last character \`}\`, no prose before or after, no code fence.
 
 ## Examples — evidence, then what it justifies
@@ -90,6 +96,8 @@ Rows \`r61\` and \`r72\` both \`read:docker compose logs api --tail 2000\` in tu
 TURNS shows turns 14 and 15 with \`calls 0\` and \`answerChars\` 5400 and 6100 after a single edit at turn 13, neither answering a question: \`"id":"communication:restates-plan-each-turn"\`, \`"evidence":["turn:14","turn:15"]\`, \`"signature":null\`, \`"est_tokens_per_turn":1200\`, \`"alternative":"State the result in one or two lines and take the next action; do not restate the plan or recap completed steps."\`.
 Rows \`r80\`-\`r83\` under \`agent\` \`a1\` Read four files, then \`r84\` Agent \`agent:general-purpose\` flagged \`agent=general-purpose/opus/completed/41000tok/0edits/300pch\` closes that loop (a spawn row lands after the rows it caused), then \`r90\`-\`r93\` in the main loop Read the same four keys in the next turn: \`"id":"multi-agent:re-reads-what-the-agent-read"\`, \`"kind":"Claude keeps re-reading the files a subagent already read for it"\`, \`"evidence":["r80","r83","r90","r93"]\` (a row from each loop is the repeat; the four main-loop reads together are one batch), \`"signature":null\` (no single key carries it), \`"alternative":"Use the subagent's report; re-read a file it covered only to edit it."\`, \`"confidence":0.8\`, \`"est_tokens_per_turn"\` grounded in the cited turns' \`answerChars\` or 0.
 KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` and rows \`r70\` (turn 12) and \`r76\` (turn 14) carry \`test:bun test\` again: return that same id with \`"evidence":["r70","r76"]\` and a \`why\` that names turns 12 and 14 as after the steer at turn 9.
+Agent rows \`r30\`, \`r58\` and \`r91\` run about 40 minutes each, a review agent follows each, every loop reads a different module and no key repeats: \`{"focus":"rewriting three modules, one agent each","time":"2h 40m in three module rewrites of about 40 minutes each, plus one review pass per module; nothing ran twice.","context":"1.1M chars, three quarters of it the agents' own reads of the modules they rewrote.","findings":[]}\` — a long session is not a wasteful one.
+Four suite runs with an install or a migration between every pair, and \`agents | ×3 | Σ2100000ms | 51%\` above them in TIME: \`{"focus":"a schema migration and the call sites it broke","time":"68m, most of it four suite runs, each after a migration or an install changed what the suite covers.","context":"620k chars, over half the migration diff and the failures it produced.","findings":[]}\` — every repeat had changed inputs, so the ladder stops at nothing.
 
 ## KNOWN PATTERNS — \`id | kind | decision @ turn | previous\`. Reuse these ids; never mint a second id or signature for waste listed here.
 {{KNOWN_PATTERNS}}
@@ -100,6 +108,12 @@ KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` 
 ## STATS — the whole session, counted for you. Per call: \`tool | key | cls | ×count | Σms | Σchars | turns first-last | edits-between | agents\` (edits-between: median number of files edited between consecutive runs; 0 means it re-ran with nothing changed). Then per class, per agent, and the five costliest single rows. No ids here; cite LEDGER rows.
 {{STATS}}
 
+## TIME — where the wall-clock went. \`total\`, then \`label | ×count | Σms | share%\` for the largest sinks, then the five longest rows as \`r<seq> | tool | key | Σms\`. An Agent row holds its own loop's rows, so it is listed apart and never added in; \`ms\` includes any wait on a permission prompt.
+{{TIME}}
+
+## CONTEXT — where the context went. The same shape measured in \`chars\`: the total, the largest sinks with their share, then the five largest rows. An Agent row is listed apart and never added in.
+{{CONTEXT}}
+
 ## TURNS — \`turn | in | out | cacheCreate | calls | ms | answerChars\`, then the facts line (context window, fixed per-turn overhead, turns where a compaction happened)
 {{TURNS}}
 
@@ -109,12 +123,26 @@ KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` 
 Return the JSON object only.
 `
 
-/** True when the cadence gates allow another judge run. */
-export const shouldRun = (state: State): boolean =>
-  !state.judge.running &&
+// Turns and tokens: the ordinary session, where the judge runs between turns.
+const turnGate = (state: State): boolean =>
   totalTokens(state) - state.judge.lastAtTokens >= JUDGE_MIN_NEW_TOKENS * state.judge.backoff &&
-  state.turn - state.judge.lastAtTurn >= JUDGE_MIN_TURNS &&
-  state.rows.length >= JUDGE_MIN_ROWS
+  state.turn - state.judge.lastAtTurn >= JUDGE_MIN_TURNS
+
+// Rows and wall time: one agentic turn can run for hours, and `turn.complete` is no cadence inside it.
+const rowGate = (state: State, now: number): boolean =>
+  state.seq - state.judge.lastAtSeq >= JUDGE_MIN_NEW_ROWS * state.judge.backoff &&
+  now - state.judge.lastAtMs >= JUDGE_MIN_GAP_MS
+
+/**
+ * True when the cadence gates allow another judge run.
+ *
+ * @param state the session so far
+ * @param now the clock, for the gap the mid-turn gate keeps between runs
+ */
+export const shouldRun = (state: State, now: number): boolean =>
+  !state.judge.running &&
+  state.rows.length >= JUDGE_MIN_ROWS &&
+  (turnGate(state) || rowGate(state, now))
 
 /** What one judge fork cost us: input, output and cache-creation tokens (cache reads are free). */
 export const costOf = (u: ModelForkUsage): number =>
@@ -126,6 +154,8 @@ export const buildPrompt = (state: State): string =>
     ['{{KNOWN_PATTERNS}}', knownPatternsBlock(state)],
     ['{{DECISIONS}}', decisionsBlock(state)],
     ['{{STATS}}', statsLines(state.rows).join('\n')],
+    ['{{TIME}}', sinksBlock(state.rows, 'ms')],
+    ['{{CONTEXT}}', sinksBlock(state.rows, 'chars')],
     ['{{TURNS}}', turnsBlock(state)],
     ['{{LEDGER}}', ledgerBlock(state)],
   ] as const).reduce((text, [placeholder, value]) => text.split(placeholder).join(value), JUDGE_PROMPT)
@@ -297,21 +327,30 @@ const capFindings = (reviewed: readonly Reviewed[]): Sifted =>
     return { findings: [...kept.findings, item.finding], dropped: kept.dropped }
   }, { findings: [], dropped: [] })
 
-/** Reads the judge's reply into how many findings it returned, the valid ones, a focus line and one reason per drop; never throws. */
-export const parseReply = (text: string, state: State): { findings: Finding[]; focus: string | null; dropped: string[]; returned: number } => {
+const EXPLAIN_MAX = 200   // characters of the judge's `time` and `context` sentences kept; longer is not one sentence
+
+// One sentence written for the user, or nothing: an explanation too long to read is no explanation.
+const explanationOf = (value: unknown): string | null => {
+  const text = collapseWs(str(value))
+  return text.length > 0 && text.length <= EXPLAIN_MAX ? text : null
+}
+
+/** What the judge said: the valid findings, the focus, its time and context sentences, one reason per drop, and how many it returned; never throws. */
+export const parseReply = (text: string, state: State): { findings: Finding[]; focus: string | null; time: string | null; context: string | null; dropped: string[]; returned: number } => {
   const root = parseObject(text)
-  if (root === null) return { findings: [], focus: null, dropped: ['reply was not JSON'], returned: 0 }
+  if (root === null) return { findings: [], focus: null, time: null, context: null, dropped: ['reply was not JSON'], returned: 0 }
   const raw = root['findings']
   const focusText = collapseWs(str(root['focus']))
   const focus = focusText.length > 0 ? focusText : null
-  if (!Array.isArray(raw)) return { findings: [], focus, dropped: ['findings was not an array'], returned: 0 }
+  const said = { time: explanationOf(root['time']), context: explanationOf(root['context']) }
+  if (!Array.isArray(raw)) return { findings: [], focus, ...said, dropped: ['findings was not an array'], returned: 0 }
   const visible = state.rows.slice(Math.max(0, state.rows.length - JUDGE_LEDGER_ROWS))
   const reviewed: Reviewed[] = raw.map((value, i) => {
     const label = labelOf(value, i)
     const result = findingOf(value, state, visible)
     return typeof result === 'string' ? { label, reason: result } : { label, finding: result }
   })
-  return { ...capFindings(reviewed), focus, returned: raw.length }
+  return { ...capFindings(reviewed), focus, ...said, returned: raw.length }
 }
 
 const patternOf = (f: Finding): Pattern => ({

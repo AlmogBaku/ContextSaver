@@ -18,8 +18,11 @@ import { Band, Pane } from './ui'
 const STEER_USAGE = 'Usage: /saver steer [n] <instruction> (a leading number is the card the pane draws; without one: the card whose Steer field is open, else card 1)'
 const SAVER_USAGE = 'Usage: /saver [check | steer [n] <text> | keep <n> | kill <n> | debug | reset]'
 const NOTHING_TEXT = 'ContextSaver: nothing to decide on'
+const CHECKING_TEXT = 'ContextSaver: checking this session for waste…'
+const ALREADY_TEXT = 'ContextSaver: already checking'
 const ANSWER_HEAD = 100   // characters of the turn's answer kept as an evidence quote
 const CARD_KIND = 60      // characters of a card's behaviour quoted back in a command's reply
+const DEMO_CONTEXT = [120_000, 190_000, 250_000, 320_000]   // `/saver demo`: the window filling up to the sample's own 32%, so the trend draws
 
 /**
  * Registers ContextSaver: the ledger of every tool call, the judge that names wasteful
@@ -31,6 +34,9 @@ export function register(on: On): void {
   let state: State = initialState('', 0)
   let host: Host | null = null
   let isDebug = false
+  // `judge.start` lands one clock read after the decision to run, and a storm of tool calls decides
+  // inside that window: this flag is what stops a second fork of the same session.
+  let forking = false
 
   const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -90,15 +96,31 @@ export function register(on: On): void {
     }
   }
 
+  // A check the person asked for: they are waiting for the answer, so the pane opens at any width, every time.
+  const openForCheck = async (fresh: readonly string[]): Promise<void> => {
+    if (!fresh.some(id => state.cards.includes(id)) || state.paneOpen) return
+    try {
+      await openPane()
+    } catch {
+      // the surface or another plugin refused: the band still says what was found
+    }
+  }
+
+  const checkedText = (fresh: number): string =>
+    fresh === 0 ? 'ContextSaver: nothing new' : `ContextSaver: ${fresh} new waster${fresh === 1 ? '' : 's'}`
+
   // A run that reported nothing: a cold snapshot, a refusal, or a failure of ours.
   const judgedNothing = (error: string): Action => ({
     type: 'judge.done', patterns: state.patterns, fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error,
     returned: 0, kept: 0, dropped: [],
   })
 
-  async function runJudge(): Promise<void> {
-    const engine = host
-    if (engine === null || state.judge.running) return
+  // A run the person asked for answers them, whatever it found: silence is what a check must never be.
+  const failedToast = (requested: boolean, reason: string): void => {
+    if (requested) host?.toast(`ContextSaver: check failed — ${reason}`)
+  }
+
+  const judgeOnce = async (engine: Host, requested: boolean): Promise<void> => {
     const seq = state.seq
     const now = await engine.now()
     dispatch({ type: 'judge.start', now, seq })
@@ -111,17 +133,18 @@ export function register(on: On): void {
     }
     if (reply === null) {
       dispatch(judgedNothing(failed ?? 'cold snapshot'))
+      failedToast(requested, failed ?? 'cold snapshot')
       return
     }
     try {
-      const { findings, focus, dropped, returned } = parseReply(reply.text, state)
+      const { findings, focus, time, context, dropped, returned } = parseReply(reply.text, state)
       const merged = merge(state, findings)
       // A finding the registry cap evicted never becomes a card, so it is dropped, not kept.
       const reasons = [...dropped, ...merged.evicted.map(id => `${id}: evicted, over MAX_PATTERNS (${MAX_PATTERNS})`)]
       const kept = findings.length - merged.evicted.length
       dispatch({
         type: 'judge.done', patterns: merged.patterns, fresh: merged.fresh, recurred: merged.recurred, focus,
-        time: null, context: null, spent: costOf(reply.usage), error: null, returned, kept, dropped: reasons,
+        time, context, spent: costOf(reply.usage), error: null, returned, kept, dropped: reasons,
       })
       try {
         if (isDebug) {
@@ -132,17 +155,38 @@ export function register(on: On): void {
         // a log we could not write is not a failed run: the findings are already in the registry
       }
       persist()
-      await autoOpen(merged.fresh)
+      if (!requested) return autoOpen(merged.fresh)
+      engine.toast(checkedText(merged.fresh.length))
+      return openForCheck(merged.fresh)
     } catch (err) {
       // Whatever went wrong, the run is over: `running` may never stay true.
       dispatch(judgedNothing(messageOf(err)))
+      failedToast(requested, messageOf(err))
+    }
+  }
+
+  /**
+   * Judges the session once, if no run is already in flight.
+   *
+   * @param requested true when the person asked for this run (`Check now`, `/saver check`), which is
+   *   answered with a toast and opens the pane wherever it can be drawn; a cadence run stays quiet
+   *   and keeps the once-a-session, wide-terminal rule for opening itself.
+   */
+  async function runJudge(requested: boolean): Promise<void> {
+    const engine = host
+    if (engine === null || forking || state.judge.running) return
+    forking = true
+    try {
+      await judgeOnce(engine, requested)
+    } finally {
+      forking = false
     }
   }
 
   const checkNow = (): string => {
-    if (state.judge.running) return 'ContextSaver: already checking'
-    void runJudge().catch(() => undefined)
-    return 'ContextSaver: checking this session for waste…'
+    if (forking || state.judge.running) return ALREADY_TEXT
+    void runJudge(true).catch(() => undefined)
+    return CHECKING_TEXT
   }
 
   const togglePane = async (): Promise<void> => {
@@ -253,8 +297,9 @@ export function register(on: On): void {
     togglePane: () => {
       void togglePane()
     },
+    // The band and the pane have no reply to write in, so the press is answered with a toast.
     check: () => {
-      checkNow()
+      host?.toast(checkNow())
     },
     write: a => {
       void writeArtifact(a)
@@ -344,10 +389,12 @@ export function register(on: On): void {
     // `next(e)` is called exactly once: a rejection is the engine's to report — calling it again would run the tool twice.
     const result = await next(e)
     try {
-      const ms = (await engine.now()) - started
-      dispatch({ type: 'row', row: rowOf(e, result, ms, state.turn) })
+      const ended = await engine.now()
+      dispatch({ type: 'row', row: rowOf(e, result, ended - started, state.turn) })
       const row = state.rows[state.rows.length - 1]
       if (isDebug && row !== undefined) engine.log(`ContextSaver row r${row.seq} ${row.tool} ${row.key} ${row.ms}ms ${row.chars}ch`)
+      // One agentic turn can run for hours, so the cadence is judged here too, not only between turns.
+      if (shouldRun(state, ended)) void runJudge(false).catch(() => undefined)
       const pending = state.notes
       if (pending.length === 0 || result.deny !== undefined) return result
       dispatch({ type: 'notes.drained' })
@@ -362,6 +409,10 @@ export function register(on: On): void {
       const engine = host
       if (engine === null || e.agentId !== undefined) return next(e)
       const u = e.usage
+      // The window is sampled before the turn is recorded: how full it is after this turn is the turn's
+      // own figure, and its growth over the last turns is the pace compaction actually runs at.
+      const seen = await engine.usage()
+      const now = await engine.now()
       dispatch({
         type: 'turn.complete',
         stat: {
@@ -373,13 +424,11 @@ export function register(on: On): void {
           answerChars: e.answer.length,
           answerHead: e.answer.slice(0, ANSWER_HEAD),
           aborted: e.isAborted,
-          context: null,
+          context: seen.context.tokens ?? null,
         },
       })
-      const seen = await engine.usage()
-      const now = await engine.now()
       dispatch({ type: 'usage', usage: { window: seen.context.window, tokens: seen.context.tokens, percent: seen.context.percent }, now })
-      if (shouldRun(state)) void runJudge().catch(() => undefined)
+      if (shouldRun(state, now)) void runJudge(false).catch(() => undefined)
       return next(e)
     } catch {
       return next(e)
@@ -479,7 +528,13 @@ export function register(on: On): void {
         // look, so a usage sample and its turns come first — without them the hero row draws its empty
         // state above cards that state a percentage of context. (`now` is the reducer's to ignore.)
         dispatch({ type: 'usage', usage: demoUsage(), now: 0 })
-        for (const stat of demoTurns()) dispatch({ type: 'turn.complete', stat })
+        // Four turns, each with the context it left behind, so the header's trend and its run to
+        // compaction draw from a window filling up rather than from what a turn was billed.
+        const samples = demoTurns()
+        for (const [at, context] of DEMO_CONTEXT.entries()) {
+          const stat = samples[at % samples.length]
+          if (stat !== undefined) dispatch({ type: 'turn.complete', stat: { ...stat, context } })
+        }
         for (const row of demoRows(state.turn)) dispatch({ type: 'row', row })
         const patterns = demoPatterns(state.turn)
         const fresh = patterns.filter(p => p.decision === null).map(p => p.id)
