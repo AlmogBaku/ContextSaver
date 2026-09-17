@@ -1,15 +1,13 @@
 import { baseline, costOf, rowsOf } from './evidence'
 import { duration, instructionOf, killPrompt, median, pctOf } from './text'
-import { ALTERNATIVE_MAX, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, ROW_CAP, SETTLE_TURNS, initialState } from './types'
+import {
+  ALTERNATIVE_MAX, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX,
+  MAX_PATTERNS, ROW_CAP, SAMPLE_CAP, SETTLE_TURNS, initialState,
+} from './types'
 import type {
   Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Header, PaneModel,
   Pattern, Proposal, Row, Signature, State, StoredPattern, TurnStat,
 } from './types'
-
-// §9.12 wants constants in types.ts; these three stay local because types.ts is frozen for this package.
-const SAMPLE_CAP = 30          // usage samples kept (State.usageSamples: "last 30")
-const DEBUG_MAX_LINES = 40     // debugDump ceiling (section 5.2)
-const DEBUG_MAX_PATTERNS = 20  // pattern lines before the "more" line
 
 type Decided = Pattern & { decision: Choice }
 type Settle = { pattern: Pattern; ms: number; chars: number; requeue: string | null }
@@ -72,6 +70,8 @@ const settleWithRow = (state: State, p: Pattern, row: Omit<Row, 'seq'>): Settle 
   const grown: Pattern = signatureHit(p, row) ? { ...p, hits: pushUnique(p.hits, row.id) } : p
   const still = { pattern: grown, ms: 0, chars: 0, requeue: null }
   if (row.agent !== 'main' || p.openedAtTurn === null || !isSent(p.decision)) return still
+  // A row in the decision's own turn was already in flight before Claude could read the instruction.
+  if (row.turn <= p.openedAtTurn) return still
   // D4: every ignored instruction brings the card back, so the user can Keep or say something else.
   if (p.signature !== null && row.key === p.signature.key) {
     return { pattern: { ...grown, ignored: p.ignored + 1, openedAtTurn: null }, ms: 0, chars: 0, requeue: p.id }
@@ -223,7 +223,11 @@ export const reduce = (state: State, action: Action): State => {
     case 'standing.add':
       return { ...state, standing: pushUnique(state.standing, action.text) }
     case 'artifact.done':
-      return { ...state, patterns: state.patterns.map(p => (p.id === action.patternId ? { ...p, proposal: null } : p)) }
+      return {
+        ...state,
+        patterns: state.patterns.map(p => (p.id === action.patternId ? { ...p, proposal: null } : p)),
+        written: action.written ? pushUnique(state.written, `${action.patternId}:${action.kind}`) : [...state.written],
+      }
     case 'pane':
       return { ...state, paneOpen: action.open, autoOpened: action.auto === true ? true : state.autoOpened }
     case 'columns':
@@ -402,11 +406,23 @@ export const fromStored = (s: StoredPattern): Pattern => ({
   ...s, hits: [], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0,
 })
 
-/** Merges two stored registries by id; entries from `b` win. */
+// What a stored entry is worth when the registry overflows: a decision outranks any confidence.
+const rankOf = (p: StoredPattern): number => (p.lastDecision === null ? p.confidence : 2 + p.confidence)
+
+const capStored = (entries: readonly StoredPattern[]): StoredPattern[] => {
+  if (entries.length <= MAX_PATTERNS) return [...entries]
+  return [...entries.entries()]
+    .sort(([atA, a], [atB, b]) => rankOf(b) - rankOf(a) || atA - atB)
+    .slice(0, MAX_PATTERNS)
+    .sort(([atA], [atB]) => atA - atB)
+    .map(([, p]) => p)
+}
+
+/** Merges two stored registries by id (`b` wins), dropping the weakest undecided entries past the cap. */
 export const mergeStored = (a: readonly StoredPattern[], b: readonly StoredPattern[]): StoredPattern[] => {
   const byId = new Map<string, StoredPattern>(a.map(p => [p.id, p]))
   for (const p of b) byId.set(p.id, p)
-  return [...byId.values()]
+  return capStored([...byId.values()])
 }
 
 const classCounts = (rows: readonly Row[]): string => {
@@ -437,7 +453,7 @@ export const debugDump = (state: State): string => {
     `patterns ${state.patterns.length}`,
     ...patternLines(state),
     `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
-    `notes ${state.notes.length} · standing ${state.standing.length}`,
+    `notes ${state.notes.length} · standing ${state.standing.length} · written ${state.written.length}${state.written.length === 0 ? '' : `: ${state.written.join(', ')}`}`,
     `judge runs ${j.runs} · spent ${j.spent} · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,

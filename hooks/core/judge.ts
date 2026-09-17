@@ -1,6 +1,7 @@
 import type { ModelForkUsage } from 'claude-code'
 
 import { decisionsBlock, knownPatternsBlock, ledgerBlock, statsLines, turnsBlock } from './blocks'
+import { totalTokens } from './patterns'
 import { collapseWs, median } from './text'
 import {
   ALTERNATIVE_MAX, JUDGE_LEDGER_ROWS, JUDGE_MIN_NEW_TOKENS, JUDGE_MIN_ROWS, JUDGE_MIN_TURNS, KIND_MAX,
@@ -105,15 +106,10 @@ KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` 
 Return the JSON object only.
 `
 
-// patterns.ts owns this formula as totalTokens(state) (spec 5.2); at integration replace this copy with
-// `import { totalTokens } from './patterns'` (no cycle: patterns.ts does not import judge.ts).
-const newTokens = (state: State): number =>
-  state.turns.reduce((n, t) => n + t.input + t.output + t.cacheCreate, 0)
-
 /** True when the cadence gates allow another judge run. */
 export const shouldRun = (state: State): boolean =>
   !state.judge.running &&
-  newTokens(state) - state.judge.lastAtTokens >= JUDGE_MIN_NEW_TOKENS * state.judge.backoff &&
+  totalTokens(state) - state.judge.lastAtTokens >= JUDGE_MIN_NEW_TOKENS * state.judge.backoff &&
   state.turn - state.judge.lastAtTurn >= JUDGE_MIN_TURNS &&
   state.rows.length >= JUDGE_MIN_ROWS
 

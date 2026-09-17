@@ -9,6 +9,8 @@ export type ToolEvent = { tool: string; tool_use_id: string; agentId?: string } 
 
 const RESERVED = ['tool', 'tool_use_id', 'agentId', 'consent'] as const
 
+const HEAD_MAX = 80   // characters of result.text quoted as evidence (Row.head)
+
 // A leading `cd <dir> &&` or `VAR=value` is noise in front of the command that matters.
 const NOISE = /^(?:cd\s+[^\s&|;]+\s*&&\s*|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)/
 
@@ -40,6 +42,9 @@ const asString = (v: unknown): string | null => (typeof v === 'string' ? v : nul
 
 const asNumber = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
+const pathArg = (args: Record<string, unknown>): string =>
+  asString(args.file_path) ?? asString(args.notebook_path) ?? ''
+
 const stripNoise = (command: string): string => {
   let rest = command
   while (NOISE.test(rest)) rest = rest.replace(NOISE, '')
@@ -68,18 +73,18 @@ export const normalize = (tool: string, input: unknown): { key: string; cls: Com
   if (tool === 'Bash') {
     const command = collapseWs(asString(args.command) ?? '')
     const cls = classOf(command)
-    return { key: `${cls}:${command.slice(0, KEY_MAX)}`, cls }
+    return { key: `${cls}:${command}`.slice(0, KEY_MAX), cls }
   }
   if (tool === 'Read' || tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') {
-    const path = asString(args.file_path) ?? asString(args.notebook_path) ?? ''
+    const path = pathArg(args)
     const range = tool === 'Read' ? `:${asNumber(args.offset) ?? ''}-${asNumber(args.limit) ?? ''}` : ''
-    return { key: `${path}${range}`, cls: tool === 'Read' ? 'read' : 'other' }
+    return { key: `${path}${range}`.slice(0, KEY_MAX), cls: tool === 'Read' ? 'read' : 'other' }
   }
   if (tool === 'Grep' || tool === 'Glob') {
-    return { key: `${tool}:${asString(args.pattern) ?? ''}:${asString(args.path) ?? ''}`, cls: 'search' }
+    return { key: `${tool}:${asString(args.pattern) ?? ''}:${asString(args.path) ?? ''}`.slice(0, KEY_MAX), cls: 'search' }
   }
-  if (tool === 'Agent') return { key: `agent:${asString(args.subagent_type) ?? 'general'}`, cls: 'other' }
-  return { key: `${tool}:${stableJson(input, RESERVED).slice(0, KEY_MAX)}`, cls: 'other' }
+  if (tool === 'Agent') return { key: `agent:${asString(args.subagent_type) ?? 'general'}`.slice(0, KEY_MAX), cls: 'other' }
+  return { key: `${tool}:${stableJson(input, RESERVED)}`.slice(0, KEY_MAX), cls: 'other' }
 }
 
 const printable = (ch: string): boolean => {
@@ -87,17 +92,28 @@ const printable = (ch: string): boolean => {
   return code >= 0x20 && code !== 0x7f
 }
 
-const headOf = (text: string | undefined): string =>
-  [...(text ?? '')].map(ch => (ch === '\t' || ch === '\n' ? ' ' : ch)).filter(printable).join('').slice(0, 80)
+// Code point by code point, stopping before the one that would not fit whole: never half a surrogate pair.
+const headOf = (text: string | undefined): string => {
+  let head = ''
+  for (const ch of text ?? '') {
+    const kept = ch === '\t' || ch === '\n' ? ' ' : ch
+    if (!printable(kept)) continue
+    if (head.length + kept.length > HEAD_MAX) break
+    head += kept
+  }
+  return head
+}
 
 const flagsOf = (e: ToolEvent, result: ToolCallResult, res: Record<string, unknown>): string[] => {
   const persisted = e.tool === 'Bash' ? asNumber(res.persistedOutputSize) : null
+  // `bg` describes a call that ran: a denied or errored Bash started no background task.
+  const isBackground = answered(result) && (e.run_in_background === true || asString(res.backgroundTaskId) !== null)
   return [
     result.isError === true ? 'err' : '',
     result.deny !== undefined ? 'denied' : '',
     e.tool === 'Read' && res.type === 'file_unchanged' ? 'dedup' : '',
     e.tool === 'Read' && asRecord(res.file).truncatedByTokenCap === true ? 'trunc' : '',
-    e.tool === 'Bash' && (e.run_in_background === true || asString(res.backgroundTaskId) !== null) ? 'bg' : '',
+    e.tool === 'Bash' && isBackground ? 'bg' : '',
     e.tool === 'Bash' && asNumber(res.timedOutAfterMs) !== null ? 'timeout' : '',
     persisted !== null ? `persist=${persisted}` : '',
   ].filter(flag => flag !== '')
@@ -128,8 +144,8 @@ const linesOf = (e: ToolEvent, res: Record<string, unknown>): { add: number; del
 }
 
 const pathsOf = (e: ToolEvent, res: Record<string, unknown>): string[] => {
-  if (e.tool === 'Edit' || e.tool === 'Write') {
-    const path = asString(res.filePath) ?? asString(e.file_path)
+  if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit') {
+    const path = asString(res.filePath) ?? (pathArg(e) || null)
     return path !== null && res.staged !== true ? [path] : []
   }
   if (e.tool === 'Bash') {

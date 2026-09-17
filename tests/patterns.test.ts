@@ -5,7 +5,7 @@ import {
   tokensToCompaction, toStored, totalTokens, turnsToCompaction,
 } from '../hooks/core/patterns'
 import { instructionOf, killPrompt } from '../hooks/core/text'
-import { JUDGE_MAX_BACKOFF, ROW_CAP, SETTLE_TURNS } from '../hooks/core/types'
+import { JUDGE_MAX_BACKOFF, MAX_PATTERNS, ROW_CAP, SETTLE_TURNS } from '../hooks/core/types'
 import type { Action, Pattern, Row } from '../hooks/core/types'
 import { chattyPattern } from './fixtures/patterns/chattyPattern'
 import { claudeMdArtifact } from './fixtures/patterns/claudeMdArtifact'
@@ -108,6 +108,18 @@ describe('patterns', () => {
     const inAgent = reduce(state, { type: 'row', row: testRow({ id: 'r-5', turn: 7, agent: 'agent-1' }) })
     expect(inAgent.patterns[0]).toMatchObject({ ignored: 0, openedAtTurn: 5 })
     expect(inAgent.cards).toEqual([])
+  })
+
+  test('a row from the decision\'s own turn settles nothing: it was already in flight', async () => {
+    const rows = [withSeq({ id: 'r-1', turn: 4, ms: 60_000, chars: 9_000 }, 1), withSeq({ id: 'r-2', turn: 5, ms: 60_000, chars: 9_000 }, 2)]
+    const state = seedState({ turn: 5, rows, patterns: [steered()] })
+    const same = reduce(state, { type: 'row', row: testRow({ id: 'r-3', turn: 5 }) })
+    expect(same.patterns[0]).toMatchObject({ ignored: 0, openedAtTurn: 5 })
+    expect(same.patterns[0]?.hits).toEqual(['r-1', 'r-2', 'r-3'])
+    expect(same.cards).toEqual([])
+    const narrowerSameTurn = reduce(state, { type: 'row', row: testRow({ id: 'r-4', turn: 5, key: 'test:bun test tests/auth.test.ts', ms: 4_000, chars: 900 }) })
+    expect(narrowerSameTurn.saved).toEqual({ ms: 0, chars: 0 })
+    expect(narrowerSameTurn.patterns[0]?.openedAtTurn).toBe(5)
   })
 
   test('every ignored instruction brings the card back, by row and by judge', async () => {
@@ -240,7 +252,13 @@ describe('patterns', () => {
     expect(reduce(base, { type: 'notes.drained' }).notes).toEqual([])
     expect(reduce(base, { type: 'standing.add', text: 'a standing text' }).standing).toEqual(['a standing text'])
     expect(reduce(base, { type: 'standing.add', text: 'another' }).standing).toEqual(['a standing text', 'another'])
-    expect(reduce(base, { type: 'artifact.done', patternId: suitePattern.id }).patterns[0]?.proposal).toBeNull()
+    const wrote = reduce(base, { type: 'artifact.done', patternId: suitePattern.id, kind: 'claude-md', written: true })
+    expect(wrote.patterns[0]?.proposal).toBeNull()
+    expect(wrote.written).toEqual([`${suitePattern.id}:claude-md`])
+    expect(reduce(wrote, { type: 'artifact.done', patternId: suitePattern.id, kind: 'claude-md', written: true }).written).toEqual([`${suitePattern.id}:claude-md`])
+    const skipped = reduce(base, { type: 'artifact.done', patternId: suitePattern.id, kind: 'claude-md', written: false })
+    expect(skipped.patterns[0]?.proposal).toBeNull()
+    expect(skipped.written).toEqual([])
     const auto = reduce(base, { type: 'pane', open: true, auto: true })
     expect([auto.paneOpen, auto.autoOpened]).toEqual([true, true])
     const closed = reduce(auto, { type: 'pane', open: false })
@@ -254,13 +272,13 @@ describe('patterns', () => {
       usage: { window: 200_000, tokens: 90_000, percent: 45, compactAt: 180_000 },
       usageSamples: [{ turn: 1, percent: 45 }], overhead: { memory: 1, mcp: 2, agents: 3 }, compactions: [4],
       patterns: [{ ...suitePattern, hits: ['r-1'], decision: 'steer', decidedAtTurn: 5, lastDecision: 'steer', instruction: 'x', openedAtTurn: 5, ignored: 2 }],
-      cards: [suitePattern.id], notes: ['n'], standing: ['s'], paneOpen: true, columns: 150,
+      cards: [suitePattern.id], notes: ['n'], standing: ['s'], written: [`${suitePattern.id}:claude-md`], paneOpen: true, columns: 150,
       saved: { ms: 10, chars: 20 },
       judge: { lastAtTokens: 1, lastAtTurn: 2, running: true, runs: 3, spent: 4, backoff: 2, error: 'x', focus: 'f' },
     })
     const clean = reduce(state, { type: 'reset' })
     expect(clean).toMatchObject({
-      turn: 0, seq: 0, rows: [], turns: [], usageSamples: [], compactions: [], cards: [], notes: [], standing: [],
+      turn: 0, seq: 0, rows: [], turns: [], usageSamples: [], compactions: [], cards: [], notes: [], standing: [], written: [],
       expanded: null, steering: null, steerDraft: null, autoOpened: false,
     })
     expect(clean.usage).toEqual({ window: 200_000 })
@@ -297,6 +315,22 @@ describe('patterns', () => {
     )
     expect(merged.map(p => p.id)).toEqual(['execution:full-suite-after-each-edit', 'communication:restates-plan-each-turn', 'reading:unfiltered-log-dump'])
     expect(merged[0]?.lastDecision).toBe('keep')
+  })
+
+  test('mergeStored caps the registry, dropping the least confident undecided entries first', async () => {
+    const many = Array.from({ length: MAX_PATTERNS + 5 }, (_, at) => ({
+      ...toStored(suitePattern),
+      id: `execution:pattern-${at}`,
+      confidence: at < 5 ? 0.5 : 0.9,
+      lastDecision: at === 0 ? ('kill' as const) : null,
+    }))
+    const capped = mergeStored(many, [])
+    expect(capped).toHaveLength(MAX_PATTERNS)
+    expect(capped.map(p => p.id)).toContain('execution:pattern-0')       // decided, however thin its confidence
+    expect(capped.map(p => p.id)).not.toContain('execution:pattern-1')   // undecided and least confident
+    expect(capped.map(p => p.id)).toContain('execution:pattern-9')
+    const at = (id: string): number => Number(id.replace('execution:pattern-', ''))
+    expect(capped.map(p => at(p.id))).toEqual([...capped.map(p => at(p.id))].sort((a, b) => a - b))
   })
 
   test('cardOf states the stats, the fix, the kill text and the newest evidence first', async () => {

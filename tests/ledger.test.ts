@@ -13,9 +13,11 @@ import { bashPersisted } from './fixtures/ledger/bashPersisted'
 import { bashTimedOut } from './fixtures/ledger/bashTimedOut'
 import { editGitDiff } from './fixtures/ledger/editGitDiff'
 import { editStaged } from './fixtures/ledger/editStaged'
+import { notebookEdited } from './fixtures/ledger/notebookEdited'
 import { readTruncated } from './fixtures/ledger/readTruncated'
 import { readUnchanged } from './fixtures/ledger/readUnchanged'
 import { writeCreated } from './fixtures/ledger/writeCreated'
+import { writeErrored } from './fixtures/ledger/writeErrored'
 
 describe('ledger', () => {
   test('classOf reads the table through cd, env and runner prefixes', () => {
@@ -57,7 +59,12 @@ describe('ledger', () => {
     expect(normalize('Glob', { pattern: '**/*.ts' })).toEqual({ key: 'Glob:**/*.ts:', cls: 'search' })
     expect(normalize('Agent', { subagent_type: 'test-runner' })).toEqual({ key: 'agent:test-runner', cls: 'other' })
     expect(normalize('Agent', {})).toEqual({ key: 'agent:general', cls: 'other' })
-    expect(normalize('Bash', { command: 'echo ' + 'x'.repeat(300) }).key.length).toBe('other:'.length + KEY_MAX)
+    expect(normalize('Bash', { command: 'echo ' + 'x'.repeat(300) }).key.length).toBe(KEY_MAX)
+    expect(normalize('Read', { file_path: `/w/${'d/'.repeat(200)}a.ts` }).key.length).toBe(KEY_MAX)
+    expect(normalize('Edit', { file_path: `/w/${'d/'.repeat(200)}a.ts` }).key.length).toBe(KEY_MAX)
+    expect(normalize('Grep', { pattern: 'x'.repeat(300) }).key.length).toBe(KEY_MAX)
+    expect(normalize('Agent', { subagent_type: 'x'.repeat(300) }).key.length).toBe(KEY_MAX)
+    expect(normalize('Frobnicate', { spec: 'x'.repeat(300) }).key.length).toBe(KEY_MAX)
   })
 
   test('normalize keys the flat tool.call envelope and the bare arguments alike', () => {
@@ -134,6 +141,9 @@ describe('ledger', () => {
     expect(persisted.head.length).toBe(80)
 
     expect(rowOf(bashBackground.e, bashBackground.result, 20, 7).flags).toEqual(['bg'])
+    // A background flag describes a task that started: a refused or failed call started none.
+    expect(rowOf(bashBackground.e, { deny: 'The user said no' }, 20, 7).flags).toEqual(['denied'])
+    expect(rowOf(bashBackground.e, { isError: true, result: 'no', text: 'error' }, 20, 7).flags).toEqual(['err'])
 
     const timedOut = rowOf(bashTimedOut.e, bashTimedOut.result, 120000, 8)
     expect(timedOut.flags).toEqual(['bg', 'timeout'])
@@ -157,6 +167,26 @@ describe('ledger', () => {
     expect(written.lines).toEqual({ add: 3, del: 0 })
     expect(written.paths).toEqual(['/w/hooks/core/ledger.ts'])
     expect(written.cls).toBe('other')
+
+    const failed = rowOf(writeErrored.e, writeErrored.result, 12, 10)
+    expect(failed.flags).toEqual(['err'])
+    expect(failed.lines).toBe(null)
+    expect(failed.paths).toEqual([])
+  })
+
+  test('rowOf takes a NotebookEdit path from the event and keeps a head whole', () => {
+    const notebook = rowOf(notebookEdited.e, notebookEdited.result, 25, 10)
+    expect(notebook.key).toBe('/w/notebooks/analysis.ipynb')
+    expect(notebook.paths).toEqual(['/w/notebooks/analysis.ipynb'])
+    expect(notebook.lines).toBe(null)
+
+    // The head is cut by code point: the 40th astral character would not fit whole, so it is left out.
+    const astral = rowOf({ tool: 'Bash', tool_use_id: 'call_14', command: 'echo' }, { result: {}, text: '🙂'.repeat(50) }, 1, 1)
+    expect(astral.head).toBe('🙂'.repeat(40))
+    expect([...astral.head]).toHaveLength(40)
+
+    const controls = rowOf({ tool: 'Bash', tool_use_id: 'call_15', command: 'echo' }, { result: {}, text: 'a\u0007b\tc\nd' }, 1, 1)
+    expect(controls.head).toBe('ab c d')
   })
 
   test('rowOf records spawn fields for a completed and an async agent', () => {

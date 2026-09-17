@@ -1,10 +1,7 @@
 import { baseline } from './evidence'
 import { collapseWs, pctOf, slug } from './text'
+import { BRIEF_TOOLS, CLAUDE_MD_HEADING } from './types'
 import type { Artifact, ArtifactKind, Pattern, Proposal, State } from './types'
-
-// Escalated to Fable: section 9.12 wants both of these in types.ts, which is frozen for WP5.
-const HEADING = '## ContextSaver'
-const BRIEF_TOOLS = 'Read, Grep, Glob'
 
 /** Renders one single-line CLAUDE.md bullet; the shell appends only this when the heading already exists. */
 export const bulletOf = (body: string): string => `- ${collapseWs(body).replace(/^[-*] /, '')}\n`
@@ -12,12 +9,21 @@ export const bulletOf = (body: string): string => `- ${collapseWs(body).replace(
 /** Returns the bullet alone from a claude-md artifact's content, for appending under an existing heading. */
 export const bulletOnly = (content: string): string => content.slice(Math.max(0, content.indexOf('\n- ') + 1))
 
+/** Appends an artifact's content to a file's text: the bullet alone under an existing heading, never glued to a line. */
+export const appendedTo = (existing: string | null, content: string): string => {
+  const base = existing ?? ''
+  const glue = base === '' || base.endsWith('\n') ? '' : '\n'
+  if (base.includes(CLAUDE_MD_HEADING)) return base + glue + bulletOnly(content)
+  // A brand-new file opens on the heading itself; an existing one keeps the blank line before it.
+  return base + glue + (base === '' ? content.replace(/^\n+/, '') : content)
+}
+
 /** Renders the file an artifact kind writes: where it goes, what it says, how it lands. */
 export const render = (kind: ArtifactKind, p: Proposal, cwd: string): Pick<Artifact, 'path' | 'content' | 'mode'> => {
   if (kind === 'skill') return { path: `${cwd}/.claude/skills/${slug(p.title)}/SKILL.md`, content: skillDoc(p), mode: 'write' }
   if (kind === 'agent-brief') return { path: `${cwd}/.claude/agents/${slug(p.title)}.md`, content: briefDoc(p), mode: 'write' }
   if (kind === 'settings-allow') return { path: `${cwd}/.claude/settings.json`, content: p.body, mode: 'merge-settings' }
-  return { path: `${cwd}/CLAUDE.md`, content: `\n${HEADING}\n${bulletOf(p.body)}`, mode: 'append' }
+  return { path: `${cwd}/CLAUDE.md`, content: `\n${CLAUDE_MD_HEADING}\n${bulletOf(p.body)}`, mode: 'append' }
 }
 
 /** Returns the artifacts that make this session's decisions permanent, largest saving first. */
@@ -35,7 +41,8 @@ export const mergeSettings = (existing: string | null, rule: string): string => 
 
 const artifactsOf = (state: State, p: Pattern): Artifact[] => {
   const proposal = proposalOf(p)
-  if (proposal === null) return []
+  // An artifact written, tried or skipped this session is done: the pane never offers it twice.
+  if (proposal === null || state.written.includes(`${p.id}:${proposal.kind}`)) return []
   return [{
     patternId: p.id,
     kind: proposal.kind,

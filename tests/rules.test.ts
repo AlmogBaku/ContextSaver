@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bulletOf, bulletOnly, mergeSettings, propose, render } from '../hooks/core/rules'
+import { appendedTo, bulletOf, bulletOnly, mergeSettings, propose, render } from '../hooks/core/rules'
 import { killPrompt } from '../hooks/core/text'
 import { rulePattern } from './fixtures/rules/pattern'
 import { ruleProposals } from './fixtures/rules/proposals'
@@ -29,6 +29,17 @@ describe('rules', () => {
     const content = render('claude-md', ruleProposals['claude-md'], '/repo').content
     expect(bulletOnly(content)).toBe(bulletOf(ruleProposals['claude-md'].body))
     expect(bulletOnly('no bullet here')).toBe('no bullet here')
+  })
+
+  test('appendedTo lands the bullet on its own line whatever the file ends with', async () => {
+    const content = render('claude-md', ruleProposals['claude-md'], '/repo').content
+    const bullet = bulletOf(ruleProposals['claude-md'].body)
+    expect(appendedTo('# Project\n\n## ContextSaver\n- an older rule\n', content)).toBe(`# Project\n\n## ContextSaver\n- an older rule\n${bullet}`)
+    expect(appendedTo('# Project\n\n## ContextSaver\n- an older rule', content), 'a file with no trailing newline is not glued to')
+      .toBe(`# Project\n\n## ContextSaver\n- an older rule\n${bullet}`)
+    expect(appendedTo('# Project', content), 'a heading of its own opens on a blank line').toBe(`# Project\n\n## ContextSaver\n${bullet}`)
+    expect(appendedTo(null, content), 'a brand-new file starts at the heading').toBe(`## ContextSaver\n${bullet}`)
+    expect(appendedTo('', content)).toBe(`## ContextSaver\n${bullet}`)
   })
 
   test('skill writes a slugged SKILL.md with name and description frontmatter', async () => {
@@ -104,6 +115,14 @@ describe('rules', () => {
       ['execution:full-suite-after-each-edit', 3],
       ['behavior:plan-resummary', 0],
     ])
+  })
+
+  test('propose omits an artifact this session already wrote or tried', async () => {
+    const steered = rulePattern({ decision: 'steer', decidedAtTurn: 8, instruction: 'Run the full cycle only at the end of each phase.' })
+    const state = ruleState([steered])
+    expect(propose(state)).toHaveLength(1)
+    expect(propose({ ...state, written: [`${steered.id}:claude-md`] })).toEqual([])
+    expect(propose({ ...state, written: [`${steered.id}:skill`] })).toHaveLength(1)   // another kind is still on offer
   })
 
   test('propose prefers the judge proposal of a decided pattern', async () => {
