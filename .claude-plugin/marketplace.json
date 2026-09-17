@@ -1,6 +1,6 @@
 {
   "name": "contextsaver",
   "description": "ContextSaver: watches Claude Code sessions for wasted context and time, shows one-click cards when waste repeats, and lets the user steer or stop behaviours.",
-  "owner": { "name": "Anakin" },
+  "owner": { "name": "Almog Baku" },
   "plugins": [{ "name": "contextsaver", "source": "./" }]
 }
