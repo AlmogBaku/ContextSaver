@@ -9,6 +9,11 @@ export const awaitingPane: PaneModel = {
     percent: null,
     tokensToCompaction: null,
     turnsToCompaction: null,
+    trend: [],
+    time: null,
+    context: null,
+    judgeTime: null,
+    judgeContext: null,
     judgeRuns: 1,
   },
 }

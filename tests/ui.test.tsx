@@ -3,9 +3,12 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import { Band, Pane } from '../hooks/ui'
+import { logoCells } from '../hooks/core/logo'
 import { gauge } from '../hooks/core/text'
+import { sparkline } from '../hooks/core/trend'
 import type { Actions, PaneModel, Site, Ui } from '../hooks/core/types'
 import { awaitingPane } from './fixtures/ui/awaiting-pane'
+import { bandChecking } from './fixtures/ui/band-checking'
 import { bandFull } from './fixtures/ui/band-full'
 import { bandQuiet } from './fixtures/ui/band-quiet'
 import { chattyPane } from './fixtures/ui/chatty-pane'
@@ -14,6 +17,8 @@ import { decidedPane } from './fixtures/ui/decided-pane'
 import { draftPane } from './fixtures/ui/draft-pane'
 import { emptyPane } from './fixtures/ui/empty-pane'
 import { expandedPane } from './fixtures/ui/expanded-pane'
+import { fillingPane } from './fixtures/ui/filling-pane'
+import { fullPane } from './fixtures/ui/full-pane'
 import { manyWasters } from './fixtures/ui/many-wasters'
 import { millionPane } from './fixtures/ui/million-pane'
 import { overrunPane } from './fixtures/ui/overrun-pane'
@@ -25,10 +30,12 @@ const BAND_SITE: Site = { bodyColumns: 100, maxRows: 8 }
 const PANE_SITE: Site = { bodyColumns: 60, maxRows: 30 }
 const WIDE_SITE: Site = { bodyColumns: 100, maxRows: 30 }
 const FIRST = 'execution:full-suite'
-const ACCENT = 'suggestion'           // the theme key ui.tsx draws its one accent in
+const TONES = { accent: 'suggestion', good: 'success', warm: 'warning', hot: 'error' } as const
 const BAND_RESERVE = 4                // cells ui.tsx leaves the engine's own collapse control '[-]'
-const DOCK_GAUGE = 16                 // the gauge's cells at every width the header holds them
-const PINCHED_GAUGE = 12              // and what is left of it once the body is 26 columns
+const WIDE_GAUGE = 30                 // the gauge's cells wherever the header can spare them
+const DOCK_GAUGE = 29                 // and what is left of it beside the mark at 60 body columns
+const PINCHED_GAUGE = 18              // and once the body is 26 columns and the trend has gone
+const TREND = sparkline(twoWasters.header.trend, 10)
 const FIX = 'run only the tests covering the files you changed; run the full suite once when the phase is done'
 
 // The trees are hosted on `CommandOutput`, the one render component the plugin never hooks: the
@@ -105,6 +112,7 @@ const cellsOf = (value: unknown): number => {
   if (typeof value !== 'object' || value === null) return 0
   const node = value as Node
   if (node.type === 'Button') return textOf(node).length
+  if (node.type === 'Raster') return Number(node.props?.columns ?? 0)
   if (node.type === 'Input') return 0                       // the field takes what the row has left
   const props = node.props ?? {}
   const number = (name: string): number => (typeof props[name] === 'number' ? Number(props[name]) : 0)
@@ -130,7 +138,35 @@ const controlCells = (value: unknown): number =>
 const claimOf = (kid: unknown): number => {
   if (typeof kid !== 'object' || kid === null) return 0
   const node = kid as Node
+  if (node.type === 'Raster') return cellsOf(node)          // a fixed grid of cells claims every one of them
   return typeof node.props?.width === 'number' ? cellsOf(node) : controlCells(node)
+}
+
+// Where every drawn row ends on the real surface: its own cells, plus the padding, the borders and the
+// siblings before it that each ancestor already spent. A row past `bodyColumns` pokes through the frame
+// the pane draws — which is what a wrapped card title did at 160 columns. A row seated at its parent's
+// right edge is measured from the left, so this under-reports rather than inventing an overflow;
+// `overrun` is what holds those rows to their width.
+const rowEnds = (value: unknown, indent: number): number[] => {
+  if (typeof value === 'string') return value === '' ? [] : [indent + value.length]
+  if (Array.isArray(value)) return value.flatMap(kid => rowEnds(kid, indent))
+  if (typeof value !== 'object' || value === null) return []
+  const node = value as Node
+  const props = node.props ?? {}
+  const number = (name: string): number => (typeof props[name] === 'number' ? Number(props[name]) : 0)
+  const edge = number('paddingX') + (typeof props.borderStyle === 'string' ? 1 : 0)
+  const left = indent + edge + number('paddingLeft')
+  const right = edge + number('paddingRight')
+  if (node.type !== 'Box') return [left + cellsOf(node) + right]
+  const kids = kidsOf(node)
+  if (props.flexDirection === 'column') return kids.flatMap(kid => rowEnds(kid, left)).map(end => end + right)
+  return kids.reduce<{ at: number; ends: number[] }>(
+    (acc, kid) => ({
+      at: acc.at + cellsOf(kid) + number('gap'),
+      ends: [...acc.ends, ...rowEnds(kid, acc.at).map(end => end + right)],
+    }),
+    { at: left, ends: [] },
+  ).ends
 }
 
 // Every row that seats a control at its right edge sizes itself: the row's own width against what its
@@ -153,6 +189,7 @@ const rowsOf = (value: unknown): number => {
   if (typeof value !== 'object' || value === null) return 0
   const node = value as Node
   if (node.type === 'Text' || node.type === 'Button' || node.type === 'Input') return 1
+  if (node.type === 'Raster') return Number(node.props?.rows ?? 0)
   const props = node.props ?? {}
   if (typeof props.height === 'number') return Number(props.height)
   const kids = kidsOf(node)
@@ -218,6 +255,18 @@ describe('ui', () => {
     expect(holds(tree, '·')).toEqual(false)
   })
 
+  test('the band says a judge run is in flight, with the pane closed', async ($, on) => {
+    const { actions } = recorder()
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
+      Band({ ui: $.ui.resolve(e), model: bandChecking, site: BAND_SITE, actions }))
+
+    const tree = await $.ui.render(BAND_HOST)
+
+    expect(holds(tree, 'saved ~3% · checking…')).toEqual(true)
+    expect(cellsOf(tree)).toEqual(BAND_SITE.bodyColumns - BAND_RESERVE)
+    expect(overrun(tree)).toEqual([])
+  })
+
   test('the empty pane is one quiet frame, and Check now stays in the header', async ($, on) => {
     const clock = mock.clock(on)
     const { calls, actions } = recorder()
@@ -247,15 +296,21 @@ describe('ui', () => {
 
     const tree = await $.ui.render(PANE_HOST)
 
-    expect(holds(tree, 'Claude keeps running the whole bun test'), 'the title wraps inside the width the seat leaves it').toEqual(true)
-    expect(holds(tree, 'suite after every single-file edit')).toEqual(true)
+    expect(holds(tree, 'Claude keeps running the whole'), 'the title wraps inside the width the seat leaves it').toEqual(true)
+    expect(holds(tree, 'bun test suite after every')).toEqual(true)
     expect(holds(tree, 'api logs')).toEqual(true)
     expect(holds(tree, '3× · ~9% of context')).toEqual(true)
     expect(holds(tree, '2× · ~20% of context')).toEqual(true)
     expect(drawnRows(tree), 'each card wears the number the composer names it by').toContain('1')
     expect(drawnRows(tree)).toContain('2')
+    expect(drawnRows(tree), 'the category is a dim tag on the title row').toContain('execution')
+    expect(drawnRows(tree)).toContain('reading')
     expect(drawnRows(tree), 'the fix is drawn behind its own glyph').toContain('→')
     expect(drawnRows(tree).some(row => row.startsWith(FIX.slice(0, 28))), 'the fix has a row of its own').toEqual(true)
+    expect(drawnRows(tree), 'each verb wears its own glyph, and Kill reads Stop').toContain('✓ Keep')
+    expect(drawnRows(tree)).toContain('↪ Steer')
+    expect(drawnRows(tree)).toContain('■ Stop')
+    expect(holds(tree, 'Kill')).toEqual(false)
     expect(keysOf(tree)).toEqual([
       'check',
       `card:${FIRST}:info`, `card:${FIRST}:keep`, `card:${FIRST}:steer`, `card:${FIRST}:kill`,
@@ -268,6 +323,32 @@ describe('ui', () => {
     expect(calls).toEqual([{ name: 'kill', arg: FIRST }, { name: 'keep', arg: 'reading:api-logs' }])
   })
 
+  test('the category tag is dropped below sixty columns, and a wrapped title stays inside the card', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      const { Box } = resolved
+      return <Box />
+    })
+
+    await $.ui.render(PANE_HOST)
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the pane drew no elements')
+    const at = (bodyColumns: number): unknown =>
+      Pane({ ui, model: twoWasters, site: { bodyColumns, maxRows: 30 }, placement: 'dock', actions })
+
+    expect(drawnRows(at(60)), 'sixty columns hold the tag').toContain('execution')
+    expect(drawnRows(at(56)), 'under that it goes, and the title takes its cells').not.toContain('execution')
+    // The title wraps at every width the design is reviewed at, and never past the frame around it.
+    for (const columns of [56, 60, 80]) {
+      const rows = drawnRows(at(columns)).filter(row => row.startsWith('Claude keeps running'))
+      expect(rows.length, `the title wraps at ${columns}`).toBeGreaterThan(0)
+      expect(Math.max(0, ...rowEnds(at(columns), 0)), `no row past the body at ${columns}`).toBeLessThanOrEqual(columns)
+    }
+  })
+
   test('the newest waster is framed in the accent and the ones behind it are dim', async ($, on) => {
     const { actions } = recorder()
     on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
@@ -277,23 +358,81 @@ describe('ui', () => {
     const frames = framesOf(tree)
 
     expect(frames, 'one frame per waster').toHaveLength(2)
-    expect(frames[0]?.props?.borderColor).toEqual(ACCENT)
+    expect(frames[0]?.props?.borderColor).toEqual(TONES.accent)
     expect(frames[0]?.props?.borderDimColor).toEqual(undefined)
     expect(frames[1]?.props?.borderDimColor).toEqual(true)
     expect(frames[1]?.props?.borderColor).toEqual(undefined)
     expect(frames.every(frame => frame.props?.paddingX === 2), 'both cards are padded').toEqual(true)
   })
 
-  test('the judge button dims to checking… while the judge runs', async ($, on) => {
+  test('the mark is drawn as a Raster beside the header, and dropped where the row is short', async ($, on) => {
     const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      const { Box } = resolved
+      return <Box />
+    })
+
+    await $.ui.render(PANE_HOST)
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the pane drew no elements')
+    const rasterAt = (bodyColumns: number): Node | undefined =>
+      nodesOf(Pane({ ui, model: twoWasters, site: { bodyColumns, maxRows: 30 }, placement: 'dock', actions }))
+        .find(node => node.type === 'Raster')
+
+    const logo = logoCells()
+    const drawn = rasterAt(80)
+
+    expect(drawn?.props?.key).toEqual('logo')
+    expect(drawn?.props?.columns).toEqual(logo.columns)
+    expect(drawn?.props?.rows).toEqual(logo.rows)
+    expect(drawn?.props?.cells).toEqual(logo.cells)
+    expect(Object.keys(drawn?.props ?? {}).sort(), 'a Raster takes these four props and no other')
+      .toEqual(['cells', 'columns', 'key', 'rows'])
+    expect(rasterAt(40), 'a header too narrow for both gives the mark back whole').toEqual(undefined)
+  })
+
+  test('the judge button says a run is in flight, dims, and answers no press', async ($, on) => {
+    const clock = mock.clock(on)
+    const { calls, actions } = recorder()
     on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
-      Pane({ ui: $.ui.resolve(e), model: checkingPane, site: PANE_SITE, placement: 'dock', actions }))
+      Pane({ ui: $.ui.resolve(e), model: checkingPane, site: WIDE_SITE, placement: 'dock', actions }))
 
     const tree = await $.ui.render(PANE_HOST)
     const button = nodesOf(tree).find(node => node.props?.key === 'check')
 
-    expect(button?.props?.label).toEqual('checking…')
+    expect(button?.props?.label).toEqual('Checking…')
     expect(button?.props?.dimColor).toEqual(true)
+    expect(holds(tree, 'checking this session… usually 10–20 s')).toEqual(true)
+
+    await $.ui.press({ plugin: DRAWER, key: 'check' })
+    await clock.settle()
+    expect(calls, 'a run already in flight is not started twice').toEqual([])
+  })
+
+  test('the gauge fill takes its tone from how full the window is', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      const { Box } = resolved
+      return <Box />
+    })
+
+    await $.ui.render(PANE_HOST)
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the pane drew no elements')
+    const toneAt = (model: PaneModel): unknown =>
+      nodesOf(Pane({ ui, model, site: WIDE_SITE, placement: 'dock', actions }))
+        .find(node => node.type === 'Text' && typeof node.props?.color === 'string' && textOf(node).startsWith('█'))
+        ?.props?.color
+
+    expect(toneAt(twoWasters), 'room left: the accent').toEqual(TONES.accent)
+    expect(toneAt(fillingPane), 'filling up: warm').toEqual(TONES.warm)
+    expect(toneAt(fullPane), 'about to compact: hot').toEqual(TONES.hot)
   })
 
   test('the header degrades its own rows instead of cutting a number', async ($, on) => {
@@ -313,41 +452,51 @@ describe('ui', () => {
       Pane({ ui, model, site: { bodyColumns, maxRows: 30 }, placement: 'dock', actions })
 
     const wide = at(80)
-    expect(drawnRows(wide)).toContain('Context')
-    expect(holds(wide, gauge(64, DOCK_GAUGE))).toEqual(true)
-    expect(holds(wide, '64%')).toEqual(true)
-    expect(holds(wide, '41k tokens to compaction · about 6 turns')).toEqual(true)
-    expect(holds(wide, 'Saved ~3% · 3m')).toEqual(true)
-    expect(holds(wide, 'Judge 2 runs · 7.4k')).toEqual(true)
+    expect(drawnRows(wide), 'the name is the first row, beside the mark').toContain('ContextSaver')
+    expect(drawnRows(wide)).toContain('↻ Check now')
+    expect(holds(wide, '64% of context · 41k tokens to compaction · about 6 turns')).toEqual(true)
+    expect(holds(wide, gauge(64, WIDE_GAUGE))).toEqual(true)
+    expect(holds(wide, `${gauge(64, WIDE_GAUGE)}  ${TREND}`), 'the trend sits two cells past the gauge').toEqual(true)
+    expect(holds(wide, 'Saved ~3% · 3m 12s')).toEqual(true)
+    expect(holds(wide, 'Judge 2 runs · 7.4k tokens')).toEqual(true)
     expect(holds(wide, '1.2%')).toEqual(false)                            // the share is a developer metric
+    expect(drawnRows(wide), 'where the wall time went, from the ledger').toContain('Time')
+    expect(holds(wide, '3h 12m in tools · tests 48m (6) · agents 2h 05m (4) · git 4m')).toEqual(true)
+    expect(drawnRows(wide)).toContain('Context')
+    expect(holds(wide, '410k from tools · test output 190k (6) · reads 120k (41)')).toEqual(true)
+    expect(holds(wide, '↳ the full proxy suite runs after every fix round'), 'the judge says why').toEqual(true)
+    expect(holds(wide, '↳ most of it is test output nobody read past the summary line')).toEqual(true)
 
-    const dock = at(56)
-    expect(holds(dock, gauge(64, DOCK_GAUGE)), 'the gauge is the same at every docked width').toEqual(true)
-    expect(holds(dock, '41k tokens to compaction · about 6 turns')).toEqual(true)
-    expect(holds(dock, 'Judge 2 runs · 7.4k')).toEqual(true)
+    const dock = at(60)
+    expect(holds(dock, gauge(64, DOCK_GAUGE)), 'the gauge gives cells back to the mark and the trend').toEqual(true)
+    expect(holds(dock, '64% of context · 41k tokens to compaction')).toEqual(true)
+    expect(holds(dock, 'about 6 turns'), 'the run in turns is dropped whole').toEqual(false)
+    expect(holds(dock, 'Judge 2 runs · 7.4k'), 'the unit goes before the figure does').toEqual(true)
+    expect(holds(dock, '7.4k tokens')).toEqual(false)
     expect(holds(dock, 'Check now')).toEqual(true)
-    expect(cellsOf(dock), 'every header row fits the body at 56 columns').toBeLessThanOrEqual(56)
+    expect(cellsOf(dock), 'every header row fits the body at 60 columns').toBeLessThanOrEqual(60)
     expect(overrun(dock)).toEqual([])
 
     const tight = at(40)
-    expect(holds(tight, gauge(64, DOCK_GAUGE)), 'the gauge is 16 cells at every width that holds it').toEqual(true)
-    expect(holds(tight, '41k tokens to compaction')).toEqual(true)
-    expect(holds(tight, 'about 6 turns'), 'the run in turns is dropped whole').toEqual(false)
+    expect(holds(tight, '64% · 41k to compaction'), 'a word goes before a figure does').toEqual(true)
     expect(holds(tight, 'Judge'), 'the judge is the first segment to go').toEqual(false)
     expect(holds(tight, 'Saved ~3% · 3m')).toEqual(true)
 
     const narrowest = at(26)
-    expect(holds(narrowest, gauge(64, PINCHED_GAUGE)), 'the gauge gives cells back before anything else').toEqual(true)
+    expect(holds(narrowest, gauge(64, PINCHED_GAUGE)), 'the trend goes and the gauge takes the row').toEqual(true)
+    expect(holds(narrowest, TREND)).toEqual(false)
+    expect(holds(narrowest, '64% of context')).toEqual(true)
 
     const past = at(80, overrunPane)
     expect(holds(past, 'to compaction')).toEqual(false)   // the run went negative once the threshold passed
     expect(holds(past, '~0%')).toEqual(false)
     expect(holds(past, 'Saved 3m')).toEqual(true)
 
-    const million = at(70, millionPane)
-    expect(holds(million, '914k tokens to compaction · about 33 turns')).toEqual(true)
+    const million = at(100, millionPane)
+    expect(holds(million, '5% of context · 914k tokens to compaction · about 33 turns')).toEqual(true)
+    expect(holds(million, TREND), 'one sample is a dot, not a shape').toEqual(false)
     const cramped = at(40, millionPane)
-    expect(holds(cramped, '914k tokens to compaction')).toEqual(true)
+    expect(holds(cramped, '914k to compaction')).toEqual(true)
     expect(holds(cramped, 'about 33 turns')).toEqual(false)
     const pinched = at(26, millionPane)
     expect(holds(pinched, '914'), 'the figure is dropped whole, never cut mid-number').toEqual(false)
@@ -360,10 +509,11 @@ describe('ui', () => {
 
     const tree = await $.ui.render(PANE_HOST)
 
-    expect(drawnRows(tree)).toContain('Context')
+    expect(drawnRows(tree)).toContain('ContextSaver')
     expect(holds(tree, 'awaiting the first turn')).toEqual(true)
     expect(holds(tree, '░')).toEqual(false)
     expect(holds(tree, 'Judge 1 run · 7.4k')).toEqual(true)
+    expect(drawnRows(tree), 'no ledger row yet, so nothing to say about the time').not.toContain('Time')
   })
 
   test('i opens why, fix, the summary and the calls behind the claim', async ($, on) => {
@@ -391,7 +541,7 @@ describe('ui', () => {
     expect(new Set(cited.map(row => row.indexOf(' · 24k ch'))), 'the sizes are one column, however long the durations are')
       .toEqual(new Set([cited[0]?.indexOf(' · 24k ch')]))
     expect(holds(tree, '↳ "212 pass · 0 fail"'), 'the head of what came back is quoted under the call').toEqual(true)
-    expect(texts.filter(text => text.startsWith('↳ ')).length, 'a call that returned nothing is quoted no quote').toEqual(2)
+    expect(texts.filter(text => text.startsWith('↳ "')).length, 'a call that returned nothing is quoted no quote').toEqual(2)
     expect(holds(tree, '3× · ~9% of context'), 'the stats row is what the details replace').toEqual(false)
 
     // Narrow, the ladder drops the unit and then the loop's name; the turn, the command and the cost stay.
@@ -485,11 +635,11 @@ describe('ui', () => {
 
     const tree = await $.ui.render(PANE_HOST)
 
-    expect(drawnRows(tree)).toContain('Context')
+    expect(drawnRows(tree)).toContain('ContextSaver')
     expect(holds(tree, '41k tokens to compaction')).toEqual(true)
-    expect(holds(tree, 'Judge')).toEqual(false)
-    expect(holds(tree, 'Check now')).toEqual(false)
-    expect(keysOf(tree)).toEqual([`card:${FIRST}:info`, `card:${FIRST}:keep`, `card:${FIRST}:steer`, `card:${FIRST}:kill`])
+    expect(holds(tree, 'Judge 2 runs'), 'the mark pays for four rows, so the figures ride along').toEqual(true)
+    expect(drawnRows(tree), 'where the budget went is the docked pane\'s, not the seat\'s').not.toContain('Time')
+    expect(keysOf(tree)).toEqual(['check', `card:${FIRST}:info`, `card:${FIRST}:keep`, `card:${FIRST}:steer`, `card:${FIRST}:kill`])
     expect(framesOf(tree), 'the compact card keeps its frame').toHaveLength(1)
     expect(holds(tree, '● Claude keeps reading 2000 lines of api logs')).toEqual(true)
     expect(holds(tree, 'api logs instead of grepping for the error · 2×')).toEqual(true)
@@ -514,8 +664,9 @@ describe('ui', () => {
 
     const ui: Ui | null = resolved
     if (ui === null) throw new Error('the pane drew no elements')
-    for (const model of [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, millionPane, manyWasters]) {
-      for (const columns of [40, 56, 70, 80, 100, 120]) {
+    const models = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, millionPane, fillingPane, fullPane, manyWasters]
+    for (const model of models) {
+      for (const columns of [40, 56, 60, 70, 80, 100, 120, 160]) {
         const site = { bodyColumns: columns, maxRows: 30 }
         const dock = Pane({ ui, model, site, placement: 'dock', actions })
         const inline = Pane({ ui, model, site, placement: 'inline', actions })
@@ -526,6 +677,18 @@ describe('ui', () => {
         expect(overrun(dock), `dock ${columns} controls`).toEqual([])
         expect(overrun(inline), `inline ${columns} controls`).toEqual([])
         expect(overrun(band), `band ${columns} controls`).toEqual([])
+      }
+    }
+    // A wrapped title used to poke through its card's border: every row is measured from the left edge
+    // of the pane, through the padding and the borders around it, at the three widths the design is
+    // reviewed at.
+    for (const model of models) {
+      for (const columns of [60, 80, 160]) {
+        const site = { bodyColumns: columns, maxRows: 30 }
+        const dock = rowEnds(Pane({ ui, model, site, placement: 'dock', actions }), 0)
+        const inline = rowEnds(Pane({ ui, model, site, placement: 'inline', actions }), 0)
+        expect(Math.max(0, ...dock), `dock rows at ${columns}`).toBeLessThanOrEqual(columns)
+        expect(Math.max(0, ...inline), `inline rows at ${columns}`).toBeLessThanOrEqual(columns)
       }
     }
     // A seat of ten and up wears two digits: the cell they sit in keeps the space before the accent dot.
@@ -561,12 +724,12 @@ describe('ui', () => {
       if (model === emptyPane) continue
       // However little the surface grants, the three verbs are drawn: detail is what the budget drops.
       const cramped = Pane({ ui, model, site: { bodyColumns: 100, maxRows: 10 }, placement: 'inline', actions })
-      expect(drawnRows(cramped), 'Keep survives a cramped seat').toContain('Keep')
-      expect(drawnRows(cramped), 'Steer survives a cramped seat').toContain('Steer')
-      expect(drawnRows(cramped), 'Kill survives a cramped seat').toContain('Kill')
+      expect(drawnRows(cramped), 'Keep survives a cramped seat').toContain('✓ Keep')
+      expect(drawnRows(cramped), 'Steer survives a cramped seat').toContain('↪ Steer')
+      expect(drawnRows(cramped), 'Stop survives a cramped seat').toContain('■ Stop')
     }
     const opened = drawnRows(Pane({ ui, model: expandedPane, site: { bodyColumns: 100, maxRows: 14 }, placement: 'inline', actions }))
-    expect(opened.indexOf('Keep'), 'the verbs are drawn above the details, so a clipped seat costs detail')
+    expect(opened.indexOf('✓ Keep'), 'the verbs are drawn above the details, so a clipped seat costs detail')
       .toBeLessThan(opened.indexOf('why'))
   })
 
@@ -581,11 +744,15 @@ describe('ui', () => {
 
     expect(texts).toContain('Decided')
     expect(texts).toContain('Rules for next session')
-    expect(texts).toContain('↪ re-reading src/auth.ts')
+    expect(holds(tree, '↪ re-reading src/auth.ts')).toEqual(true)
     expect(texts).toContain('saved ~1%')
-    expect(texts).toContain('✕ re-summarising the plan every turn')
+    expect(holds(tree, '■ re-summarising the plan every turn'), 'a killed pattern reads as stopped').toEqual(true)
+    expect(holds(tree, '✕')).toEqual(false)
     expect(texts).toContain('ignored 1×')
     expect(holds(tree, 'Re-read only after edits · CLAUDE.md')).toEqual(true)
+    expect(texts, 'the rules wear their own glyphs too').toContain('✎ Write')
+    expect(texts).toContain('▸ Try')
+    expect(texts).toContain('– Skip')
     expect(keysOf(tree)).toContain('write:reading:re-read')
     expect(keysOf(tree)).toContain('try:reading:re-read')
     expect(keysOf(tree)).toContain('skip:reading:re-read')
@@ -631,9 +798,9 @@ describe('ui', () => {
     expect(holds(band, 'ContextSaver')).toEqual(true)
     expect(holds(band, '133k to compaction')).toEqual(true)
     expect(cellsOf(band)).toBeLessThanOrEqual(BAND_PROPS.bodyColumns)
-    expect(holds(pane, 'Context')).toEqual(true)
-    expect(holds(pane, 'Claude keeps running the whole bun test')).toEqual(true)
-    expect(drawnRows(pane)).toContain('Keep')
+    expect(holds(pane, 'ContextSaver')).toEqual(true)
+    expect(holds(pane, 'Claude keeps running the whole')).toEqual(true)
+    expect(drawnRows(pane)).toContain('✓ Keep')
     expect(cellsOf(pane)).toBeLessThanOrEqual(PANE_PROPS.bodyColumns)
   })
 })

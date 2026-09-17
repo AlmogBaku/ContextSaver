@@ -7,6 +7,7 @@ export const millionPane: PaneModel = {
   header: {
     ...twoWasters.header,
     percent: 5,
+    trend: [5],                       // one sample is a dot, not a shape: the header draws no trend
     tokensToCompaction: 914_000,
     turnsToCompaction: 33,
     savedPct: 0,

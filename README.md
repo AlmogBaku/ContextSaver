@@ -182,10 +182,20 @@ Subagent loops are named `a1`, `a2`… in order of first appearance — in the p
 ledger the judge reads. The rows keep the real agent id, so matching stays stable; nobody has to read
 `toolu`-style hashes to see which loop ran a call.
 
-The pane's one accent is the theme key `suggestion` (rgb(87,105,247), ansi blue), on the newest card's
-border, a live waster's `●`, the gauge's fill and the band's `n new`. Everything else is default text or
-dim. The engine has no `accent` key, and `Button` has no `color` prop, so the verbs take their tone from
-the surface. The whole drawing contract is Appendix D of the spec.
+The pane's accent is the theme key `suggestion` (rgb(87,105,247), ansi blue), on the newest card's
+border, a live waster's `●` and the band's `n new`. Three keys past it carry a fact rather than a
+decoration: `success` on what the session got back (the header's `Saved` figure, a `✓` in Decided, a
+credit that settled), and `warning` above 70% of the window with `error` above 90% on the gauge's fill —
+the one place in the pane where a number is a warning. All four live behind one `TONES` table in
+`hooks/ui.tsx`, so a key a theme refuses is flipped to the accent in one edit. Everything else is
+default text or dim. `Button` has no `color` prop, so the verbs take their tone from the surface and
+carry a glyph instead: `✓ Keep`, `↪ Steer`, `■ Stop`, `↻ Check now`, `✎ Write`, `▸ Try`, `– Skip`.
+
+The mark in the header is a `Raster`, the terminal's cell-grid leaf: an 8×8 two-tone bitmap of
+`assets/logo.png`, derived once offline and stored in `hooks/core/logo.ts` as eight lines of `.` `d` `l`,
+then packed into 8 columns × 4 rows of half-block cells. Its upper arc is drawn in the terminal's own
+default foreground rather than as an rgb value, so the ring reads on a light theme and a dark one alike;
+only the lower arc names a colour. The whole drawing contract is Appendix D of the spec.
 
 The build spec — architecture, module contracts, the judge prompt, the design brief, the UX
 walkthrough — is [`docs/SPEC.md`](docs/SPEC.md); the product spec it implements is
