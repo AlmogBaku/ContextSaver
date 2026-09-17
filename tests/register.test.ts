@@ -172,6 +172,31 @@ describe('register', () => {
     expect((await $.command.run(saverRun('debug'))).text, 'what the instruction keeps saving is still counted').toContain('saved 0s · ~2% · 16000 chars')
   })
 
+  // The ring the press asks for is the surface's to move: nothing beneath a test answers `ui.focus`, so
+  // what is asserted here is the pane's own half — the field opens, closes, and a refused ring is no error.
+  test('pressing Steer opens the field it asks the ring for, and pressing it again closes it', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+    await $.ui.render(paneRender())
+
+    await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
+    await world.clock.settle()
+
+    expect(textOf(await $.ui.render(paneRender())), 'the field is open under the verbs').toContain('Enter sends · Steer again closes')
+    expect(world.toasts, 'a ring the surface would not move is nothing to tell the user about').toEqual([])
+
+    await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:steer` })
+    await world.clock.settle()
+
+    expect((await $.command.run(saverRun('debug'))).text, 'Steer again closed it').toContain('steering -')
+  })
+
   test('/saver steer decides the newest waster and every later prompt carries the standing text', async ($, on) => {
     const world = startsSaver(on)
     const submitted: (readonly string[] | undefined)[] = []

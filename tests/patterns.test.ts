@@ -345,14 +345,17 @@ describe('patterns', () => {
       fix: suitePattern.alternative,
       killText: killPrompt(suitePattern),
       evidence: [
-        'r2 · turn 8 · Bash bun test · 45s · 9600ch · "✓ 212 passed"',
-        'r1 · turn 5 · Bash bun test · 1m · 9000ch · "✓ 212 passed"',
+        'r2 · t8 · bun test · 45s · 9.6k · "✓ 212 passed"',
+        'r1 · t5 · bun test · 1m · 9k · "✓ 212 passed"',
       ],
     })
     expect(cardOf({ ...p, ignored: 1 }, state).kind).toBe(`ignored · ${suitePattern.kind}`)
     const quick: Pattern = { ...suitePattern, hits: ['q-1', 'q-2', 'q-3'] }
     const fast = seedState({ rows: [1, 2, 3].map(i => withSeq({ id: `q-${i}`, turn: 4 + i, ms: 100, chars: 40 }, i)), patterns: [quick] })
     expect(cardOf(quick, fast).stats).toBe('3× · 0s · turns 5…7')
+    const once: Pattern = { ...suitePattern, hits: ['o-1', 'o-2'] }
+    const sameTurn = seedState({ rows: [1, 2].map(i => withSeq({ id: `o-${i}`, turn: 6, ms: 100, chars: 40 }, i)), patterns: [once] })
+    expect(cardOf(once, sameTurn).stats, 'one turn is not a range').toBe('2× · 0s · turn 6')
     const behavioural = seedState({
       patterns: [chattyPattern],
       turns: [
@@ -363,8 +366,8 @@ describe('patterns', () => {
     const card = cardOf(chattyPattern, behavioural)
     expect(card.stats).toBe('2× · 0s · turns 14…15')
     expect(card.evidence).toEqual([
-      'turn 15 · no tool calls · 6100ch · "To recap the plan"',
-      'turn 14 · no tool calls · 5400ch · "Here is the plan again"',
+      't15 · no tool calls · 6.1k · "To recap the plan"',
+      't14 · no tool calls · 5.4k · "Here is the plan again"',
     ])
   })
 

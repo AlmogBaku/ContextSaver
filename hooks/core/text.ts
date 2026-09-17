@@ -25,6 +25,10 @@ export const duration = (ms: number): string => {
   return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`
 }
 
+/** Formats a count short and rounded: '9.9k', '41k', '800'. */
+export const kilo = (n: number): string =>
+  n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${Math.round(n / 100) / 10}k` : `${n}`
+
 /** Returns a kebab-case slug of at most forty characters. */
 export const slug = (s: string): string =>
   s
