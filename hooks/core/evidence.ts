@@ -39,9 +39,12 @@ const BASH_SINKS: Readonly<Record<string, string>> = {
   test: 'tests', git: 'git', build: 'builds', install: 'installs', search: 'searches', read: 'reads',
 }
 
+/** The sink a spawn row is named by: it holds its own loop's rows, so it is listed apart and never added in. */
+export const SPAWN_SINK = 'agents'
+
 // The job a tool does, whatever it was asked to do it to; a tool not listed here answers under its own name.
 const TOOL_SINKS: Readonly<Record<string, string>> = {
-  Read: 'reads', Grep: 'searches', Glob: 'searches', Edit: 'edits', Write: 'edits', Agent: 'agents',
+  Read: 'reads', Grep: 'searches', Glob: 'searches', Edit: 'edits', Write: 'edits', Agent: SPAWN_SINK,
 }
 
 const sinkOf = (r: Row): string =>

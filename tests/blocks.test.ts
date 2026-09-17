@@ -50,7 +50,7 @@ describe('blocks', () => {
     expect(aggregate(rows).filter(s => s.key === '/src/token.ts')[0]?.editsBetween).toBe(null)
   })
 
-  test('statsLines has per-call, per-class, per-agent and costliest sections', ($, _on) => {
+  test('statsLines has per-call, per-class and per-agent sections, and no row ids', ($, _on) => {
     const lines = statsLines(rows)
     expect(lines[0]).toBe('per call:')
     expect(lines[2]).toBe(
@@ -58,8 +58,8 @@ describe('blocks', () => {
     expect(lines[lines.indexOf('per class:') + 1]).toBe('read | ×2 | Σ3040ms | Σ46200ch')
     expect(lines[lines.indexOf('per agent:') + 1]).toBe('main | ×7 | Σ77900ch')
     expect(lines[lines.indexOf('per agent:') + 2], 'a subagent is named by its alias, never by its raw id').toBe('a1 | ×1 | Σ260ch')
-    expect(lines[lines.indexOf('costliest rows:') + 1]).toBe(
-      'r5 | Bash | read:docker compose logs api --tail 2000 | 41000ch')
+    // The block's own header says "No ids here": CONTEXT names the largest rows, and once was enough.
+    expect(lines.some(line => /^r\d/.test(line)), 'nothing here can be cited, so nothing here is named').toEqual(false)
     expect(statsLines([])).toEqual(['(none)'])
   })
 
@@ -114,10 +114,10 @@ describe('blocks', () => {
 
   test('sinksBlock states the total, the largest sinks with their share, then the largest rows', ($, _on) => {
     expect(sinksBlock(rows, 'ms').split('\n')).toEqual([
-      // The spawn row is named at 16% of a total it is not in: its own loop's rows are already counted.
+      // The spawn row is named `apart`, never with a share: its own loop's rows are the total, not it.
       'total Σ183360ms',
       'tests | ×3 | Σ180000ms | 98%',
-      'agents | ×1 | Σ30000ms | 16%',
+      'agents | ×1 | Σ30000ms | apart',
       'reads | ×2 | Σ3040ms | 2%',
       'largest rows:',
       'r1 | Bash | test:bun test | Σ61000ms',
@@ -130,9 +130,21 @@ describe('blocks', () => {
       'total Σ76160ch',
       'reads | ×2 | Σ46200ch | 61%',
       'tests | ×3 | Σ29400ch | 39%',
-      'agents | ×1 | Σ2000ch | 3%',
+      'agents | ×1 | Σ2000ch | apart',
     ])
     expect(sinksBlock([], 'chars')).toBe('(none)')
+  })
+
+  // `parseReply` accepts evidence from the ledger window only, so the rows named here live inside it:
+  // the biggest sinks of a long session are usually its oldest rows, and citing one was discarded whole.
+  test('sinksBlock names only rows the ledger window still shows', ($, _on) => {
+    const many = Array.from({ length: 160 }, (_, i) => filler(i + 1))
+    const huge = { ...filler(1), seq: 1, chars: 900_000 }
+    const lines = sinksBlock([huge, ...many.slice(1)], 'chars').split('\n')
+    expect(lines[0], 'the total is still the whole session').toBe('total Σ915900ch')
+    expect(lines.slice(lines.indexOf('largest rows:') + 1).some(line => line.startsWith('r1 |')),
+      'the largest row of the session is outside the window, so it is not offered as an id').toEqual(false)
+    expect(lines[lines.indexOf('largest rows:') + 1]).toBe('r11 | Bash | read:cat notes.md | Σ100ch')
   })
 
   test('the blocks say (none) for an empty session', ($, _on) => {

@@ -84,7 +84,7 @@ You are writing an interruption. Every finding can put a card in front of the us
    "est_tokens_per_turn": null,
    "proposal": null}]}
 \`\`\`
-\`time\` and \`context\` explain where each went, for the user to read and in the words of the work: "45 min per chunk: the full proxy suite runs after every fix round and each chunk gets two review rounds". Neither is an accusation and neither is a finding by itself, so write both even when \`findings\` is \`[]\`.
+\`time\` and \`context\` explain where each went, for the user to read and in the words of the work: "45 min per chunk: the full proxy suite runs after every fix round and each chunk gets two review rounds". Neither is an accusation and neither is a finding by itself, so write both even when \`findings\` is \`[]\` — the examples below leave them out where they are not the point, your reply never does.
 
 \`findings\` may be \`[]\`. \`signature\` is that object or \`null\`. No other keys, and never null where a string is specified. Reply with one JSON object: first character \`{\`, last character \`}\`, no prose before or after, no code fence.
 
@@ -97,7 +97,7 @@ TURNS shows turns 14 and 15 with \`calls 0\` and \`answerChars\` 5400 and 6100 a
 Rows \`r80\`-\`r83\` under \`agent\` \`a1\` Read four files, then \`r84\` Agent \`agent:general-purpose\` flagged \`agent=general-purpose/opus/completed/41000tok/0edits/300pch\` closes that loop (a spawn row lands after the rows it caused), then \`r90\`-\`r93\` in the main loop Read the same four keys in the next turn: \`"id":"multi-agent:re-reads-what-the-agent-read"\`, \`"kind":"Claude keeps re-reading the files a subagent already read for it"\`, \`"evidence":["r80","r83","r90","r93"]\` (a row from each loop is the repeat; the four main-loop reads together are one batch), \`"signature":null\` (no single key carries it), \`"alternative":"Use the subagent's report; re-read a file it covered only to edit it."\`, \`"confidence":0.8\`, \`"est_tokens_per_turn"\` grounded in the cited turns' \`answerChars\` or 0.
 KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` and rows \`r70\` (turn 12) and \`r76\` (turn 14) carry \`test:bun test\` again: return that same id with \`"evidence":["r70","r76"]\` and a \`why\` that names turns 12 and 14 as after the steer at turn 9.
 Agent rows \`r30\`, \`r58\` and \`r91\` run about 40 minutes each, a review agent follows each, every loop reads a different module and no key repeats: \`{"focus":"rewriting three modules, one agent each","time":"2h 40m in three module rewrites of about 40 minutes each, plus one review pass per module; nothing ran twice.","context":"1.1M chars, three quarters of it the agents' own reads of the modules they rewrote.","findings":[]}\` — a long session is not a wasteful one.
-Four suite runs with an install or a migration between every pair, and \`agents | ×3 | Σ2100000ms | 51%\` above them in TIME: \`{"focus":"a schema migration and the call sites it broke","time":"68m, most of it four suite runs, each after a migration or an install changed what the suite covers.","context":"620k chars, over half the migration diff and the failures it produced.","findings":[]}\` — every repeat had changed inputs, so the ladder stops at nothing.
+Four suite runs with an install or a migration between every pair, and \`agents | ×3 | Σ2100000ms | apart\` above them in TIME: \`{"focus":"a schema migration and the call sites it broke","time":"68m, most of it four suite runs, each after a migration or an install changed what the suite covers.","context":"620k chars, over half the migration diff and the failures it produced.","findings":[]}\` — every repeat had changed inputs, so the ladder stops at nothing.
 
 ## KNOWN PATTERNS — \`id | kind | decision @ turn | previous\`. Reuse these ids; never mint a second id or signature for waste listed here.
 {{KNOWN_PATTERNS}}
@@ -105,7 +105,7 @@ Four suite runs with an install or a migration between every pair, and \`agents 
 ## DECISIONS — \`id | key | keep|steer|kill @ turn\`, then previous-session keeps. A \`keep\` key is off limits under any id this session.
 {{DECISIONS}}
 
-## STATS — the whole session, counted for you. Per call: \`tool | key | cls | ×count | Σms | Σchars | turns first-last | edits-between | agents\` (edits-between: median number of files edited between consecutive runs; 0 means it re-ran with nothing changed). Then per class, per agent, and the five costliest single rows. No ids here; cite LEDGER rows.
+## STATS — the whole session, counted for you. Per call: \`tool | key | cls | ×count | Σms | Σchars | turns first-last | edits-between | agents\` (edits-between: median number of files edited between consecutive runs; 0 means it re-ran with nothing changed). Then per class and per agent. No ids here; cite LEDGER rows.
 {{STATS}}
 
 ## TIME — where the wall-clock went. \`total\`, then \`label | ×count | Σms | share%\` for the largest sinks, then the five longest rows as \`r<seq> | tool | key | Σms\`. An Agent row holds its own loop's rows, so it is listed apart and never added in; \`ms\` includes any wait on a permission prompt.
@@ -335,6 +335,13 @@ const explanationOf = (value: unknown): string | null => {
   return text.length > 0 && text.length <= EXPLAIN_MAX ? text : null
 }
 
+// An essay where a sentence was asked for is a prompt problem, so the run report says so: without it
+// `judge time: -` reads the same whether the judge said nothing or said far too much.
+const explanationDrop = (label: string, value: unknown): string[] => {
+  const text = collapseWs(str(value))
+  return text.length > EXPLAIN_MAX ? [`${label}: ${text.length} chars, over ${EXPLAIN_MAX}`] : []
+}
+
 /** What the judge said: the valid findings, the focus, its time and context sentences, one reason per drop, and how many it returned; never throws. */
 export const parseReply = (text: string, state: State): { findings: Finding[]; focus: string | null; time: string | null; context: string | null; dropped: string[]; returned: number } => {
   const root = parseObject(text)
@@ -343,14 +350,16 @@ export const parseReply = (text: string, state: State): { findings: Finding[]; f
   const focusText = collapseWs(str(root['focus']))
   const focus = focusText.length > 0 ? focusText : null
   const said = { time: explanationOf(root['time']), context: explanationOf(root['context']) }
-  if (!Array.isArray(raw)) return { findings: [], focus, ...said, dropped: ['findings was not an array'], returned: 0 }
+  const overlong = [...explanationDrop('time', root['time']), ...explanationDrop('context', root['context'])]
+  if (!Array.isArray(raw)) return { findings: [], focus, ...said, dropped: [...overlong, 'findings was not an array'], returned: 0 }
   const visible = state.rows.slice(Math.max(0, state.rows.length - JUDGE_LEDGER_ROWS))
   const reviewed: Reviewed[] = raw.map((value, i) => {
     const label = labelOf(value, i)
     const result = findingOf(value, state, visible)
     return typeof result === 'string' ? { label, reason: result } : { label, finding: result }
   })
-  return { ...capFindings(reviewed), focus, ...said, returned: raw.length }
+  const sifted = capFindings(reviewed)
+  return { ...sifted, dropped: [...overlong, ...sifted.dropped], focus, ...said, returned: raw.length }
 }
 
 const patternOf = (f: Finding): Pattern => ({

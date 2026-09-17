@@ -133,7 +133,7 @@ guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](do
 | Command | What it does |
 |---|---|
 | `/saver` | Shows or hides the pane. |
-| `/saver check` | Runs the judge now instead of waiting for the cadence, and tells you what it found — `2 new wasters`, `nothing new`, or why it failed. Found something, and the pane opens at any width. |
+| `/saver check` | Runs the judge now instead of waiting for the cadence, and tells you what it found — `2 new wasters`, `nothing new`, or why it failed — and if it found something the pane opens at any width. |
 | `/saver steer [n] <text>` | Sends an instruction for card `n` — a leading number is always read as the card the pane draws, and without one it is the waster whose Steer field is open, else card 1. The multi-line way to steer, from the composer. |
 | `/saver keep <n>` | Keeps card `n`: nothing is sent, and it stays quiet for the session. |
 | `/saver kill <n>` | Kills card `n`: sends the fix as a stop instruction. |

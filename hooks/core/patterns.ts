@@ -131,12 +131,16 @@ const grownWith = (p: Pattern, rows: readonly Row[]): Pattern =>
 // History, not a live call: no turn stats exist for it, nothing settles on it, and nothing was saved by it.
 const applyAdopt = (state: State, rows: readonly Omit<Row, 'seq'>[]): State => {
   const seeded = rows.map((row, i) => ({ ...row, seq: state.seq + i + 1 }))
+  const seq = state.seq + seeded.length
   return {
     ...state,
-    seq: state.seq + seeded.length,
+    seq,
     turn: Math.max(state.turn, ...seeded.map(row => row.turn)),
     rows: [...state.rows, ...seeded].slice(-ROW_CAP),
     patterns: state.patterns.map(p => grownWith(p, seeded)),
+    // The mid-turn cadence starts where the history ends: adopted rows are not new work, so a session
+    // joined late waits for JUDGE_MIN_NEW_ROWS of its own. `/saver check` still judges them on request.
+    judge: { ...state.judge, lastAtSeq: seq },
   }
 }
 
@@ -147,7 +151,9 @@ const applyTurnComplete = (state: State, stat: Omit<TurnStat, 'turn' | 'calls'>)
 })
 
 // Present values win; `window`/`compactAt` sticky (§5.2, widened so a partial usage dispatch never blanks the header).
-const applyUsage = (state: State, usage: State['usage']): State => ({
+// The first sample also dates the mid-turn cadence: without it `lastAtMs` is 0 against a clock reading ms
+// since the epoch, so the five-minute floor would be no floor at all. `/saver demo` passes 0 and seeds nothing.
+const applyUsage = (state: State, usage: State['usage'], now: number): State => ({
   ...state,
   usage: {
     window: usage.window || state.usage.window,
@@ -155,6 +161,7 @@ const applyUsage = (state: State, usage: State['usage']): State => ({
     tokens: usage.tokens ?? state.usage.tokens,
     percent: usage.percent ?? state.usage.percent,
   },
+  judge: state.judge.lastAtMs === 0 && now > 0 ? { ...state.judge, lastAtMs: now } : state.judge,
 })
 
 const applyDecide = (state: State, id: string, choice: Choice, text: string | undefined): State => {
@@ -238,11 +245,14 @@ export const reduce = (state: State, action: Action): State => {
     case 'turn.complete':
       return applyTurnComplete(state, action.stat)
     case 'usage':
-      return applyUsage(state, action.usage)
+      return applyUsage(state, action.usage, action.now)
     case 'overhead':
       return { ...state, overhead: action.overhead }
     case 'compact':
-      return { ...state, compactions: [...state.compactions, state.turn] }
+      // The fill a compaction invalidated is forgotten: `tokens` is sticky and a just-compacted window
+      // reports none until its next response (d.ts 7023-7025), so the header awaits the next turn instead
+      // of announcing two turns to a compaction that just happened.
+      return { ...state, compactions: [...state.compactions, state.turn], usage: { ...state.usage, tokens: undefined, percent: undefined } }
     case 'expand':
       return { ...state, expanded: action.patternId === state.expanded ? null : action.patternId }
     case 'steer.begin':

@@ -2,6 +2,9 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS } from '../hooks/core/types'
+import { assistant } from './fixtures/adopt/assistant'
+import { bashUse } from './fixtures/adopt/bashUse'
+import { prompt } from './fixtures/adopt/prompt'
 import { rawFinding } from './fixtures/judge/rawFinding'
 import { replyText } from './fixtures/judge/replyText'
 import { bandRender } from './fixtures/register/bandRender'
@@ -35,6 +38,12 @@ const RESTATES_FINDING = rawFinding({
   why: 'the stated intent was to implement, and turns 1 and 2 restate the plan before touching anything',
   est_tokens_per_turn: 800,
 })
+
+// The transcript of a session joined late with a long history: a whole row gate's worth of finished calls.
+const LONG_TRANSCRIPT = Array.from({ length: JUDGE_MIN_NEW_ROWS }, (_, at) => [
+  prompt(`step ${at + 1}`),
+  assistant([bashUse({ tool_use_id: `u-${at + 1}` })]),
+]).flat()
 
 // Everything a plugin tree draws, flattened to the strings a person would read.
 const textOf = (value: unknown): string => {
@@ -446,7 +455,26 @@ describe('register', () => {
     expect((await $.command.run(saverRun('debug'))).text, "a subagent's turn is none of ours").toContain('turns 1')
 
     await $.session.compact({ trigger: 'auto', messages: [compactedMessage] })
-    expect((await $.command.run(saverRun('debug'))).text).toContain('compactions 1')
+    const after = await $.command.run(saverRun('debug'))
+    expect(after.text).toContain('compactions 1')
+    expect(after.text, 'the fill a compaction invalidated is forgotten until the next turn reports one')
+      .toContain('usage -% · - / 200000 tokens')
+  })
+
+  // The turn stat is recorded first or not at all, so a refused sample may not take the turn with it:
+  // without `state.turns` there is no token gate, no `turn:<n>` handle and no pace to compaction.
+  test('a turn whose usage the host refused is still a turn', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+
+    await $.session.start(SESSION)
+    world.denyUsage = true
+    await runTurns($, 1, 1)
+
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'the turn is on the record with the call it made').toContain('turn 1 · seq 1 · rows 1 · turns 1')
+    expect(debug.text, 'the tokens it was billed are still the judge budget').toContain('session 22000 new')
+    expect(debug.text, 'only the context sample of that turn was lost').toContain('turnsLeft -')
   })
 
   test('the band wraps what is beneath it and every other drawing falls through', async ($, on) => {
@@ -528,8 +556,52 @@ describe('register', () => {
     expect(prompts, 'one fork, from the rows and the clock alone').toHaveLength(1)
     const debug = await $.command.run(saverRun('debug'))
     expect(debug.text, 'no turn ever completed').toContain(`turn 1 · seq ${JUDGE_MIN_NEW_ROWS + 5} · rows ${JUDGE_MIN_NEW_ROWS + 5} · turns 0`)
-    expect(debug.text, 'the run is dated by the row it started at').toContain(`/ row ${JUDGE_MIN_NEW_ROWS} / ${JUDGE_MIN_GAP_MS}ms`)
+    // The clock has not moved since the fork, so `world.clock.now()` is the moment the run began.
+    expect(debug.text, 'the run is dated by the row and the clock it started at').toContain(`/ row ${JUDGE_MIN_NEW_ROWS} / ${world.clock.now()}ms`)
     expect(debug.text, 'and the card is in front of the user while the turn is still running').toContain('cards 1')
+  })
+
+  // The gate's five minutes are five minutes of this session: `lastAtMs` starts at 0 and the clock reads
+  // milliseconds since the epoch, so without the seed a fan-out of forty reads would fork the judge at once.
+  test('forty calls in the first minute of a session are no cadence', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return { value: forkAnswer(SUITE_REPLY) }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'read the whole package', turnId: 't1' })
+    await world.clock.advance(JUDGE_MIN_GAP_MS - 1)
+    for (let call = 1; call <= JUDGE_MIN_NEW_ROWS + 5; call += 1) await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'the rows are there, the five minutes are not').toBe(0)
+  })
+
+  // A session joined late adopts hundreds of rows: they are history, not new work, so they are no cadence
+  // either — and the very first tool call of that session must not fork the judge on a ledger of them.
+  test('the rows a joined session adopted are not counted as new work', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    on('session.messages', () => ({ value: LONG_TRANSCRIPT }))
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return { value: forkAnswer(replyText([])) }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'carry on', turnId: 'later' })
+    await world.clock.advance(JUDGE_MIN_GAP_MS)
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+
+    expect(forks, 'the adopted rows judge nothing by themselves').toBe(0)
+    expect((await $.command.run(saverRun('debug'))).text, 'the cadence counts from where the history ended')
+      .toContain(`/ row ${JUDGE_MIN_NEW_ROWS} /`)
   })
 
   test('a check the user asked for says what it found and opens the pane at any width', async ($, on) => {
@@ -551,6 +623,58 @@ describe('register', () => {
     expect(world.toasts, 'a check that found something says how much').toEqual(['ContextSaver: 1 new waster'])
     expect(world.opened.map(pane => pane.id), 'the person is waiting for the answer, so 80 columns is wide enough')
       .toEqual(['saver'])
+  })
+
+  // D4: the steered behaviour came back. A check that answers `nothing new` hides the one card that matters.
+  test('a check counts a behaviour that came back as news', async ($, on) => {
+    const world = startsSaver(on)
+    const replies = [SUITE_REPLY, replyText([rawFinding({ evidence: ['r5', 'r8'] })])]
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(replies.shift() ?? SUITE_REPLY) }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+    await $.command.run(saverRun('steer run only the tests covering what you changed'))
+
+    // The suite runs again in a later turn, and the judge reports the same id citing those rows.
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(world.toasts.at(-1), 'a recurrence is news, and it is the news the user asked to hear about')
+      .toBe('ContextSaver: 1 new waster')
+    expect((await $.command.run(saverRun('debug'))).text, 'and the card the toast counted is the one in the pane')
+      .toContain(`cards 1: ${SUITE_ID}`)
+  })
+
+  // Cadence runs are frequent inside a long turn: an ask that lands during one must be answered by it.
+  test('a check asked for while a cadence run is in flight is answered by that run', async ($, on) => {
+    const world = startsSaver(on)
+    let forks = 0
+    let release = (): void => undefined
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => {
+      forks += 1
+      return new Promise(resolve => {
+        release = () => resolve({ value: forkAnswer(SUITE_REPLY) })
+      })
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy layer', turnId: 't1' })
+    await world.clock.advance(JUDGE_MIN_GAP_MS)
+    for (let call = 1; call <= JUDGE_MIN_NEW_ROWS; call += 1) await $.tool.call({ tool: 'Bash', command: 'bun test' })
+
+    expect((await $.command.run(saverRun('check'))).text, 'the run already going is the one that answers')
+      .toBe('ContextSaver: already checking')
+
+    release()
+    await world.clock.settle()
+
+    expect(forks, 'the ask forked nothing of its own').toBe(1)
+    expect(world.toasts, 'and the person who asked is told what it found').toEqual(['ContextSaver: 1 new waster'])
   })
 
   test('a check that found nothing says so, and a second one while it runs forks nothing', async ($, on) => {

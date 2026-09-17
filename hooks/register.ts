@@ -37,6 +37,9 @@ export function register(on: On): void {
   // `judge.start` lands one clock read after the decision to run, and a storm of tool calls decides
   // inside that window: this flag is what stops a second fork of the same session.
   let forking = false
+  // A check asked for while a run is in flight is answered by that run: cadence runs are frequent now,
+  // and the person who pressed Check now would otherwise be told `already checking` and never told more.
+  let asked = false
 
   const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -97,8 +100,8 @@ export function register(on: On): void {
   }
 
   // A check the person asked for: they are waiting for the answer, so the pane opens at any width, every time.
-  const openForCheck = async (fresh: readonly string[]): Promise<void> => {
-    if (!fresh.some(id => state.cards.includes(id)) || state.paneOpen) return
+  const openForCheck = async (queued: readonly string[]): Promise<void> => {
+    if (queued.length === 0 || state.paneOpen) return
     try {
       await openPane()
     } catch {
@@ -106,8 +109,9 @@ export function register(on: On): void {
     }
   }
 
-  const checkedText = (fresh: number): string =>
-    fresh === 0 ? 'ContextSaver: nothing new' : `ContextSaver: ${fresh} new waster${fresh === 1 ? '' : 's'}`
+  // What the run put in front of the user: a recurrence is news too, and it is the D4 moment this exists for.
+  const checkedText = (queued: number): string =>
+    queued === 0 ? 'ContextSaver: nothing new' : `ContextSaver: ${queued} new waster${queued === 1 ? '' : 's'}`
 
   // A run that reported nothing: a cold snapshot, a refusal, or a failure of ours.
   const judgedNothing = (error: string): Action => ({
@@ -117,7 +121,7 @@ export function register(on: On): void {
 
   // A run the person asked for answers them, whatever it found: silence is what a check must never be.
   const failedToast = (requested: boolean, reason: string): void => {
-    if (requested) host?.toast(`ContextSaver: check failed — ${reason}`)
+    if (requested || asked) host?.toast(`ContextSaver: check failed — ${reason}`)
   }
 
   const judgeOnce = async (engine: Host, requested: boolean): Promise<void> => {
@@ -155,9 +159,12 @@ export function register(on: On): void {
         // a log we could not write is not a failed run: the findings are already in the registry
       }
       persist()
-      if (!requested) return autoOpen(merged.fresh)
-      engine.toast(checkedText(merged.fresh.length))
-      return openForCheck(merged.fresh)
+      // Every card this run queued: a fresh finding, or a steered behaviour that came back.
+      const queued = [...merged.fresh, ...merged.recurred].filter(id => state.cards.includes(id))
+      // A check asked for mid-run is answered by the run it arrived in, whichever run that was.
+      if (!(requested || asked)) return autoOpen(queued)
+      engine.toast(checkedText(queued.length))
+      return openForCheck(queued)
     } catch (err) {
       // Whatever went wrong, the run is over: `running` may never stay true.
       dispatch(judgedNothing(messageOf(err)))
@@ -170,7 +177,8 @@ export function register(on: On): void {
    *
    * @param requested true when the person asked for this run (`Check now`, `/saver check`), which is
    *   answered with a toast and opens the pane wherever it can be drawn; a cadence run stays quiet
-   *   and keeps the once-a-session, wide-terminal rule for opening itself.
+   *   and keeps the once-a-session, wide-terminal rule for opening itself — unless someone asks while
+   *   it is in flight, in which case that run answers them.
    */
   async function runJudge(requested: boolean): Promise<void> {
     const engine = host
@@ -180,11 +188,16 @@ export function register(on: On): void {
       await judgeOnce(engine, requested)
     } finally {
       forking = false
+      asked = false
     }
   }
 
   const checkNow = (): string => {
-    if (forking || state.judge.running) return ALREADY_TEXT
+    if (forking || state.judge.running) {
+      // The run already going answers this ask: nothing is forked, and nobody is left without a reply.
+      asked = true
+      return ALREADY_TEXT
+    }
     void runJudge(true).catch(() => undefined)
     return CHECKING_TEXT
   }
@@ -410,8 +423,10 @@ export function register(on: On): void {
       if (engine === null || e.agentId !== undefined) return next(e)
       const u = e.usage
       // The window is sampled before the turn is recorded: how full it is after this turn is the turn's
-      // own figure, and its growth over the last turns is the pace compaction actually runs at.
-      const seen = await engine.usage()
+      // own figure, and its growth over the last turns is the pace compaction actually runs at. The
+      // sample is optional, though: a refused `session.usage` costs this turn its context reading, never
+      // the turn itself — without the stat the trend, the pace and every token gate go with it.
+      const seen = await engine.usage().catch(() => null)
       const now = await engine.now()
       dispatch({
         type: 'turn.complete',
@@ -424,10 +439,10 @@ export function register(on: On): void {
           answerChars: e.answer.length,
           answerHead: e.answer.slice(0, ANSWER_HEAD),
           aborted: e.isAborted,
-          context: seen.context.tokens ?? null,
+          context: seen?.context.tokens ?? null,
         },
       })
-      dispatch({ type: 'usage', usage: { window: seen.context.window, tokens: seen.context.tokens, percent: seen.context.percent }, now })
+      if (seen !== null) dispatch({ type: 'usage', usage: { window: seen.context.window, tokens: seen.context.tokens, percent: seen.context.percent }, now })
       if (shouldRun(state, now)) void runJudge(false).catch(() => undefined)
       return next(e)
     } catch {

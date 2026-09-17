@@ -1,4 +1,4 @@
-import { agentAliases, aliasOf, sinks } from './evidence'
+import { SPAWN_SINK, agentAliases, aliasOf, sinks } from './evidence'
 import { median } from './text'
 import { JUDGE_LEDGER_ROWS } from './types'
 import type { CommandClass, Row, Sink, State, TurnStat } from './types'
@@ -117,12 +117,6 @@ const classLines = (rows: Row[]): string[] =>
 const agentLines = (rows: Row[], aliases: ReadonlyMap<string, string>): string[] =>
   groupLines(rows, r => r.agent, (name, g) => `${aliasOf(aliases, name)} | ×${g.length} | Σ${sum(g.map(r => r.chars))}ch`)
 
-const costliestLines = (rows: Row[]): string[] =>
-  [...rows]
-    .sort((a, b) => b.chars - a.chars)
-    .slice(0, 5)
-    .map(r => `r${r.seq} | ${r.tool} | ${r.key} | ${r.chars}ch`)
-
 /** Renders the whole-session aggregates the judge reads instead of counting rows. */
 export const statsLines = (rows: Row[]): string[] => {
   if (rows.length === 0) return ['(none)']
@@ -135,8 +129,6 @@ export const statsLines = (rows: Row[]): string[] => {
     ...classLines(rows),
     'per agent:',
     ...agentLines(rows, aliases),
-    'costliest rows:',
-    ...costliestLines(rows),
   ]
 }
 
@@ -146,8 +138,11 @@ const measured = (row: Row, measure: Measure): number => (measure === 'ms' ? row
 
 const amountCell = (amount: number, measure: Measure): string => `Σ${amount}${measure === 'ms' ? 'ms' : 'ch'}`
 
+// The spawn sink is not in the total, so it is given no share of it: a percentage of a denominator a
+// label is missing from is a number the judge cannot use, and 400% is one it would have to explain away.
 const sinkLine = (s: Sink, total: number, measure: Measure): string =>
-  `${s.label} | ×${s.count} | ${amountCell(s.amount, measure)} | ${Math.round((s.amount / Math.max(1, total)) * 100)}%`
+  [s.label, `×${s.count}`, amountCell(s.amount, measure),
+    s.label === SPAWN_SINK ? 'apart' : `${Math.round((s.amount / Math.max(1, total)) * 100)}%`].join(' | ')
 
 const largestLines = (rows: readonly Row[], measure: Measure): string[] =>
   [...rows]
@@ -163,7 +158,9 @@ export const sinksBlock = (rows: readonly Row[], measure: Measure): string => {
     `total ${amountCell(where.total, measure)}`,
     ...where.sinks.map(s => sinkLine(s, where.total, measure)),
     'largest rows:',
-    ...largestLines(rows, measure),
+    // Only rows the LEDGER window still shows: `parseReply` validates evidence against exactly those, so
+    // naming an older row here would offer the judge an id its own citation of it is discarded for.
+    ...largestLines(rows.slice(Math.max(0, rows.length - JUDGE_LEDGER_ROWS)), measure),
   ])
 }
 
