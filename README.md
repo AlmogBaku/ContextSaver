@@ -4,35 +4,41 @@
 
 **Stop Claude Code from wasting tokens doing useless shit, in realtime.**
 
-[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-206%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-216%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#development) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
-Half your context is garbage. Claude ran the whole test suite after a one-line edit. Then it ran it
-again. It read the same file four times. It cat'd a 2,000-line log to find one traceback. It
-re-summarized the plan every turn. Then the window filled up, compaction fired, and it forgot what you
-were doing. You paid for all of it.
+ContextSaver is a Claude Code plugin that watches your session for repeated waste — the full test suite
+after every edit, the same file read four times, a 2,000-line log dumped into the window — and shows it
+to you as a card with a fix. One click sends the fix to Claude mid-turn. Nothing is blocked, nothing is
+sent without a click.
 
-Your options right now: hit Esc, and type the same correction for the fourth time.
-
-ContextSaver logs every tool call, then asks the model three questions: **what has Claude already done
-more than once that was a waste, where did your time and your context actually go, and what is going in
-circles?** The answers land in a pane next to your transcript, with three buttons.
-
-<!-- A real 160-column capture of `/saver demo`:
-     tmux capture-pane -e -p -t <session> | python3 scripts/screenshot.py docs/screenshot.png --cols 160 -->
 <p align="center">
   <img src="docs/screenshot.png" width="880"
-       alt="The ContextSaver pane docked beside the transcript: two live wasters, each with its cost and Fix, Fix… and Ignore">
+       alt="The ContextSaver pane docked beside the transcript: two wasters, each with its cost and the Fix, Fix… and Ignore buttons">
 </p>
 
-**Fix** sends the fix. **Fix…** opens it as a line you can rewrite first. **Ignore** shuts it up. Nothing
-gets blocked, nothing waits on you, and nothing reaches Claude unless you click it.
+## Features
+
+- **Catches behaviours, not byte counts.** "Claude keeps running the whole suite after every one-file
+  edit — 3×, ~9% of context, 3m 12s." With the calls behind the claim one keypress away.
+- **The model judges, not a heuristic.** Code keeps the ledger; the model decides what was waste.
+  Nothing to configure, no thresholds, and it names waste nobody wrote a rule for.
+- **Works mid-turn.** Long agentic turns are checked while they run. Your fix reaches Claude on its next
+  tool result and rides every prompt after it, so it survives compaction.
+- **Tells you where the time went.** One line each for wall-clock and context, with the model's
+  one-sentence explanation of what those minutes and tokens were.
+- **Quiet by default.** A single occurrence is never a finding. A wrong card costs more than a missed one.
+- **Makes fixes permanent.** A decision worth keeping becomes a CLAUDE.md rule, a skill, an agent brief or
+  a permission rule, written only when you click `Write`.
+- **Never touches your work.** No tool denied, no output trimmed, no error hidden. If a hook throws, the
+  session carries on as if the plugin weren't there.
 
 ## Install
 
-Function hooks are early access, so turn the flag on first — in your shell, or in
-`~/.claude/settings.json` as `{ "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }`.
+ContextSaver is a [Claude Mod](https://github.com/anthropics/claude-code/tree/main/mods), built on Claude
+Code's function hooks. Function hooks are early access, so enable the flag first, in your shell or in
+`~/.claude/settings.json` under `env`:
 
 ```sh
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
@@ -45,191 +51,84 @@ Then, inside Claude Code:
 /plugin install contextsaver@contextsaver
 ```
 
-That's it. No config, no API key, no dependencies, no build step. One line shows up above your prompt
-after the first turn — `ContextSaver ●  Found 2 ways to save ~12% of your context and 51m`, or the calls
-it is quietly watching until then — and in a wide terminal the pane opens itself the first time the model
-catches something. `/saver` opens it at any width.
+No config, no API key, no dependencies, no build step.
 
 > [!NOTE]
-> Needs Claude Code 2.1.273 or newer (verified on 2.1.274). Install it mid-session if you want: the
-> plugin reads the transcript once and rebuilds its ledger from the calls that already happened.
+> Requires Claude Code 2.1.273 or newer. Installing mid-session works: the plugin rebuilds its ledger
+> from the transcript and runs its first check at the next opportunity.
 
-## Realtime context optimization, inside the session
+## Usage
 
-Your context gets optimized while you are still using it: the behaviour is caught, named and changed in
-the turn that is already running.
+1. **Work as usual.** A one-line band sits above the prompt. It stays quiet until something repeats.
+2. **A card appears** in the pane beside your transcript: what Claude keeps doing, how many times, what it
+   cost you in context and minutes, and what it should do instead. Press `i` for the evidence.
+3. **Pick a button.** `Fix` sends the suggested fix. `Fix…` lets you rewrite it first. `Ignore` silences
+   it for the session.
+4. **Claude changes course** in the turn that is already running. The pane credits what you saved, and
+   tells you if Claude ignored the instruction.
+5. **Keep it for next time.** The pane offers the decision as a CLAUDE.md rule, skill, agent brief or
+   permission rule. `Write` writes it, `Try` uses it for this session only, `Skip` drops it.
 
-- **It names the behaviour.** "Claude keeps running the whole suite after every one-file edit — 3 times,
-  ~9% of your context, 3m 12s."
-- **The model calls it, not a heuristic.** Code gathers the evidence; the model decides what was stupid.
-  Nothing to configure, no thresholds to tune, and it catches waste nobody wrote a rule for.
-- **It shuts up when there's nothing.** One occurrence is never a finding. A wrong card costs you more
-  than a missed one, so the judge is told to stay quiet unless it is sure.
-- **It never touches your work.** No tool is ever denied, no output trimmed, no error hidden. If a hook
-  throws, the session carries on as if the plugin weren't there.
+The pane docks beside the transcript in a wide terminal and sits inline above the prompt otherwise.
+`/saver` toggles it at any width. `ctrl+x tab` moves the keyboard into the pane, `Tab` moves between
+buttons, `Enter` presses, `Esc` returns to the prompt.
 
-## What it catches
-
-- The full suite after every one-line edit, and the typecheck that reruns when nothing changed.
-- The same file read again, or 2,000 lines read where one grep would have done it.
-- Raw command output dumped into the window instead of filtered where it was produced.
-- The same failing command retried three times without anyone reading the error.
-- A whole file rewritten to change three lines.
-- Four subagents reading the same files, two of them editing the same one.
-- The plan narrated again instead of the work getting done.
-- The work redone from scratch after a compaction.
-
-None of that is hardcoded. It is what the model has named so far, and it names whatever repeats in
-*your* session.
-
-## How it works
-
-ContextSaver is a **Claude Mod** — a plugin built on function hooks, Claude Code's newest extension
-point. That is the whole trick: it runs *inside* your session instead of reading logs afterwards, so it
-sees every tool call as it happens and can talk to Claude mid-turn, while there is still time to change
-what it does.
-
-For you, it goes like this.
-
-1. **You work exactly as you do now.** Install it and forget it. No config, no prompts, no
-   interruptions. It watches quietly and says nothing. Load it into a session that has already done
-   work and it reads that work out of the transcript and audits it at the next opportunity — your next
-   prompt, Claude's next tool call, or the turn's end — so you never have to ask for the check you
-   already wanted.
-2. **It waits for a habit, not a spike.** One big command is not a problem. The same pointless command
-   for the third time is. Only behaviours that already repeated ever reach you.
-3. **It answers "what took so long".** The header says where the wall-clock and the window went in one
-   line each — `Time  22m in tools`, `Context  410k from tools` — and the model writes the sentence beside
-   the figure: what those minutes were, in the words of your own work. One figure and one sentence per
-   budget; the named sinks behind them are in `/saver debug`. An explanation is not an accusation: a long
-   session can be an honest one, and it says so.
-4. **It doesn't wait for the turn to end.** A three-hour agentic turn is checked while it runs, every 40
-   tool calls and at most every five minutes, so the card arrives while there is still time to change
-   course. The run to compaction is paced by how fast the window is actually filling, not by what a turn
-   was billed.
-5. **A card shows up in the pane, next to your transcript.** What Claude keeps doing, what it has cost
-   you so far — how many times, how much of your context, how much of your life — and what it should be
-   doing instead. Press `i` for the receipts: the reasoning in full, then every call behind the claim —
-   the turn, the command or file, the loop it ran in, its seconds and its size, and the first line of
-   what came back. Each card is numbered, so `/saver ignore 2` decides the one you are looking at.
-6. **You press one of three buttons.** *Fix* sends the suggestion as it stands. *Fix…* opens a line right
-   under the verbs, pre-filled with the fix, and puts the cursor in it. *Ignore* if you don't care, and it
-   never mentions it again. The pane's last line says how it is worked from the keyboard — `ctrl+x tab`
-   focuses it, `Tab` moves, `Enter` presses, `Esc` hands the keys back — and names the same verbs by
-   number for the composer, `/saver fix|ignore <n>`.
-7. **Claude changes course in the turn that's already running.** Your words reach it on its very next
-   tool result, and ride along with every prompt after that, so it doesn't quietly drift back after a
-   compaction. Nothing is blocked, nothing is denied, nothing waits on you.
-8. **You see what you got back.** When Claude does the cheap thing instead, the pane credits the
-   difference against what that behaviour normally costs you in this session: context and minutes. If
-   Claude ignores you, it says so, and the card comes back so you can say it harder.
-9. **Next session starts smarter.** A decision worth keeping becomes a CLAUDE.md rule, a skill, an agent
-   brief or a permission rule — written only when you press `Write`.
-
-**The technical bit,** briefly. Every tool call becomes a row: what ran, how long it took, how much it
-dumped into your context, which files it touched. Every ~30k new tokens, and inside a long turn every 40
-rows and five minutes, one detached model fork reads the session's own transcript plus that ledger and
-the minutes and characters totalled by consumer, then answers three questions — what has already
-repeated, where the time and the context went, and what is going in circles. There are no pattern rules
-or thresholds in the code to tune; the numbers on a card are computed from the rows, not from the model's
-guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](docs/SPEC.md).
-
-## Commands
+### Commands
 
 | Command | What it does |
 |---|---|
-| `/saver` | Shows or hides the pane. |
-| `/saver check` | Runs the judge now instead of waiting for the cadence, and tells you what it found — `2 new wasters`, `nothing new`, or why it failed — and if it found something the pane opens at any width. |
-| `/saver fix <n>` | Fixes card `n`: sends the fix the card offers, as it stands. |
-| `/saver fix [n] <text>` | Fixes card `n` with your own note instead — a leading number is always read as the card the pane draws, and without one it is the waster whose `Fix…` field is open, else card 1. The multi-line way to write one, from the composer. |
-| `/saver ignore <n>` | Ignores card `n`: nothing is sent, and it stays quiet for the session. |
-| `/saver debug` | Dumps the whole session state: rows, the two budgets' named sinks, patterns, decisions, the judge's runs and what each fork cost (input, output, cache read, cache created), usage, savings. |
-| `/saver reset` | Clears this session's ledger and decisions; the pattern registry survives. |
+| `/saver` | Show or hide the pane. |
+| `/saver check` | Run the judge now instead of waiting for the cadence. |
+| `/saver fix <n>` | Send card `n`'s fix as it stands. |
+| `/saver fix [n] <text>` | Send your own instruction for card `n` (default: the open card, else card 1). |
+| `/saver ignore <n>` | Silence card `n` for the session. |
+| `/saver debug` | Dump session state: ledger, patterns, decisions, judge runs and cost, savings. |
+| `/saver reset` | Clear this session's ledger and decisions. The pattern registry survives. |
+
+## How it works
+
+Every tool call becomes a ledger row: what ran, how long, how much it put in the context, which files it
+touched. On a cadence (about 30k new tokens and 3 turns, or every 40 calls and 5 minutes inside a long
+turn) a detached model fork reads the session's own transcript plus the ledger and answers three
+questions: what has already repeated that was a waste, where did the time and context go, and what is
+going in circles. Findings become cards. Costs on a card are computed from the rows, never taken from
+the model.
+
+`Fix` and `Fix…` are prompts, not blocks: delivered once on Claude's next tool result, then attached to
+every later prompt for the rest of the session.
+
+The full architecture, the judge prompt and the design brief are in [`docs/SPEC.md`](docs/SPEC.md); the
+product spec is [`docs/PRD.md`](docs/PRD.md).
 
 ## Good to know
 
 > [!IMPORTANT]
-> The judge runs on your session's model. `$.model.fork` has no model field, so a session on Opus pays
-> Opus to audit it. It keeps itself to a few percent of the session; the header's name row says what it
-> has spent so far, and `/saver debug` breaks the last run into input, output and cache — a cold cache is
-> what makes a run expensive.
+> The judge runs on your session's model. A session on Opus pays Opus for the audit. It keeps itself to a
+> few percent of the session's tokens, and `/saver debug` shows exactly what it spent.
 
-- **This is v1.** The main flow was verified in a live session and every module has tests, but function
-  hooks are early access and the API under this can still move.
-- **Short sessions stay quiet.** Under ~15 tool calls or 5 turns, only behaviours with three or more
-  occurrences get reported.
-- **A row's `ms` is wall time.** It includes the time a permission prompt sat waiting for you, so a big
-  number is not automatically machine cost. The judge's prompt says so.
-- **The pane takes your keyboard when you open it.** `/saver`, `Open` and a check you asked for open it
-  asking for the keys, so `Tab` moves inside the pane and `Enter` presses; `ctrl+x tab` gives them back to
-  it whenever it lost them (the pane's last row says so), `Esc` returns them to the prompt, and
-  `/saver fix <n> <text>` always works from the composer if the field never gets the cursor.
-- **Terminal and desktop only.** On a mobile surface it keeps the ledger and draws nothing.
-- **Hot reload starts a new session.** Under `--plugin-dir`, editing a file reloads the plugin: turn
-  tokens, cards and decisions start empty, the ledger is rebuilt from the transcript, and the pattern
-  registry survives in the store, so your past decisions still calibrate the judge.
+- **Early access.** Function hooks are new and the API under this can still move. Every module is tested,
+  and the main flow was verified live.
+- **Short sessions stay quiet.** Under ~15 tool calls or 5 turns, only behaviours seen three or more times
+  are reported.
+- **Durations are wall time.** They include time a permission prompt spent waiting for you. The judge is
+  told so.
+- **Terminal and desktop only.** On mobile surfaces the plugin keeps its ledger and draws nothing.
 
-## Under the hood
+## Development
 
 ```sh
 git clone https://github.com/AlmogBaku/ContextSaver && cd ContextSaver
-./scripts/check.sh                                          # validate --strict, typecheck, 206 tests
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .    # run with the plugin loaded from this folder
+./scripts/check.sh                                          # validate --strict, typecheck, tests
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .    # run Claude Code with the plugin from this folder
 ```
 
-All logic is pure functions over one `State` in `hooks/core/`. `hooks/register.ts` is the only file
-that touches events and `$`, and every hook returns `next(e)` on any path it does not own.
-`hooks/ui.tsx` is pure over two view models (`BandModel`, `PaneModel`) and never reads `State`.
+All logic is pure functions over one `State` in `hooks/core/`. `hooks/register.ts` is the only file that
+touches events, and every hook falls back to `next(e)` on any path it does not own. `hooks/ui.tsx` renders
+two view models and never reads `State`. With `CONTEXTSAVER_DEBUG=1`, `/saver demo` fills the pane with
+sample cards so the drawing can be worked on without a real finding.
 
-Pressing `Fix…` asks the surface for the keyboard and then for the ring, in that order. `focus` on
-`$.ui.open` is a request, not a grant, and re-opening our own id delivers only the focus rewrite, so that
-is how the pane asks; `autoFocus` cannot help, since it lands only where a site takes the keyboard *fresh*.
-The ring itself is asked for one render later: `$.ui.focus({ requestId, key })` lands only on an element the
-*drawn* tree holds, and a tree lands after the hook that built it returns. So the render that first draws
-the field asks for one more draw, and the draw after it moves the ring — verified live at 85 columns, where
-the characters you type land in the field. Both asks are the person's to refuse: where the ring stayed put
-and the pane holds no keys either, one toast names the route that always works, `/saver fix <n> <your note>`.
-
-Every row is assembled and measured before it is drawn: a Button at a row's right edge gets its cells
-reserved first, and a header row that does not fit drops whole segments rather than cutting a number.
-The band is one teaser, never a dashboard: a mark and one sentence, whichever of the four applies first —
-a check in flight, what the waiting cards would save, what the session has already saved, else the calls
-it is watching. Below 70 columns that sentence gives back the time before it gives back a word, because a
-cut figure lies. It is drawn `BAND_RESERVE` cells short of `site.bodyColumns` because the engine draws
-its own collapse control `[-]` over the last cells of that row, and it carries no hotkey: a bare digit
-typed into an empty composer would fire it.
-
-With `CONTEXTSAVER_DEBUG` set, `/saver demo` fills the pane with three sample wasters from
-`hooks/core/demo.ts` — two awaiting a decision, one already fixed with a note so the decisions and the rules draw
-too — against a sample usage and four sample turns carrying the context the window held after each, so the
-header's gauge, its trend and its run to compaction draw as well, and opens it, so the design can be looked at without waiting for a real finding. One sample call
-ran inside a subagent, which is where the pane's `a1` loop column comes from. Nothing is sent to Claude
-and nothing is written; without the flag the command is not there.
-
-Subagent loops are named `a1`, `a2`… in order of first appearance — in the pane's evidence and in the
-ledger the judge reads. The rows keep the real agent id, so matching stays stable; nobody has to read
-`toolu`-style hashes to see which loop ran a call.
-
-The pane's accent is the theme key `suggestion` (rgb(87,105,247), ansi blue), on the newest card's
-border, a live waster's `●` and the band's mark and line while a card waits. Three keys past it carry a fact rather than a
-decoration: `success` on what the session got back (the header's `Saved` figure, a `✓` in Decided, a
-credit that settled), and `warning` above 70% of the window with `error` above 90% on the gauge's fill —
-the one place in the pane where a number is a warning. All four live behind one `TONES` table in
-`hooks/ui.tsx`, so a key a theme refuses is flipped to the accent in one edit. Everything else is
-default text or dim. `Button` has no `color` prop, so the verbs take their tone from the surface and
-carry a glyph instead: `✓ Fix`, `✎ Fix…`, `– Ignore`, `↻ Check now`, `✎ Write`, `▸ Try`, `– Skip`; the
-band's own four marks are `◐` checking, `●` found, `✓` saved and `◌` watching.
-
-The mark in the header is a `Raster`, the terminal's cell-grid leaf: an 8×8 three-tone bitmap of
-`assets/logo.png`, derived once offline and stored in `hooks/core/logo.ts` as eight lines of `.` `d` `b`
-`l`, then packed into 8 columns × 4 rows of half-block cells. It is the ring open on the right, read as a
-gauge: its navy is drawn in the terminal's own default foreground rather than as an rgb value, so the ring
-reads on a light theme and a dark one alike, and only the arc from 9 o'clock to 12 (`#1AA7F0`) and the one
-from 12 to the open end (`#22D3EE`) name a colour. The whole drawing contract is Appendix D of the spec.
-
-The build spec — architecture, module contracts, the judge prompt, the design brief, the UX
-walkthrough — is [`docs/SPEC.md`](docs/SPEC.md); the product spec it implements is
-[`docs/PRD.md`](docs/PRD.md).
+Under `--plugin-dir`, editing a file hot-reloads the plugin and resets session state; the pattern
+registry persists in the plugin store.
 
 ## License
 
