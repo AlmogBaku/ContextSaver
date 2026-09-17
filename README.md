@@ -52,8 +52,8 @@ Then, in Claude Code:
 ```
 
 That is the whole setup: no config, no API key, no dependencies, no build step. Installing mid-session
-works too — the plugin reads what already happened out of the transcript and checks it at the next
-opportunity.
+works too — the plugin reads what already happened out of the transcript and checks it right away, without
+waiting for your next prompt.
 
 ## Usage
 

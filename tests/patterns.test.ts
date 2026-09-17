@@ -328,8 +328,8 @@ describe('patterns', () => {
       .toMatchObject({ time: null, context: null, lastAtSeq: 0, lastAtMs: 0 })
   })
 
-  // A plugin loaded into a session with history arms one check (§6). A run that answered spends the
-  // arming; a cold snapshot or a refusal leaves it standing, so the audit is retried instead of lost.
+  // A plugin loaded into a session with history arms one check and fires it there (§6). A run that answered
+  // spends the arming; a cold snapshot or a refusal leaves it standing, so the audit is retried, not lost.
   test('check.arm waits for a judge run that answered', async () => {
     const done = (error: string | null): Action => ({
       type: 'judge.done', patterns: [], fresh: [], recurred: [], focus: null, time: null, context: null,
@@ -345,11 +345,12 @@ describe('patterns', () => {
     const answered = reduce(cold, done(null))
     expect(answered.pendingCheck, 'a run that answered audited the session').toBe(false)
     expect(reduce(armed, { type: 'reset' }).pendingCheck, 'and a cleared session has no history to audit').toBe(false)
-    // Whether a check is waiting, and whether the load lane already spent its one failure toast: a
-    // silent armed check must never again be indistinguishable from one that never fired.
-    expect(debugDump(armed), 'armed and not yet reported on').toContain('armed check: pending · not yet reported')
-    expect(debugDump(armed, true), 'armed and already reported once').toContain('armed check: pending · reported')
-    expect(debugDump(answered, true), 'and the arming is spent').toContain('armed check: spent')
+    // Whether the load's own check is still owed an answer, and whether the lane already spent its one
+    // failure toast: a silent load check must never again be indistinguishable from one that never fired.
+    expect(debugDump(armed), 'fired, unanswered, and not yet reported on').toContain('load check: retrying · not yet reported')
+    expect(debugDump(armed, true), 'fired, unanswered, reported once').toContain('load check: retrying · reported')
+    expect(debugDump(answered, true), 'and a run answered it').toContain('load check: answered')
+    expect(debugDump(seedState()), 'while a session under the row floor armed none at all').toContain('load check: not armed')
   })
 
   test('judge.done drops a card whose pattern the registry no longer carries', async () => {

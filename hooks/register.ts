@@ -229,7 +229,8 @@ export function register(on: On): void {
   }
 
   // A check armed at load consults no gate — `shouldRun` counts new work, and a session joined late has
-  // all of its work behind it. Answers whether it took this opportunity.
+  // all of its work behind it. The load fires this itself; every opportunity after it is a retry of a run
+  // that came back with nothing. Answers whether it took this opportunity.
   const armedCheck = (): boolean => {
     if (!state.pendingCheck || state.judge.running) return false
     void runJudge('load').catch(() => undefined)
@@ -451,12 +452,23 @@ export function register(on: On): void {
       const adopted = adoptRows(await engine.messages())
       if (adopted.length === 0) return next(e)
       dispatch({ type: 'adopt', rows: adopted })
-      if (isDebug) engine.log(`ContextSaver adopted ${adopted.length} rows from the transcript · /saver check judges them now`)
-      // A fork here would answer null (the snapshot is cold at load, d.ts 2019-2034), so the check is
-      // armed and fires at the first warm opportunity. Too few rows to judge: a fresh session, nothing armed.
-      if (state.rows.length < JUDGE_MIN_ROWS) return next(e)
+      // Too few rows to judge: a fresh session, nothing armed and nothing forked — which the log says too,
+      // since a debug line that claims a check on three rows is worse than no line at all.
+      const enough = state.rows.length >= JUDGE_MIN_ROWS
+      if (isDebug) {
+        const tail = enough ? 'checking them now' : `under the ${JUDGE_MIN_ROWS}-row floor, nothing to check`
+        engine.log(`ContextSaver adopted ${adopted.length} rows from the transcript · ${tail}`)
+      }
+      if (!enough) return next(e)
       dispatch({ type: 'check.arm' })
-      if (isDebug) engine.log(`ContextSaver armed a check over ${state.rows.length} adopted rows`)
+      if (isDebug) engine.log(`ContextSaver fired a check over ${state.rows.length} adopted rows · armed, so a cold answer retries`)
+      // Fired here, not left for the person's next keystroke: a session with this much history behind it has
+      // run turns, and `$.model.fork` reads its last turn's cache-safe snapshot (d.ts 2019-2034) — which is
+      // exactly what a `/reload-plugins`, an edit under `--plugin-dir` or a resume hands us (d.ts 3106-3111).
+      // Detached, never awaited: this hook is awaited by the engine and has a budget, and the run speaks in a
+      // toast, not in a return value. A snapshot that really is cold answers null, and the arming stays up
+      // (§5.2) for the first warm opportunity below — the next prompt, the next tool call, or the turn's end.
+      armedCheck()
       return next(e)
     } catch {
       return next(e)
@@ -549,8 +561,9 @@ export function register(on: On): void {
       const extra = [...state.notes, ...state.standing.filter(text => !state.notes.includes(text))]
       if (extra.length > 0) dispatch({ type: 'notes.drained' })
       const carried = extra.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...extra] }
-      // A prompt is no new work, so there is no cadence lane here: only a check armed at load fires, and
-      // it never changes what the prompt carries — so a reload and one line of typing audit the session.
+      // A prompt is no new work, so there is no cadence lane here: only a check still armed fires — the load
+      // fired its own, so this is the retry of one that came back cold — and it never changes what the
+      // prompt carries.
       armedCheck()
       return next(carried)
     } catch {

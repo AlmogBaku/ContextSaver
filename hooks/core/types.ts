@@ -129,7 +129,7 @@ export type State = {
   standing: string[]               // texts re-sent with every prompt this session
   written: string[]                // `${patternId}:${kind}` of artifacts written, tried or skipped this session; propose() omits them
   judge: { lastAtTokens: number; lastAtTurn: number; lastAtSeq: number; lastAtMs: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null; time: string | null; context: string | null; last: JudgeRun | null }   // lastAtSeq/lastAtMs: the mid-turn cadence; time/context: the judge's one-line explanations of where they went
-  pendingCheck: boolean            // a check armed at load and not yet answered: a plugin that joined a session with history audits it at the first warm opportunity (§6)
+  pendingCheck: boolean            // a check armed at load and not yet answered: a plugin that joined a session with history fires one there and retries it at every warm opportunity until a run answers (§6)
   paneOpen: boolean
   autoOpened: boolean              // the pane auto-opened once this session (like /diff on the first edit)
   columns: number | null           // last band width seen (e.props.bodyColumns), for the auto-open decision
@@ -155,7 +155,7 @@ export type Action =
   | { type: 'decide'; patternId: string; choice: Choice; text?: string }   // text required for steer
   | { type: 'judge.start'; now: number; seq: number }        // when and at which ledger row the run began, for the mid-turn cadence
   | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; time: string | null; context: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
-  | { type: 'check.arm' }                                      // the ledger a session.start adopted already passes the row floor: judge it at the first warm opportunity
+  | { type: 'check.arm' }                                      // the ledger a session.start adopted already passes the row floor: judge it there, and again at the next warm opportunity if that run answers nothing
   | { type: 'notes.drained' }
   | { type: 'standing.add'; text: string }
   | { type: 'artifact.done'; patternId: string; kind: ArtifactKind; written: boolean }   // written: true once the rule is handled — written, tried or skipped — and recorded in state.written

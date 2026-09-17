@@ -600,6 +600,13 @@ const judgeRunLines = (run: JudgeRun | null): string[] =>
         ...(run.usage === null ? [] : [usageLine(run.usage)]),
       ]
 
+// The audit a load owes a session it joined late: fired at `session.start` over the adopted rows, retried at
+// every warm opportunity while it keeps coming back with nothing, and never armed at all under the row floor.
+const loadCheckLine = (state: State, spoke: boolean): string => {
+  const lane = state.pendingCheck ? 'retrying' : state.judge.runs === 0 ? 'not armed' : 'answered'
+  return `load check: ${lane} · ${spoke ? 'reported' : 'not yet reported'}`
+}
+
 // Where a budget went, as the pane's Time and Context rows no longer spell out: the total and the largest sinks.
 const sinkLine = (label: string, unit: string, budget: Sinks | null): string =>
   `${label} sinks: ${budget === null ? '-' : [`${budget.total}${unit} total`, ...budget.sinks.map(s => `${s.label} ${s.amount} ×${s.count}`)].join(' · ')}`
@@ -622,7 +629,7 @@ export const debugDump = (state: State, spoke = false): string => {
     `judge time: ${oneLine(j.time)}`,
     `judge context: ${oneLine(j.context)}`,
     ...judgeRunLines(j.last),
-    `armed check: ${state.pendingCheck ? 'pending' : 'spent'} · ${spoke ? 'reported' : 'not yet reported'}`,
+    loadCheckLine(state, spoke),
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,
     `compactions ${state.compactions.length === 0 ? 'none' : state.compactions.join(', ')}`,
