@@ -30,6 +30,10 @@ export const RECOVERED_FLAG = 'recovered'     // `Row.flags` marker for a row re
 export const MAIN_AGENT = 'main'              // `Row.agent` of the main loop; the alias table leaves it as it is
 export const NO_CALLS = 'no tool calls'       // `Evidence.what` of a turn handle: that turn ran none
 export const CARD_EVIDENCE = 3                // cited calls one card's details show, newest first
+export const JUDGE_MIN_NEW_ROWS = 40          // mid-turn cadence: ledger rows since the last run (a turn can last hours)
+export const JUDGE_MIN_GAP_MS = 300_000       // mid-turn cadence: at least five minutes between runs
+export const TREND_TURNS = 10                 // context samples the header's trend draws
+export const SINKS = 3                        // named sinks the Time and Context rows show
 
 export type CommandClass = 'test' | 'lint' | 'format' | 'typecheck' | 'build' | 'install' | 'git' | 'read' | 'search' | 'other'
 export type Category = 'execution' | 'reading' | 'production' | 'behavior' | 'communication' | 'multi-agent' | 'environment' | 'process' | 'other'
@@ -48,7 +52,7 @@ export type Row = {
   paths: string[]          // absolute paths this call edited (Edit/Write filePath unless staged; Bash bashEditDiff.changedFiles)
   spawn: { type: string; requested: string | null; resolved: string | null; status: string | null; tokens: number | null; edits: number | null; promptChars: number } | null   // Agent rows only
 }
-export type TurnStat = { turn: number; input: number; output: number; cacheRead: number; cacheCreate: number; calls: number; ms: number; answerChars: number; answerHead: string; aborted: boolean }   // answerHead: first 100 chars of e.answer, for evidence quotes
+export type TurnStat = { turn: number; input: number; output: number; cacheRead: number; cacheCreate: number; calls: number; ms: number; answerChars: number; answerHead: string; aborted: boolean; context: number | null }   // answerHead: first 100 chars of e.answer, for evidence quotes; context: tokens in the window after the turn (usage), null when unknown — growth between turns is the pace compaction runs at
 export type Signature = { tool: string; key: string }
 export type ArtifactKind = 'claude-md' | 'skill' | 'agent-brief' | 'settings-allow'
 export type Proposal = { kind: ArtifactKind; title: string; body: string }
@@ -92,6 +96,7 @@ export type Evidence = {
 export type Card = {
   patternId: string
   n: number                // 1-based seat in the pane's list, top to bottom
+  category: Category       // the dim tag on the title row
   kind: string
   stats: string
   why: string
@@ -119,7 +124,7 @@ export type State = {
   notes: string[]                  // one-shot texts: drained into the next tool result or prompt
   standing: string[]               // texts re-sent with every prompt this session
   written: string[]                // `${patternId}:${kind}` of artifacts written, tried or skipped this session; propose() omits them
-  judge: { lastAtTokens: number; lastAtTurn: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null; last: JudgeRun | null }
+  judge: { lastAtTokens: number; lastAtTurn: number; lastAtSeq: number; lastAtMs: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null; time: string | null; context: string | null; last: JudgeRun | null }   // lastAtSeq/lastAtMs: the mid-turn cadence; time/context: the judge's one-line explanations of where they went
   paneOpen: boolean
   autoOpened: boolean              // the pane auto-opened once this session (like /diff on the first edit)
   columns: number | null           // last band width seen (e.props.bodyColumns), for the auto-open decision
@@ -128,7 +133,7 @@ export type State = {
 
 export const initialState = (cwd: string, window: number): State => ({
   cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
-  judge: { lastAtTokens: 0, lastAtTurn: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, last: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
+  judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
 export type Action =
@@ -143,8 +148,8 @@ export type Action =
   | { type: 'steer.begin'; patternId: string }
   | { type: 'steer.draft'; text: string }
   | { type: 'decide'; patternId: string; choice: Choice; text?: string }   // text required for steer
-  | { type: 'judge.start' }
-  | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[] }
+  | { type: 'judge.start'; now: number; seq: number }        // when and at which ledger row the run began, for the mid-turn cadence
+  | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; time: string | null; context: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[] }
   | { type: 'notes.drained' }
   | { type: 'standing.add'; text: string }
   | { type: 'artifact.done'; patternId: string; kind: ArtifactKind; written: boolean }   // written: true once the rule is handled — written, tried or skipped — and recorded in state.written
@@ -156,7 +161,7 @@ export type Action =
 export type Finding = { id: string; category: Category; kind: string; evidence: string[]; signature: Signature | null; why: string; alternative: string; confidence: number; estTokensPerTurn: number | null; proposal: Proposal | null }
 
 /** UI ↔ shell interface. */
-export type Ui = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Input'>
+export type Ui = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Input' | 'Raster'>
 export type Site = { bodyColumns: number; maxRows: number }
 export type Actions = {
   keep(patternId: string): void
@@ -172,14 +177,21 @@ export type Actions = {
   skip(a: Artifact): void
 }
 /** View models: computed by patterns.ts from State, rendered by ui.tsx. Keeps the UI free of state logic. */
+export type Sink = { label: string; amount: number; count: number }   // one named consumer: `tests`, `reads`, `agents`, `git`…; amount in ms (time) or chars (context)
+export type Sinks = { total: number; sinks: readonly Sink[] }         // total over every ledger row of the main loop plus the agents' own rows (Agent spawn rows excluded: they contain their loop's rows); the SINKS largest named
 export type Header = {
   percent: number | null            // context used, 0..100
   tokensToCompaction: number | null // exact: threshold - tokens
-  turnsToCompaction: number | null  // estimate at the recent pace
+  turnsToCompaction: number | null  // estimate at the recent pace: tokens to compaction / median context growth per turn
+  trend: readonly number[]          // context percent after each of the last TREND_TURNS turns, oldest first; [] before the first
+  time: Sinks | null                // where the wall-clock went, from the ledger; null before the first row
+  context: Sinks | null             // where the context went, from the ledger; null before the first row
+  judgeTime: string | null          // the judge's one-line explanation of the time, verbatim; null until it has run
+  judgeContext: string | null       // the judge's one-line explanation of the context
   judgeRuns: number
   judgeTokens: number               // tokens the judge has spent this session; the pane's JUDGE row
   judgeShare: number                // those tokens as a percentage of the session's, 1 decimal; `/saver debug` only
-  judgeRunning: boolean
+  judgeRunning: boolean             // a run is in flight: Check now reads `Checking…`, dims, and ignores presses
   savedPct: number
   savedMs: number
 }
@@ -201,6 +213,6 @@ export type PaneModel = {
   decided: DecidedRow[]             // newest first
   artifacts: Artifact[]
 }
-export type BandModel = { percent: number | null; tokensToCompaction: number | null; fresh: number; savedPct: number; paneOpen: boolean }
+export type BandModel = { percent: number | null; tokensToCompaction: number | null; fresh: number; savedPct: number; paneOpen: boolean; checking: boolean }   // checking: a judge run is in flight, shown even with the pane closed
 export type BandProps = { ui: Ui; model: BandModel; site: Site; actions: Actions }
 export type PaneProps = { ui: Ui; model: PaneModel; site: Site; placement: 'dock' | 'inline'; actions: Actions }
