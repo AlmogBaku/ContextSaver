@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { JUDGE_PROMPT, buildPrompt, costOf, merge, parseReply, shouldRun } from '../hooks/core/judge'
+import { debugDump } from '../hooks/core/patterns'
 import { MAX_PATTERNS } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
 import { judgeFinding } from './fixtures/judge/judgeFinding'
@@ -9,6 +10,8 @@ import { judgeState } from './fixtures/judge/judgeState'
 import { rawFinding } from './fixtures/judge/rawFinding'
 import { replyText } from './fixtures/judge/replyText'
 import { rows } from './fixtures/judge/rows'
+
+const SUITE_ID = 'execution:full-suite-after-each-edit'
 
 const behavioural = (id: string): Record<string, unknown> => rawFinding({
   id, category: 'communication', kind: 'Claude keeps restating the plan in turns that make no tool call',
@@ -45,6 +48,35 @@ describe('judge', () => {
       .toContain('`ms` is wall time and includes any wait on a permission prompt, so a long `ms` alone is not machine cost.')
   })
 
+  test('the Counting rules count work between occurrences, not turns, and the examples show an agent loop', ($, _on) => {
+    expect(JUDGE_PROMPT, 'a run after an edit is a decision, in the same turn or a later one')
+      .toContain('- Separated by other work. Two occurrences of the same behaviour count as two decisions when at least one other row sits between them')
+    expect(JUDGE_PROMPT).toContain('Calls issued together with nothing between them are one batch and count once')
+    expect(JUDGE_PROMPT, 'a repeat inside one agent, and across the loops, counts')
+      .toContain('- Agents are loops of their own.')
+    expect(JUDGE_PROMPT, 'a young ledger keeps a caution band above the gate that lets the judge run')
+      .toContain('- Short ledgers. With fewer than about 12 rows or fewer than 4 turns,')
+    expect(JUDGE_PROMPT).not.toContain('- Different turns.')
+    expect(JUDGE_PROMPT, 'the turn-numbered excuse is gone').not.toContain('turns 1-3')
+    expect(JUDGE_PROMPT, 'and no rule, band or example counts by turns alone').not.toContain('across separate turns')
+    expect(JUDGE_PROMPT).not.toContain('one turn is one decision')
+    expect(JUDGE_PROMPT, 'counting and excusing stay in separate layers')
+      .toContain('a run after an edit is a second decision, not a second call in one batch')
+    expect(JUDGE_PROMPT).toContain('A finding needs two unexcused occurrences of the same behaviour separated by other work (see Counting)')
+    expect(JUDGE_PROMPT, 'the multi-agent cues name the work an agent already did')
+      .toContain('the main loop re-reading files or re-running checks an agent\'s rows already covered, after it returned')
+    expect(JUDGE_PROMPT, 'and the excuses name the honest re-reads the columns can show')
+      .toContain('a re-read whose brief the transcript shows is a review or verification pass')
+    expect(JUDGE_PROMPT, 'the brief size the cues ask about is a rendered cell')
+      .toContain('/<promptChars>pch')
+    expect(JUDGE_PROMPT, 'an example with agent rows')
+      .toContain('"kind":"Claude keeps re-reading the files a subagent already read for it"')
+    expect(JUDGE_PROMPT, 'citing one row per loop, never four handles from one batch')
+      .toContain('"evidence":["r80","r83","r90","r93"]')
+    expect(JUDGE_PROMPT, 'and the ledger order that example is read off')
+      .toContain('a spawn row lands after the rows it caused')
+  })
+
   test('buildPrompt fills every block, keeping the contract and the five headers', ($, _on) => {
     const prompt = buildPrompt(judgeState({ patterns: [judgePattern({ lastDecision: 'keep' })] }))
     expect(prompt).toContain('"kind": "<one sentence, at most 120 chars, starts \'Claude keeps \'>"')
@@ -77,8 +109,49 @@ describe('judge', () => {
   test('parseReply survives prose around the object and broken JSON', ($, _on) => {
     const wrapped = `Here is what I found.\n\n${replyText([rawFinding()])}\n\nHope that helps.`
     expect(parseReply(wrapped, judgeState()).findings.length).toBe(1)
-    expect(parseReply('{"focus": "x", "findings": [', judgeState())).toEqual({ findings: [], focus: null })
-    expect(parseReply('no json at all', judgeState())).toEqual({ findings: [], focus: null })
+    expect(parseReply('{"focus": "x", "findings": [', judgeState()))
+      .toEqual({ findings: [], focus: null, dropped: ['reply was not JSON'], returned: 0 })
+    expect(parseReply('no json at all', judgeState()))
+      .toEqual({ findings: [], focus: null, dropped: ['reply was not JSON'], returned: 0 })
+  })
+
+  test('parseReply reports one reason per dropped finding, so silence is readable', ($, _on) => {
+    const reason = (reply: string, state = judgeState()): string[] => parseReply(reply, state).dropped
+    expect(reason(replyText([rawFinding({ evidence: ['r3', 'r99'] })])))
+      .toEqual([`${SUITE_ID}: evidence r99 not in the ledger`])
+    expect(reason(replyText([rawFinding({ signature: { tool: 'Read', key: 'test:bun test' } })])))
+      .toEqual([`${SUITE_ID}: signature (Read, test:bun test) matches no row`])
+    expect(reason(replyText([rawFinding({ kind: 'Runs the suite again' })])))
+      .toEqual([`${SUITE_ID}: kind must start with "Claude keeps "`])
+    expect(reason(replyText([rawFinding({ id: 'Execution:X' })])), 'an id we cannot trust is labelled by its place')
+      .toEqual(['#1: id Execution:X is not <category>:<kebab-slug>'])
+    expect(reason(replyText([rawFinding({ evidence: ['r3', 'turn:5'] })])))
+      .toEqual([`${SUITE_ID}: evidence turn:5 needs signature null`])
+    const kept = judgeState({ patterns: [judgePattern({ decision: 'keep', decidedAtTurn: 4 })] })
+    expect(reason(replyText([rawFinding({ id: 'execution:suite-every-step' })]), kept))
+      .toEqual(['execution:suite-every-step: kept this session'])
+    const many = Array.from({ length: 8 }, (_, i) => rawFinding({ id: `execution:suite-${i + 1}` }))
+    expect(reason(replyText(many)), 'the seventh and the eighth are over the ceiling')
+      .toEqual(['execution:suite-7: over MAX_FINDINGS (6)', 'execution:suite-8: over MAX_FINDINGS (6)'])
+    expect(reason(JSON.stringify({ focus: 'x', findings: 'none' }))).toEqual(['findings was not an array'])
+    expect(parseReply(replyText([rawFinding()]), judgeState()).dropped, 'a clean reply drops nothing').toEqual([])
+    expect(parseReply(replyText(many), judgeState()).returned, 'returned is what the reply carried, not what survived').toBe(8)
+    expect(parseReply(JSON.stringify({ focus: 'x' }), judgeState()), 'a reply with no findings key returned none of them')
+      .toEqual({ findings: [], focus: 'x', dropped: ['findings was not an array'], returned: 0 })
+  })
+
+  test('a reason quoting a multi-line key stays one line, so /saver debug keeps its forty', ($, _on) => {
+    const heredoc = { tool: 'Bash', key: 'other:cat <<EOF\nline one\nline two\nEOF' }
+    const six = Array.from({ length: 6 }, (_, i) => rawFinding({ id: `execution:heredoc-${i + 1}`, signature: heredoc }))
+    const dropped = parseReply(replyText(six), judgeState()).dropped
+    expect(dropped[0]).toBe('execution:heredoc-1: signature (Bash, other:cat <<EOF line one line two EOF) matches no row')
+    expect(dropped.some(text => text.includes('\n')), 'no reason carries a newline').toBe(false)
+    const crowded = judgeState({
+      patterns: Array.from({ length: 60 }, (_, i) => judgePattern({ id: `execution:waster-${i + 1}` })),
+      judge: { ...judgeState().judge, last: { returned: 6, kept: 0, dropped } },
+    })
+    expect(debugDump(crowded).split('\n').length, 'the 40-line contract holds with six such reasons in it')
+      .toBeLessThanOrEqual(40)
   })
 
   test('parseReply discards a finding citing an alias no row carries', ($, _on) => {
@@ -176,6 +249,16 @@ describe('judge', () => {
     expect(result.patterns.map(p => p.id)).toContain('execution:known-1')
     expect(result.patterns.map(p => p.id)).toContain('execution:full-suite-after-each-edit')
     expect(result.fresh).toEqual(['execution:full-suite-after-each-edit'])
+    expect(result.evicted, 'the finding itself survived the cap').toEqual([])
+  })
+
+  test('merge names the finding the cap evicted, since it will never be a card', ($, _on) => {
+    const patterns = Array.from({ length: MAX_PATTERNS }, (_, i) =>
+      judgePattern({ id: `execution:known-${i + 1}`, confidence: 0.99, signature: null, decision: 'keep', decidedAtTurn: 2 }))
+    const result = merge(judgeState({ patterns }), [judgeFinding()])
+    expect(result.patterns.length).toBe(MAX_PATTERNS)
+    expect(result.fresh, 'a pattern the registry no longer carries is not fresh').toEqual([])
+    expect(result.evicted).toEqual(['execution:full-suite-after-each-edit'])
   })
 
   test('parseReply needs two handles unless why names the stated intent', ($, _on) => {

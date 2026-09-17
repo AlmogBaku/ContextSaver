@@ -12,12 +12,12 @@ import type { ArtifactKind, Category, Finding, Pattern, Proposal, Row, Signature
 /** The judge prompt (build spec Appendix A, verbatim) with the five evidence placeholders. */
 export const JUDGE_PROMPT = `You are auditing THIS session for wasted context and wasted time. The transcript above is your own: read it for intent — what the user asked for, what you were told, what you already decided. The blocks below are the only evidence of what actually ran; nothing outside them exists for this audit.
 
-Answer one narrow question: which behaviours in this session have already repeated across separate turns, or have you said you will keep doing — and what should be done instead?
+Answer one narrow question: which behaviours in this session have already repeated, separated by other work, or have you said you will keep doing — and what should be done instead?
 
 You are writing an interruption. Every finding can put a card in front of the user mid-work and can become a standing instruction that constrains you for the rest of the session. A wrong finding costs more than a missed one: it interrupts correct work, teaches a bad rule, and makes the user distrust the next card. Prefer silence to a guess. \`"findings": []\` is a correct and common answer.
 
 ## Rules
-1. Report behaviours, not incidents. A finding needs two unexcused occurrences of the same behaviour in two different turns, or one occurrence plus your own stated intent to keep doing it ("I'll re-run the suite after each fix"). A single expensive call is never a finding.
+1. Report behaviours, not incidents. A finding needs two unexcused occurrences of the same behaviour separated by other work (see Counting), or one occurrence plus your own stated intent to keep doing it ("I'll re-run the suite after each fix"). A single expensive call is never a finding.
 2. \`evidence\`: row ids copied from the LEDGER \`id\` column (\`r12\`), or \`turn:<n>\` where \`<n>\` is a \`turn\` number printed in TURNS — turn handles only for findings whose \`signature\` is null. Copy ids exactly; never renumber, abbreviate or reformat one. A finding with an id that is not in these blocks is discarded whole. STATS lines and \`~\` summary lines carry no id: use them for counts and history in \`why\` (they are the whole session, counted for you), never cite them as evidence, and never assume the oldest full row is the first occurrence.
 3. \`signature\`: copy \`key\` character-for-character from one LEDGER row and \`tool\` from that same row. Keys are cut at 200 characters — copy the cut, never complete a command from memory. A pair that does not match a row discards the finding. Choose a key that only the wasteful version of the call carries; when no single recurring call carries the behaviour, use \`"signature": null\`.
 4. Reuse ids. If KNOWN PATTERNS already names the behaviour, return that exact \`id\` with fresh evidence. The same command, file or lens under a different slug or category is the same waste: scan KNOWN PATTERNS and DECISIONS before minting an id.
@@ -28,11 +28,12 @@ You are writing an interruption. Every finding can put a card in front of the us
 9. At most six findings, at most two with \`signature: null\`, ordered by the sum of \`chars\` over the rows cited, largest first. Six is a ceiling, not a target; never split one behaviour into two findings.
 
 ## Counting — what makes two occurrences a repeat
-- Different turns. Several calls inside one turn are one decision and count once: a parallel batch of Reads, or a fan-out of subagents launched together, is one choice however wide.
+- Separated by other work. Two occurrences of the same behaviour count as two decisions when at least one other row sits between them — an edit, a read, another command — whether in the same turn or a later one; a run after an edit is a second decision, not a second call in one batch — whether it is excused is the category's own question. Calls issued together with nothing between them are one batch and count once: a parallel set of Reads, or a fan-out of subagents launched at once, is one choice however wide.
 - Both unexcused. An occurrence the "Never report" list excuses does not count and may not be cited. Subtract the excused ones first; if fewer than two remain, there is no finding. A baseline suite run at the start plus the check before a commit is zero findings.
 - Same side of a compaction. TURNS lists the turns where a compaction happened; content dropped by it must be re-acquired. Count only occurrences after the last compaction.
 - Same behaviour, not the same shape. For a signature finding that means the same \`key\`; two Read keys differing only in \`:offset-limit\` are different slices, not a repeat. For a null-signature finding you must name one behaviour and show it in each cited turn; do not staple unrelated expensive turns together.
-- Short sessions. With fewer than about 15 ledger rows or fewer than 5 turns, report only behaviours with three or more surviving occurrences, or one plus explicit stated intent.
+- Agents are loops of their own. The \`agent\` column names the loop; a repeat inside one agent's rows counts exactly like a repeat in the main loop, and the main loop re-doing after an agent returns what that agent's rows show it already did (the same Read key, the same check) is a repeat across loops.
+- Short ledgers. With fewer than about 12 rows or fewer than 4 turns, report only behaviours with three or more surviving occurrences, or one plus explicit stated intent.
 
 ## Categories — the nine names are the whole enum; the cues are examples and \`kind\` is free text
 - execution — the whole suite/build/typecheck after each edit; re-running a check with nothing edited since it last passed; the same failing command retried with no diagnostic step between; \`sleep\` polling or a watch/dev server run as a blocking call (\`bg\` absent, large \`ms\`). Not: a run after any intervening edit, install, migration or config change; the session's baseline run; broad verification after shared code changed; the last check before a commit; one retry of a transient failure. The error text is not in these blocks, so you cannot claim two failures were the same failure.
@@ -40,15 +41,15 @@ You are writing an interruption. Every finding can put a card in front of the us
 - production — whole-file rewrites for small changes (\`+a/-d\` near the file's size); edits that cancel out; tests or docs nobody asked for; the same Edit failing on one path over and over. Not: a new file; a rewrite the user asked for; call-site updates the change requires.
 - behavior — read/edit/read oscillation with nothing finished; approach flip-flops; repeating what the user already corrected. Not: read-edit-verify cycles that are the working method, or a step that depends on the previous result.
 - communication — turns with \`calls 0\` and large \`answerChars\` that restate the plan or recap finished work; stopping to ask what the transcript, the repo or your instructions already answer. Not: the turn that answers a question the user asked; a plan or explanation you were asked for; the session's last turn; plan mode, where making no tool call is required. \`out\` includes thinking, so point at the restated content, not the token shape.
-- multi-agent — parallel agents each re-reading the same large file the parent already had; agents with a thin brief (small \`promptChars\`, large \`tokens\`); results never read; agents spawned again after a limit error; mechanical agents on the premium model (\`agent=\` flag shows the resolved model and \`edits\`). Not: agents with disjoint file sets each reading one shared spec; two agents touching one path unless the ledger shows a conflict (an errored edit right after another agent's edit, or a re-edit in the main loop after they returned).
+- multi-agent — parallel agents each re-reading the same large file the parent already had; agents with a thin brief (small \`promptChars\`, large \`tokens\`); results never read; agents spawned again after a limit error; mechanical agents on the premium model (\`agent=\` flag shows the resolved model and \`edits\`); the main loop re-reading files or re-running checks an agent's rows already covered, after it returned; a brief that pastes in whole files (large \`promptChars\`) to an agent whose rows then Read the same paths anyway; a workflow whose later agents re-read what earlier agents read (the same Read keys under successive \`agent\` values, spread over turns). Not: agents with disjoint file sets each reading one shared spec; two agents touching one path unless the ledger shows a conflict (an errored edit right after another agent's edit, or a re-edit in the main loop after they returned); a re-read whose brief the transcript shows is a review or verification pass; every agent reading the one spec its brief names; the parent reading an agent's result.
 - environment — installs repeated with no manifest edit; Bash used where Read/Grep/Edit is cheaper; fixed per-turn overhead (memory files, agent descriptions, MCP schemas in the facts line) larger than the work. Not: the user's own denials (\`denied\`); a single approval prompt.
 - process — many tiny commits or amends on one change; work declared done with no check run; re-deriving after a compaction what was settled before it. Not: docs- or config-only changes with no check to run, or a check the environment cannot run.
 - other — a repetition none of the above names. Name it plainly.
 
 ## Never report
 - A first occurrence, or anything with fewer than two unexcused occurrences after the Counting rules.
-- Orientation: turns 1-3, the first look at any file, directory or log, an unfamiliar area, or a scope the user left open ("audit every call site", "review the repo").
-- Parallelism: calls batched in one turn, and agents on disjoint scopes at once, are one decision each.
+- Orientation: the first look at any file, directory or log, an unfamiliar area, or a scope the user left open ("audit every call site", "review the repo").
+- Parallelism: calls issued together with nothing between them, and agents on disjoint scopes at once, are one decision each.
 - Occurrences a compaction separates, and any re-read a compaction made necessary. Compaction, prompt-cache reads and the host's own truncation are the harness working as designed.
 - A denied call (\`denied\`): the user or a policy said no, never your waste. The only reportable version is re-running an unchanged command already declined twice, and then the fix is a \`settings-allow\` proposal, not a rebuke.
 - A file change you cannot see: the \`paths\` column records only Edit/Write and Bash calls the host diffed, and nothing for a staged edit. Treat an intervening formatter, codegen, migration, install, \`git checkout|stash|pull|apply\`, \`sed -i\`, MCP edit or another agent's edit as having changed the file.
@@ -59,7 +60,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - Anything the user asked for this session, however wasteful it looks. Read the transcript before you accuse.
 
 ## Confidence
-\`confidence\` runs 0.5 to 1.0. 0.9+: the same key three or more times across separate turns, nothing changed between, no request for it in the transcript. 0.7-0.9: the repetition is plain across turns and the transcript offers no legitimate reason. 0.5-0.7: the repetition is real but a legitimate reason is plausible — report here only if you looked for that reason and \`why\` names what rules it out; if it could plausibly have been the right call, drop it. Below 0.5: say nothing.
+\`confidence\` runs 0.5 to 1.0. 0.9+: the same key three or more times with other work between each, nothing changed between, no request for it in the transcript. 0.7-0.9: the repetition is plain and the transcript offers no legitimate reason. 0.5-0.7: the repetition is real but a legitimate reason is plausible — report here only if you looked for that reason and \`why\` names what rules it out; if it could plausibly have been the right call, drop it. Below 0.5: say nothing.
 
 \`est_tokens_per_turn\`: null whenever \`signature\` is an object. For a null signature it is an integer grounded in the \`answerChars\` of the cited turns divided by four, conservative end, or 0 when you cannot ground it; the user sees it multiplied into a savings figure every turn after a decision.
 
@@ -83,10 +84,11 @@ You are writing an interruption. Every finding can put a card in front of the us
 
 ## Examples — evidence, then what it justifies
 Rows \`r41\`, \`r45\`, \`r50\` carry \`test:bun test\` in turns 7, 8, 9 while only \`/src/auth.ts\` was edited between them, \`r41\` being the session's baseline run: \`{"focus":"fixing the auth token refresh in /src/auth.ts","findings":[{"id":"execution:full-suite-after-each-edit","category":"execution","kind":"Claude keeps running the whole bun test suite after every single-file edit","evidence":["r45","r50"],"signature":{"tool":"Bash","key":"test:bun test"},"why":"r41 was the baseline and is excused; the suite then ran in full at turns 8 and 9 after single-file edits to /src/auth.ts alone, about a minute and 9.7k characters each. Nothing shared changed, and the user asked for a fix, not full verification.","alternative":"Run only the test files covering the files you changed, then the whole suite once when the phase is done.","confidence":0.92,"est_tokens_per_turn":null,"proposal":{"kind":"claude-md","title":"Targeted tests","body":"Run only the tests covering the files you changed; run the full suite at the end of a phase."}}]}\`
-Rows \`r12\` Read \`/src/api.ts:-\`, \`r15\` Edit \`/src/api.ts\`, \`r16\` Read \`/src/api.ts:-\` with \`dedup\`, all in turn 4: \`{"focus":"a one-file change in /src/api.ts","findings":[]}\` — the second read follows your own edit, the third was deduped, and one turn is one decision.
+Rows \`r12\` Read \`/src/api.ts:-\`, \`r15\` Edit \`/src/api.ts\`, \`r16\` Read \`/src/api.ts:-\` with \`dedup\`, all in turn 4: \`{"focus":"a one-file change in /src/api.ts","findings":[]}\` — the second read follows your own edit and the third was deduped, so no unexcused occurrence remains.
 Rows \`r08\` \`test:bun test\` (turn 2, baseline), \`r23\` \`test:bun test test/db.test.ts\` (turn 6, after an edit), \`r40\` \`test:bun test\` (turn 11) followed by \`r41\` \`git:git commit …\`: \`{"focus":"a db pool fix, verified narrowly then once before the commit","findings":[]}\` — both full runs are excused, so nothing survives the Counting rules.
 Rows \`r61\` and \`r72\` both \`read:docker compose logs api --tail 2000\` in turns 11 and 13, each ~40k \`chars\` with \`persist=\`: the same shape as the first example with \`"id":"reading:unfiltered-log-dump"\`, \`"kind":"Claude keeps reading 2000 lines of api logs instead of grepping for the error"\`, \`"alternative":"Pipe log commands through grep -nE 'ERROR|Traceback' and tail -50 instead of reading the whole tail."\`, \`"confidence":0.85\`, \`"proposal":null\`.
 TURNS shows turns 14 and 15 with \`calls 0\` and \`answerChars\` 5400 and 6100 after a single edit at turn 13, neither answering a question: \`"id":"communication:restates-plan-each-turn"\`, \`"evidence":["turn:14","turn:15"]\`, \`"signature":null\`, \`"est_tokens_per_turn":1200\`, \`"alternative":"State the result in one or two lines and take the next action; do not restate the plan or recap completed steps."\`.
+Rows \`r80\`-\`r83\` under \`agent\` \`a1\` Read four files, then \`r84\` Agent \`agent:general-purpose\` flagged \`agent=general-purpose/opus/completed/41000tok/0edits/300pch\` closes that loop (a spawn row lands after the rows it caused), then \`r90\`-\`r93\` in the main loop Read the same four keys in the next turn: \`"id":"multi-agent:re-reads-what-the-agent-read"\`, \`"kind":"Claude keeps re-reading the files a subagent already read for it"\`, \`"evidence":["r80","r83","r90","r93"]\` (a row from each loop is the repeat; the four main-loop reads together are one batch), \`"signature":null\` (no single key carries it), \`"alternative":"Use the subagent's report; re-read a file it covered only to edit it."\`, \`"confidence":0.8\`, \`"est_tokens_per_turn"\` grounded in the cited turns' \`answerChars\` or 0.
 KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` and rows \`r70\` (turn 12) and \`r76\` (turn 14) carry \`test:bun test\` again: return that same id with \`"evidence":["r70","r76"]\` and a \`why\` that names turns 12 and 14 as after the steer at turn 9.
 
 ## KNOWN PATTERNS — \`id | kind | decision @ turn | previous\`. Reuse these ids; never mint a second id or signature for waste listed here.
@@ -101,7 +103,7 @@ KNOWN PATTERNS lists \`execution:full-suite-after-each-edit | … | steer @ 9\` 
 ## TURNS — \`turn | in | out | cacheCreate | calls | ms | answerChars\`, then the facts line (context window, fixed per-turn overhead, turns where a compaction happened)
 {{TURNS}}
 
-## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first. \`ms\` is wall time and includes any wait on a permission prompt, so a long \`ms\` alone is not machine cost. A row flagged \`recovered\` was rebuilt from the transcript before this plugin joined the session: its \`ms\` is 0 and its agent reads \`main\`, so never reason about its duration or which loop ran it. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
+## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first (a spawn row lands after the rows it caused: an agent's own calls finish before its Agent row does). \`ms\` is wall time and includes any wait on a permission prompt, so a long \`ms\` alone is not machine cost. A row flagged \`recovered\` was rebuilt from the transcript before this plugin joined the session: its \`ms\` is 0 and its agent reads \`main\`, so never reason about its duration or which loop ran it. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits/<promptChars>pch\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
 {{LEDGER}}
 
 Return the JSON object only.
@@ -127,6 +129,8 @@ export const buildPrompt = (state: State): string =>
     ['{{TURNS}}', turnsBlock(state)],
     ['{{LEDGER}}', ledgerBlock(state)],
   ] as const).reduce((text, [placeholder, value]) => text.split(placeholder).join(value), JUDGE_PROMPT)
+
+const ID_SHAPE = /^[a-z-]+:[a-z0-9-]{1,40}$/
 
 const unique = (xs: string[]): string[] => [...new Set(xs)]
 
@@ -163,6 +167,25 @@ const signatureOf = (value: unknown, visible: Row[]): Signature | null | undefin
   return visible.some(r => r.tool === tool && r.key === key) ? { tool, key } : undefined
 }
 
+const short = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max)}…`)
+
+// The model's own text quoted inside a one-line drop reason: whitespace collapsed first, so a
+// heredoc key or a multi-line id can never break the one-reason-per-line contract `debugDump` keeps.
+const cell = (value: unknown, max: number): string => short(collapseWs(str(value)), max)
+
+const signatureDrop = (value: unknown): string =>
+  isRecord(value)
+    ? `signature (${cell(value['tool'], 20)}, ${cell(value['key'], 40)}) matches no row`
+    : 'signature must be a (tool, key) pair or null'
+
+const handleDrop = (value: unknown, signature: Signature | null): string => {
+  const handle = cell(value, 40)
+  if (handle.length === 0) return 'evidence handle is not a string'
+  return /^turn:\d+$/.test(handle) && signature !== null
+    ? `evidence ${handle} needs signature null`
+    : `evidence ${handle} not in the ledger`
+}
+
 const handleOf = (value: unknown, state: State, visible: Row[], signature: Signature | null): string | null => {
   const handle = str(value)
   const alias = /^r(\d+)$/.exec(handle)
@@ -178,12 +201,13 @@ const handleOf = (value: unknown, state: State, visible: Row[], signature: Signa
   return null
 }
 
-const evidenceOf = (value: unknown, state: State, visible: Row[], signature: Signature | null): string[] | null => {
-  if (!Array.isArray(value) || value.length === 0) return null
-  const handles = value
-    .map(h => handleOf(h, state, visible, signature))
-    .filter((h): h is string => h !== null)
-  return handles.length === value.length ? unique(handles) : null
+// A string is the reason the evidence cannot be used; the array is the handles it maps to.
+const evidenceOf = (value: unknown, state: State, visible: Row[], signature: Signature | null): string[] | string => {
+  if (!Array.isArray(value) || value.length === 0) return 'evidence must be a non-empty array of row ids'
+  const handles = value.map(h => handleOf(h, state, visible, signature))
+  const badAt = handles.indexOf(null)
+  if (badAt >= 0) return handleDrop(value[badAt], signature)
+  return unique(handles.filter((h): h is string => h !== null))
 }
 
 const citedTurns = (state: State, evidence: string[]): number[] =>
@@ -222,24 +246,29 @@ const isKept = (state: State, id: string, signature: Signature | null): boolean 
   state.patterns.some(p =>
     p.decision === 'keep' && (p.id === id || sameSignature(p.signature, signature)))
 
-const findingOf = (value: unknown, state: State, visible: Row[]): Finding | null => {
-  if (!isRecord(value)) return null
+// A string is the one short reason the finding was dropped; the object is the finding itself.
+const findingOf = (value: unknown, state: State, visible: Row[]): Finding | string => {
+  if (!isRecord(value)) return 'not an object'
   const id = str(value['id'])
   const category = value['category']
   const kind = str(value['kind'])
   const why = str(value['why'])
   const alternative = str(value['alternative'])
   const confidence = value['confidence']
-  if (!/^[a-z-]+:[a-z0-9-]{1,40}$/.test(id)) return null
-  if (!isCategory(category) || id.slice(0, id.indexOf(':')) !== category) return null
-  if (kind.length > KIND_MAX || !kind.startsWith('Claude keeps ')) return null
-  if (alternative.length === 0 || alternative.length > ALTERNATIVE_MAX) return null
-  if (typeof confidence !== 'number' || confidence < 0.5 || confidence > 1) return null
+  if (!ID_SHAPE.test(id)) return `id ${cell(id, 40) || '(missing)'} is not <category>:<kebab-slug>`
+  if (!isCategory(category)) return 'category is not one of the nine'
+  if (id.slice(0, id.indexOf(':')) !== category) return `category ${category} does not match the id`
+  if (!kind.startsWith('Claude keeps ')) return 'kind must start with "Claude keeps "'
+  if (kind.length > KIND_MAX) return `kind is ${kind.length} chars, over ${KIND_MAX}`
+  if (alternative.length === 0) return 'alternative is empty'
+  if (alternative.length > ALTERNATIVE_MAX) return `alternative is ${alternative.length} chars, over ${ALTERNATIVE_MAX}`
+  if (typeof confidence !== 'number' || confidence < 0.5 || confidence > 1) return 'confidence is not a number in 0.5..1'
   const signature = signatureOf(value['signature'], visible)
-  if (signature === undefined || isKept(state, id, signature)) return null
+  if (signature === undefined) return signatureDrop(value['signature'])
+  if (isKept(state, id, signature)) return 'kept this session'
   const evidence = evidenceOf(value['evidence'], state, visible, signature)
-  if (evidence === null) return null
-  if (evidence.length < 2 && !why.includes('intent')) return null
+  if (typeof evidence === 'string') return evidence
+  if (evidence.length < 2 && !why.includes('intent')) return 'one handle and no stated intent in why'
   return {
     id, category, kind, evidence, signature, why, alternative, confidence,
     estTokensPerTurn: estOf(value['est_tokens_per_turn'], state, signature, evidence),
@@ -247,24 +276,42 @@ const findingOf = (value: unknown, state: State, visible: Row[]): Finding | null
   }
 }
 
-const capFindings = (findings: Finding[]): Finding[] =>
-  findings.reduce<Finding[]>((kept, f) => {
-    if (kept.length >= MAX_FINDINGS) return kept
-    if (f.signature === null && kept.filter(k => k.signature === null).length >= MAX_BEHAVIORAL_FINDINGS) return kept
-    return kept.some(k => k.id === f.id) ? kept : [...kept, f]
-  }, [])
+// Each finding under the label the drop report names it by: its own id, or its place in the reply.
+type Reviewed = { label: string; finding: Finding } | { label: string; reason: string }
+type Sifted = { findings: Finding[]; dropped: string[] }
 
-/** Reads the judge's reply into validated findings and a focus line; never throws. */
-export const parseReply = (text: string, state: State): { findings: Finding[]; focus: string | null } => {
+const labelOf = (value: unknown, index: number): string => {
+  const id = str(isRecord(value) ? value['id'] : '')
+  return ID_SHAPE.test(id) ? id : `#${index + 1}`
+}
+
+const capFindings = (reviewed: readonly Reviewed[]): Sifted =>
+  reviewed.reduce<Sifted>((kept, item) => {
+    const dropped = (reason: string): Sifted => ({ findings: kept.findings, dropped: [...kept.dropped, `${item.label}: ${reason}`] })
+    if (!('finding' in item)) return dropped(item.reason)
+    if (kept.findings.length >= MAX_FINDINGS) return dropped(`over MAX_FINDINGS (${MAX_FINDINGS})`)
+    if (item.finding.signature === null && kept.findings.filter(k => k.signature === null).length >= MAX_BEHAVIORAL_FINDINGS) {
+      return dropped(`over MAX_BEHAVIORAL_FINDINGS (${MAX_BEHAVIORAL_FINDINGS})`)
+    }
+    if (kept.findings.some(k => k.id === item.finding.id)) return dropped('the reply already reported this id')
+    return { findings: [...kept.findings, item.finding], dropped: kept.dropped }
+  }, { findings: [], dropped: [] })
+
+/** Reads the judge's reply into how many findings it returned, the valid ones, a focus line and one reason per drop; never throws. */
+export const parseReply = (text: string, state: State): { findings: Finding[]; focus: string | null; dropped: string[]; returned: number } => {
   const root = parseObject(text)
-  if (root === null) return { findings: [], focus: null }
+  if (root === null) return { findings: [], focus: null, dropped: ['reply was not JSON'], returned: 0 }
+  const raw = root['findings']
+  const focusText = collapseWs(str(root['focus']))
+  const focus = focusText.length > 0 ? focusText : null
+  if (!Array.isArray(raw)) return { findings: [], focus, dropped: ['findings was not an array'], returned: 0 }
   const visible = state.rows.slice(Math.max(0, state.rows.length - JUDGE_LEDGER_ROWS))
-  const raw: unknown[] = Array.isArray(root['findings']) ? root['findings'] : []
-  const findings = raw
-    .map(f => findingOf(f, state, visible))
-    .filter((f): f is Finding => f !== null)
-  const focus = collapseWs(str(root['focus']))
-  return { findings: capFindings(findings), focus: focus.length > 0 ? focus : null }
+  const reviewed: Reviewed[] = raw.map((value, i) => {
+    const label = labelOf(value, i)
+    const result = findingOf(value, state, visible)
+    return typeof result === 'string' ? { label, reason: result } : { label, finding: result }
+  })
+  return { ...capFindings(reviewed), focus, returned: raw.length }
 }
 
 const patternOf = (f: Finding): Pattern => ({
@@ -294,8 +341,8 @@ const capPatterns = (patterns: Pattern[]): Pattern[] => {
   return patterns.filter(p => !dropped.includes(p.id))
 }
 
-/** Folds findings into the complete registry, naming the fresh and the recurred ids. */
-export const merge = (state: State, findings: Finding[]): { patterns: Pattern[]; fresh: string[]; recurred: string[] } => {
+/** Folds findings into the complete registry, naming the fresh, the recurred, and the ids the cap evicted. */
+export const merge = (state: State, findings: Finding[]): { patterns: Pattern[]; fresh: string[]; recurred: string[]; evicted: string[] } => {
   const added = findings.filter(f => !state.patterns.some(p => p.id === f.id))
   const patterns = capPatterns([
     ...state.patterns.map(p => {
@@ -313,5 +360,7 @@ export const merge = (state: State, findings: Finding[]): { patterns: Pattern[];
     patterns,
     fresh: added.map(f => f.id).filter(kept),
     recurred: recurred.map(p => p.id).filter(kept),
+    // A validated finding the cap pushed out has no card: the shell reports it as dropped, not kept.
+    evicted: findings.map(f => f.id).filter(id => !kept(id)),
   }
 }

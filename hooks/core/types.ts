@@ -23,6 +23,7 @@ export const KEY_MAX = 200
 export const SAMPLE_CAP = 30                  // usage samples kept (State.usageSamples: "last 30")
 export const DEBUG_MAX_LINES = 40             // `/saver debug` ceiling
 export const DEBUG_MAX_PATTERNS = 20          // pattern lines `/saver debug` prints before folding the rest
+export const DEBUG_MAX_DROPPED = 6            // dropped-finding reasons `/saver debug` and the debug log print
 export const BRIEF_TOOLS = 'Read, Grep, Glob' // the tools an agent brief allows when the proposal names none
 export const CLAUDE_MD_HEADING = '## ContextSaver'
 export const RECOVERED_FLAG = 'recovered'     // `Row.flags` marker for a row rebuilt from the transcript: its `ms` is 0 and its agent reads `main`
@@ -72,6 +73,9 @@ export type Pattern = StoredPattern & {
   ignored: number                  // times the instruction was ignored
 }
 
+/** What one judge run reported: findings returned, findings kept, and one short reason per drop. */
+export type JudgeRun = { returned: number; kept: number; dropped: readonly string[] }
+
 export type Card = { patternId: string; kind: string; stats: string; why: string; fix: string; killText: string; evidence: string[] }   // evidence: ≤3 quotes built from the cited rows/turns
 export type Artifact = { patternId: string; kind: ArtifactKind; title: string; path: string; content: string; savingPct: number; mode: 'append' | 'write' | 'merge-settings' }
 export type Usage = { tokens?: number; window: number; percent?: number; compactAt?: number }
@@ -94,7 +98,7 @@ export type State = {
   notes: string[]                  // one-shot texts: drained into the next tool result or prompt
   standing: string[]               // texts re-sent with every prompt this session
   written: string[]                // `${patternId}:${kind}` of artifacts written, tried or skipped this session; propose() omits them
-  judge: { lastAtTokens: number; lastAtTurn: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null }
+  judge: { lastAtTokens: number; lastAtTurn: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null; last: JudgeRun | null }
   paneOpen: boolean
   autoOpened: boolean              // the pane auto-opened once this session (like /diff on the first edit)
   columns: number | null           // last band width seen (e.props.bodyColumns), for the auto-open decision
@@ -103,7 +107,7 @@ export type State = {
 
 export const initialState = (cwd: string, window: number): State => ({
   cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, usageSamples: [], overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
-  judge: { lastAtTokens: 0, lastAtTurn: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
+  judge: { lastAtTokens: 0, lastAtTurn: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, last: null }, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
 export type Action =
@@ -119,7 +123,7 @@ export type Action =
   | { type: 'steer.draft'; text: string }
   | { type: 'decide'; patternId: string; choice: Choice; text?: string }   // text required for steer
   | { type: 'judge.start' }
-  | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; spent: number; error: string | null }
+  | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[] }
   | { type: 'notes.drained' }
   | { type: 'standing.add'; text: string }
   | { type: 'artifact.done'; patternId: string; kind: ArtifactKind; written: boolean }   // written: true once the rule is handled — written, tried or skipped — and recorded in state.written

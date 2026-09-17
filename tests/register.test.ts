@@ -92,7 +92,8 @@ describe('register', () => {
     const debug = await $.command.run(saverRun('debug'))
     expect(debug.text, 'the three calls of the three turns already run came back').toContain('turn 3 · seq 3 · rows 3 · turns 0')
     expect(debug.text).toContain('rows test×3')
-    expect(world.logs, 'the debug flag says what was adopted').toEqual(['ContextSaver adopted 3 rows from the transcript'])
+    expect(world.logs, 'the debug flag says what was adopted, and what judges it')
+      .toEqual(['ContextSaver adopted 3 rows from the transcript · /saver check judges them now'])
 
     await $.command.run(saverRun('check'))
     await world.clock.settle()
@@ -158,8 +159,11 @@ describe('register', () => {
     expect(prompts, 'the judge was asked once').toHaveLength(1)
     expect(prompts[0], 'the row carries the time the clock measured and the size of the text')
       .toContain(`r1 | Bash | test:bun test | test | main | 1 | ${CALL_MS} | ${OUT_CHARS} | -`)
-    expect(world.logs, 'the debug flag logs every row it recorded')
-      .toEqual([`ContextSaver row r1 Bash test:bun test ${CALL_MS}ms ${OUT_CHARS}ch`])
+    expect(world.logs, 'the debug flag logs every row it recorded, and a run that found nothing as nothing')
+      .toEqual([
+        `ContextSaver row r1 Bash test:bun test ${CALL_MS}ms ${OUT_CHARS}ch`,
+        'ContextSaver judge: 0 returned · 0 kept · 0 dropped',
+      ])
   })
 
   test('the judge cadence names a waster, the pane kills it and the next tool result carries the note', async ($, on) => {
@@ -209,6 +213,29 @@ describe('register', () => {
     expect(world.toasts.join(' '), 'what the kill saved is said once, in time and in context')
       .toContain('+8s · +~1.1% context saved')
     expect((await $.command.run(saverRun('debug'))).text).toContain('saved 8s · ~1.1%')
+  })
+
+  test('a run that returned two findings and kept one says so in the log and in debug', async ($, on) => {
+    const world = startsSaver(on)
+    const bogus = rawFinding({ id: LOG_ID, category: 'reading', kind: 'Claude keeps dumping the whole api log', evidence: ['r1', 'r99'] })
+    mock.env(on, { CONTEXTSAVER_DEBUG: '1' })
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(replyText([rawFinding({ evidence: ['r1', 'r2'] }), bogus])) }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(world.logs, 'the debug flag says what the judge returned and why a finding never reached the user')
+      .toEqual(expect.arrayContaining([
+        'ContextSaver judge: 2 returned · 1 kept · 1 dropped',
+        `${LOG_ID}: evidence r99 not in the ledger`,
+      ]))
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text).toContain('judge last: 2 returned · 1 kept · 1 dropped')
+    expect(debug.text).toContain(`  ${LOG_ID}: evidence r99 not in the ledger`)
+    expect(debug.text, 'the finding that survived is the only card').toContain('cards 1')
   })
 
   test('a behavioural instruction is credited once, and its per-turn accrual stays quiet', async ($, on) => {

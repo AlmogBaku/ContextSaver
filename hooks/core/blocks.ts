@@ -69,7 +69,7 @@ export const aggregate = (rows: Row[]): KeyStat[] => {
 }
 
 const spawnFlag = (s: NonNullable<Row['spawn']>): string =>
-  `agent=${s.type}/${s.resolved ?? s.requested ?? '?'}/${s.status ?? '?'}/${s.tokens ?? '?'}tok/${s.edits ?? '?'}edits`
+  `agent=${s.type}/${s.resolved ?? s.requested ?? '?'}/${s.status ?? '?'}/${s.tokens ?? '?'}tok/${s.edits ?? '?'}edits/${s.promptChars}pch`
 
 const flagsCell = (row: Row): string => {
   const cells = [

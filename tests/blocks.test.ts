@@ -27,7 +27,7 @@ describe('blocks', () => {
   test('ledgerLine folds edit sizes and spawn metadata into the flags cell', ($, _on) => {
     expect(ledgerLine(at(2))).toBe('r2 | Edit | /src/auth.ts | other | main | 3 | 120 | 300 | +4/-2 | /src/auth.ts')
     expect(ledgerLine(at(7))).toBe(
-      'r7 | Agent | agent:explorer | other | main | 7 | 30000 | 2000 | agent=explorer/opus/completed/42000tok/0edits | -')
+      'r7 | Agent | agent:explorer | other | main | 7 | 30000 | 2000 | agent=explorer/opus/completed/42000tok/0edits/180pch | -')
   })
 
   test('summaryLine folds a (tool, key) group without an id', ($, _on) => {

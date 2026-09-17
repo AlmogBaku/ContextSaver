@@ -1,11 +1,11 @@
 import { baseline, costOf, rowsOf } from './evidence'
 import { duration, instructionOf, killPrompt, median, pctOf } from './text'
 import {
-  ALTERNATIVE_MAX, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX,
-  MAX_PATTERNS, ROW_CAP, SAMPLE_CAP, SETTLE_TURNS, initialState,
+  ALTERNATIVE_MAX, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF,
+  KEY_MAX, KIND_MAX, MAX_PATTERNS, ROW_CAP, SAMPLE_CAP, SETTLE_TURNS, initialState,
 } from './types'
 import type {
-  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Header, PaneModel,
+  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Header, JudgeRun, PaneModel,
   Pattern, Proposal, Row, Signature, State, StoredPattern, TurnStat,
 } from './types'
 
@@ -194,6 +194,7 @@ const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>
       backoff: spent > JUDGE_BUDGET_SHARE * total ? Math.min(state.judge.backoff * 2, JUDGE_MAX_BACKOFF) : state.judge.backoff,
       error: a.error,
       focus: a.focus,
+      last: { returned: a.returned, kept: a.kept, dropped: [...a.dropped] },
     },
   }
 }
@@ -463,6 +464,15 @@ const patternLines = (state: State): string[] => {
   return rest > 0 ? [...shown, `  … ${rest} more patterns`] : shown
 }
 
+// What the last run reported, and why anything it returned never reached the user.
+const judgeRunLines = (run: JudgeRun | null): string[] =>
+  run === null
+    ? []
+    : [
+        `judge last: ${run.returned} returned · ${run.kept} kept · ${run.dropped.length} dropped`,
+        ...run.dropped.slice(0, DEBUG_MAX_DROPPED).map(reason => `  ${reason}`),
+      ]
+
 /** Renders the whole state for `/saver debug` in at most 40 lines. */
 export const debugDump = (state: State): string => {
   const j = state.judge
@@ -476,6 +486,7 @@ export const debugDump = (state: State): string => {
     `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
     `notes ${state.notes.length} · standing ${state.standing.length} · written ${state.written.length}${state.written.length === 0 ? '' : `: ${state.written.join(', ')}`}`,
     `judge runs ${j.runs} · spent ${j.spent} tokens (${judgeShare(state)}% of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
+    ...judgeRunLines(j.last),
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,
     `compactions ${state.compactions.length === 0 ? 'none' : state.compactions.join(', ')}`,

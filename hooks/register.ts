@@ -7,7 +7,8 @@ import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry
 import { appendedTo, bulletOnly, mergeSettings, propose } from './core/rules'
 import { collapseWs, duration, instructionOf, pctOf } from './core/text'
 import {
-  AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, PANE_ID, PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, initialState,
+  AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, MAX_PATTERNS, PANE_ID, PANE_INLINE_ROWS,
+  PANE_TITLE, PLUGIN_NAME, initialState,
 } from './core/types'
 import type { Action, Actions, Artifact, Choice, State } from './core/types'
 import type { Host } from './host'
@@ -86,6 +87,12 @@ export function register(on: On): void {
     }
   }
 
+  // A run that reported nothing: a cold snapshot, a refusal, or a failure of ours.
+  const judgedNothing = (error: string): Action => ({
+    type: 'judge.done', patterns: state.patterns, fresh: [], recurred: [], focus: null, spent: 0, error,
+    returned: 0, kept: 0, dropped: [],
+  })
+
   async function runJudge(): Promise<void> {
     const engine = host
     if (engine === null || state.judge.running) return
@@ -98,18 +105,32 @@ export function register(on: On): void {
       failed = messageOf(err)
     }
     if (reply === null) {
-      dispatch({ type: 'judge.done', patterns: state.patterns, fresh: [], recurred: [], focus: null, spent: 0, error: failed ?? 'cold snapshot' })
+      dispatch(judgedNothing(failed ?? 'cold snapshot'))
       return
     }
     try {
-      const { findings, focus } = parseReply(reply.text, state)
+      const { findings, focus, dropped, returned } = parseReply(reply.text, state)
       const merged = merge(state, findings)
-      dispatch({ type: 'judge.done', patterns: merged.patterns, fresh: merged.fresh, recurred: merged.recurred, focus, spent: costOf(reply.usage), error: null })
+      // A finding the registry cap evicted never becomes a card, so it is dropped, not kept.
+      const reasons = [...dropped, ...merged.evicted.map(id => `${id}: evicted, over MAX_PATTERNS (${MAX_PATTERNS})`)]
+      const kept = findings.length - merged.evicted.length
+      dispatch({
+        type: 'judge.done', patterns: merged.patterns, fresh: merged.fresh, recurred: merged.recurred, focus,
+        spent: costOf(reply.usage), error: null, returned, kept, dropped: reasons,
+      })
+      try {
+        if (isDebug) {
+          engine.log(`ContextSaver judge: ${returned} returned · ${kept} kept · ${reasons.length} dropped`)
+          for (const reason of reasons.slice(0, DEBUG_MAX_DROPPED)) engine.log(reason)
+        }
+      } catch {
+        // a log we could not write is not a failed run: the findings are already in the registry
+      }
       persist()
       await autoOpen(merged.fresh)
     } catch (err) {
       // Whatever went wrong, the run is over: `running` may never stay true.
-      dispatch({ type: 'judge.done', patterns: state.patterns, fresh: [], recurred: [], focus: null, spent: 0, error: messageOf(err) })
+      dispatch(judgedNothing(messageOf(err)))
     }
   }
 
@@ -254,7 +275,7 @@ export function register(on: On): void {
       const adopted = adoptRows(await engine.messages())
       if (adopted.length === 0) return next(e)
       dispatch({ type: 'adopt', rows: adopted })
-      if (isDebug) engine.log(`ContextSaver adopted ${adopted.length} rows from the transcript`)
+      if (isDebug) engine.log(`ContextSaver adopted ${adopted.length} rows from the transcript · /saver check judges them now`)
       return next(e)
     } catch {
       return next(e)
