@@ -192,7 +192,7 @@ export type Header = {
   judgeContext: string | null       // the judge's one-line explanation of the context
   judgeRuns: number
   judgeTokens: number               // tokens the judge has spent this session; the pane's JUDGE row
-  judgeShare: number                // those tokens as a percentage of the session's, 1 decimal; `/saver debug` only
+  judgeShare: number                // those tokens as a percentage of the session's, 1 decimal; 0 while the session has none; `/saver debug` only
   judgeRunning: boolean             // a run is in flight: Check now reads `Checking…`, dims, and ignores presses
   savedPct: number
   savedMs: number

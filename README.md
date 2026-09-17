@@ -4,7 +4,7 @@
 
 **Stop Claude Code from wasting tokens doing useless shit, in realtime.**
 
-[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-200%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-206%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#under-the-hood) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
@@ -165,7 +165,7 @@ guess. The full architecture, and the judge's prompt, are in [`docs/SPEC.md`](do
 
 ```sh
 git clone https://github.com/AlmogBaku/ContextSaver && cd ContextSaver
-./scripts/check.sh                                          # validate --strict, typecheck, 201 tests
+./scripts/check.sh                                          # validate --strict, typecheck, 206 tests
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .    # run with the plugin loaded from this folder
 ```
 

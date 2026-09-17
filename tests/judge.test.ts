@@ -185,10 +185,10 @@ describe('judge', () => {
     expect(parsed.context, 'one line, whatever the model wrapped it as')
       .toBe('310k chars, over half of it three reads of the same generated client.')
     const bad = JSON.stringify({ focus: 'x', time: 'x'.repeat(201), context: 42, findings: [] })
-    expect(parseReply(bad, judgeState()), 'an essay and a number are no sentence to draw')
-      .toMatchObject({ time: null, context: null })
-    expect(parseReply(bad, judgeState()).dropped, 'and the run report says which it was, so a prompt problem is not a quiet session')
-      .toEqual(['time: 201 chars, over 200'])
+    expect(parseReply(bad, judgeState()), 'an essay is cut to a sentence; a number is no sentence at all')
+      .toMatchObject({ time: `${'x'.repeat(200)}…`, context: null })
+    expect(parseReply(bad, judgeState()).dropped, 'and the run report says it was cut, so a prompt problem is not a quiet session')
+      .toEqual(['time: 201 chars, trimmed to 200'])
     expect(parseReply(replyText([]), judgeState()), 'a reply that said nothing about them says nothing')
       .toMatchObject({ time: null, context: null })
   })
@@ -288,8 +288,19 @@ describe('judge', () => {
     expect(result.patterns[0]?.hits).toEqual(['toolu_01', 'toolu_03', 'toolu_06'])
     expect(result.patterns[0]?.why).toBe('three runs, nothing shared changed')
     expect(result.patterns[0]?.kind).toBe(judgePattern().kind)
-    expect(result.fresh).toEqual([])
+    expect(result.fresh, 'nobody has decided it, so the re-report is a card again').toEqual([SUITE_ID])
     expect(result.recurred).toEqual([])
+  })
+
+  // A reload leaves the registry holding what an earlier run found: without this the judge returns two
+  // patterns, keeps two and shows none, and `/saver debug` reads `2 returned · 2 kept · cards 0`.
+  test('merge queues a known pattern nobody has decided, unless its card is already up', ($, _on) => {
+    const known = judgeState({ patterns: [judgePattern()] })
+    expect(merge(known, [judgeFinding()]).fresh, 'found earlier, still undecided, cited again').toEqual([SUITE_ID])
+    const queued = judgeState({ patterns: [judgePattern()], cards: [SUITE_ID] })
+    expect(merge(queued, [judgeFinding()]).fresh, 'the card is in front of the user already').toEqual([])
+    const decided = judgeState({ patterns: [judgePattern({ decision: 'keep', decidedAtTurn: 3 })] })
+    expect(merge(decided, [judgeFinding()]).fresh, 'a decision is not undone by another sighting').toEqual([])
   })
 
   test('merge makes a new id fresh with the cited handles only', ($, _on) => {

@@ -267,6 +267,20 @@ describe('patterns', () => {
     expect(quiet.judge).toMatchObject({ runs: 1, backoff: 1, lastAtTokens: 0 })
   })
 
+  // A run before the first turn completes — a reload, a `/saver check` on the way in — has a session of
+  // zero tokens under it: no budget to be over, and no denominator. The debug line read `2394600%`.
+  test('a run before the first completed turn is neither over budget nor a share of nothing', async () => {
+    const state = seedState({ turn: 1, patterns: [suitePattern] })
+    expect(totalTokens(state), 'no turn has reported its tokens yet').toBe(0)
+    const done = reduce(state, { type: 'judge.done', patterns: [suitePattern], fresh: [], recurred: [], focus: null, time: null, context: null, spent: 24_000, error: null, returned: 0, kept: 0, dropped: [], usage: null })
+    expect(done.judge, 'there is nothing for the spend to be 3% of, so the cadence stands').toMatchObject({ spent: 24_000, backoff: 1 })
+    expect(debugDump(done), 'and no share is printed where none was measured').toContain('judge runs 1 · spent 24000 tokens (- of the session)')
+    expect(paneModel(done, []).header.judgeShare, 'the pane model carries no figure either').toBe(0)
+    const measured = reduce({ ...done, turns: [{ ...turnEnd(), turn: 1, calls: 2 }] }, { type: 'judge.done', patterns: done.patterns, fresh: [], recurred: [], focus: null, time: null, context: null, spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: null })
+    expect(debugDump(measured), 'once a turn is counted the share is a figure again').toContain('spent 24000 tokens (240% of the session)')
+    expect(measured.judge.backoff, 'and 24k of a 10k session is over the budget').toBe(2)
+  })
+
   test('judge.done stores what the run returned, kept, dropped and cost, and debug prints it', async () => {
     const dropped = [
       'execution:full-suite: evidence r99 not in the ledger',

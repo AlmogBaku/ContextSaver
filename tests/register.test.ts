@@ -633,6 +633,31 @@ describe('register', () => {
       .toEqual(['saver'])
   })
 
+  // What a real reload showed: the store handed back a pattern nobody had decided, the judge re-reported it
+  // with fresh evidence, and the pane stayed empty — `/saver debug` read `1 returned · 1 kept · cards 0`.
+  test('a waster the store remembered undecided is carded again when the judge cites it', async ($, on) => {
+    const world = startsSaver(on, { 'patterns:/work': [{ ...storedSuite, lastDecision: null }] })
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    const debug = await $.command.run(saverRun('debug'))
+    expect(debug.text, 'a known id with no decision on it is in front of the user, not quietly updated')
+      .toContain(`cards 1: ${SUITE_ID}`)
+    expect(debug.text).toContain('judge last: 1 returned · 1 kept · 0 dropped')
+    expect(textOf(await $.ui.render(bandRender(100))), 'and the band says the session has something to look at')
+      .toContain('Found')
+    expect(world.toasts).toEqual(['ContextSaver: 1 new waster'])
+  })
+
   // D4: the steered behaviour came back. A check that answers `nothing new` hides the one card that matters.
   test('a check counts a behaviour that came back as news', async ($, on) => {
     const world = startsSaver(on)

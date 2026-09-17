@@ -215,7 +215,8 @@ const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>
       running: false,
       runs: state.judge.runs + 1,
       spent,
-      backoff: spent > JUDGE_BUDGET_SHARE * total ? Math.min(state.judge.backoff * 2, JUDGE_MAX_BACKOFF) : state.judge.backoff,
+      // No completed turn is no budget to be over: the first run of a reloaded session doubles nothing.
+      backoff: total > 0 && spent > JUDGE_BUDGET_SHARE * total ? Math.min(state.judge.backoff * 2, JUDGE_MAX_BACKOFF) : state.judge.backoff,
       error: a.error,
       focus: a.focus,
       time: a.time,
@@ -356,8 +357,12 @@ export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap
   }
 }
 
-const judgeShare = (state: State): number =>
-  Math.round((state.judge.spent / Math.max(1, totalTokens(state))) * 1000) / 10
+// Null before the first turn completes: the session's own tokens are 0 then, and a share of nothing is
+// not a figure — a run that cost 24k printed `2394600%` of a denominator that had not been measured yet.
+const judgeShare = (state: State): number | null => {
+  const total = totalTokens(state)
+  return total === 0 ? null : Math.round((state.judge.spent / total) * 1000) / 10
+}
 
 // How full the window was after each of the last turns that reported it: the shape the header draws.
 const trendOf = (state: State): number[] =>
@@ -380,7 +385,7 @@ const headerOf = (state: State): Header => ({
   judgeContext: state.judge.context,
   judgeRuns: state.judge.runs,
   judgeTokens: state.judge.spent,
-  judgeShare: judgeShare(state),
+  judgeShare: judgeShare(state) ?? 0,
   judgeRunning: state.judge.running,
   savedPct: pctOf(state.saved.chars, state.usage.window),
   savedMs: state.saved.ms,
@@ -600,6 +605,7 @@ export const debugDump = (state: State): string => {
   const j = state.judge
   const u = state.usage
   const o = state.overhead
+  const share = judgeShare(state)
   return [
     `ContextSaver · turn ${state.turn} · seq ${state.seq} · rows ${state.rows.length} · turns ${state.turns.length} · patterns ${state.patterns.length}`,
     `rows ${classCounts(state.rows)}`,
@@ -608,7 +614,7 @@ export const debugDump = (state: State): string => {
     ...patternLines(state),
     `cards ${state.cards.length}${state.cards.length === 0 ? '' : `: ${state.cards.join(', ')}`}`,
     `notes ${state.notes.length} · standing ${state.standing.length} · written ${state.written.length}${state.written.length === 0 ? '' : `: ${state.written.join(', ')}`}`,
-    `judge runs ${j.runs} · spent ${j.spent} tokens (${judgeShare(state)}% of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} / row ${j.lastAtSeq} / ${j.lastAtMs}ms · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
+    `judge runs ${j.runs} · spent ${j.spent} tokens (${share === null ? '-' : `${share}%`} of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} / row ${j.lastAtSeq} / ${j.lastAtMs}ms · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
     `judge time: ${oneLine(j.time)}`,
     `judge context: ${oneLine(j.context)}`,
     ...judgeRunLines(j.last),

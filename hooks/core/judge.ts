@@ -337,19 +337,20 @@ const capFindings = (reviewed: readonly Reviewed[]): Sifted =>
     return { findings: [...kept.findings, item.finding], dropped: kept.dropped }
   }, { findings: [], dropped: [] })
 
-const EXPLAIN_MAX = 200   // characters of the judge's `time` and `context` sentences kept; longer is not one sentence
+const EXPLAIN_MAX = 200   // characters of the judge's `time` and `context` sentences kept; the rest is cut off
 
-// One sentence written for the user, or nothing: an explanation too long to read is no explanation.
+// One sentence written for the user: an essay is cut to the sentence's length rather than thrown away,
+// because its first 200 characters still say where the time went. Anything but text is nothing to draw.
 const explanationOf = (value: unknown): string | null => {
   const text = collapseWs(str(value))
-  return text.length > 0 && text.length <= EXPLAIN_MAX ? text : null
+  return text.length > 0 ? short(text, EXPLAIN_MAX) : null
 }
 
-// An essay where a sentence was asked for is a prompt problem, so the run report says so: without it
-// `judge time: -` reads the same whether the judge said nothing or said far too much.
+// An essay where a sentence was asked for is a prompt problem, so the run report says the cut happened:
+// without it a trimmed sentence reads like a sentence the judge chose to end there.
 const explanationDrop = (label: string, value: unknown): string[] => {
   const text = collapseWs(str(value))
-  return text.length > EXPLAIN_MAX ? [`${label}: ${text.length} chars, over ${EXPLAIN_MAX}`] : []
+  return text.length > EXPLAIN_MAX ? [`${label}: ${text.length} chars, trimmed to ${EXPLAIN_MAX}`] : []
 }
 
 /** What the judge said: the valid findings, the focus, its time and context sentences, one reason per drop, and how many it returned; never throws. */
@@ -390,6 +391,11 @@ const hasRecurred = (state: State, p: Pattern, f: Finding): boolean =>
 
 const rank = (p: Pattern): number => (p.decision === null ? 0 : 1000) + p.confidence
 
+// A cited pattern nobody has decided belongs in front of the user, whether the id is new, remembered by
+// the store or found by an earlier run: the only undecided pattern that is not news is one already queued.
+const isFresh = (state: State, patterns: Pattern[], id: string): boolean =>
+  patterns.find(p => p.id === id)?.decision === null && !state.cards.includes(id)
+
 const capPatterns = (patterns: Pattern[]): Pattern[] => {
   if (patterns.length <= MAX_PATTERNS) return patterns
   const dropped = [...patterns]
@@ -416,7 +422,7 @@ export const merge = (state: State, findings: Finding[]): { patterns: Pattern[];
   })
   return {
     patterns,
-    fresh: added.map(f => f.id).filter(kept),
+    fresh: findings.map(f => f.id).filter(id => isFresh(state, patterns, id)),
     recurred: recurred.map(p => p.id).filter(kept),
     // A validated finding the cap pushed out has no card: the shell reports it as dropped, not kept.
     evicted: findings.map(f => f.id).filter(id => !kept(id)),
