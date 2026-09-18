@@ -2,18 +2,20 @@ import type { ModelForkResult, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_ROWS, STEER_RING_TRIES, STEER_RING_WAIT_MS } from '../hooks/core/types'
+import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_ROWS, RUN_FRESH_MS, RUN_REFRESH_MS, STEER_RING_TRIES, STEER_RING_WAIT_MS } from '../hooks/core/types'
 import { assistant } from './fixtures/adopt/assistant'
 import { bashUse } from './fixtures/adopt/bashUse'
 import { prompt } from './fixtures/adopt/prompt'
 import { rawFinding } from './fixtures/judge/rawFinding'
 import { replyText } from './fixtures/judge/replyText'
+import { agentAnswer } from './fixtures/register/agentAnswer'
 import { bandRender } from './fixtures/register/bandRender'
 import { bashAnswer } from './fixtures/register/bashAnswer'
 import { CLEAR_RUN } from './fixtures/register/clearRun'
 import { compactedMessage } from './fixtures/register/compactedMessage'
 import { forkAnswer } from './fixtures/register/forkAnswer'
 import { joinedTranscript } from './fixtures/register/joinedTranscript'
+import { journalLines } from './fixtures/register/journalLines'
 import { paneRender } from './fixtures/register/paneRender'
 import { promptSubmit } from './fixtures/register/promptSubmit'
 import { saverRun } from './fixtures/register/saverRun'
@@ -21,6 +23,7 @@ import { SESSION } from './fixtures/register/session'
 import { startsSaver } from './fixtures/register/startsSaver'
 import { storedSuite } from './fixtures/register/storedSuite'
 import { usageAnswer } from './fixtures/register/usageAnswer'
+import { workflowAnswer } from './fixtures/register/workflowAnswer'
 
 const SUITE_ID = 'execution:full-suite-after-each-edit'
 const CALL_MS = 8_000
@@ -494,7 +497,7 @@ describe('register', () => {
     expect((await $.command.run(saverRun('reset'))).text).toBe('ContextSaver: session state reset')
   })
 
-  test('turn.complete records the turn, re-samples the usage and leaves a subagent alone', async ($, on) => {
+  test("turn.complete records the turn, re-samples the usage and records a subagent's turn as its loop", async ($, on) => {
     const world = startsSaver(on)
     on('tool.call', () => bashAnswer(OUT_CHARS))
     on('session.compact', ($, e) => ({ messages: e.messages }))
@@ -511,7 +514,9 @@ describe('register', () => {
     expect(first.text, 'the new tokens of the turn are the judge budget').toContain('session 22000 new')
 
     await $.turn.complete({ answer: 'from the subagent', durationMs: 900, isAborted: false, turnId: 't1', reason: 'answer', agentId: 'agent-1', usage: TURN_USAGE })
-    expect((await $.command.run(saverRun('debug'))).text, "a subagent's turn is none of ours").toContain('turns 1')
+    const looped = (await $.command.run(saverRun('debug'))).text
+    expect(looped, "a subagent's turn is no turn of ours").toContain('turns 1')
+    expect(looped, 'it is a turn of its loop, which the session now knows').toContain('runs 0 · loops 1 · active 0')
 
     await $.session.compact({ trigger: 'auto', messages: [compactedMessage] })
     const after = await $.command.run(saverRun('debug'))
@@ -534,6 +539,164 @@ describe('register', () => {
     expect(debug.text, 'the turn is on the record with the call it made').toContain('turn 1 · seq 1 · rows 1 · turns 1')
     expect(debug.text, 'the tokens it was billed are still the judge budget').toContain('session 22000 new')
     expect(debug.text, 'only the context sample of that turn was lost').toContain('turnsLeft -')
+  })
+
+  test("a subagent's turns are its loop's: tokens, time, model and how it ended reach the judge", async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: null }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await $.turn.complete({ answer: 'from the subagent', durationMs: 90_000, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'agent-1', usage: TURN_USAGE })
+    // The loop's second turn died before an answer: no usage came with it, and the way it ended is the loop's now.
+    await $.turn.complete({ answer: '', durationMs: 30_000, isAborted: false, turnId: 's2', reason: 'error', agentId: 'agent-1' })
+
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(prompts.length).toBe(1)
+    expect(prompts[0], 'two turns, their minutes and tokens summed, the model of the one that reported it, and the way the last ended')
+      .toContain('a1 | - | - | opus | 2 | 2.0m | 22k | edits 0 | checks 0 | reads 0 | - | error')
+  })
+
+  test('a Workflow launch is a run whose journal names its loops, for the band and for the judge', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    const reads: string[] = []
+    on('tool.call', ($, e) => (e.tool === 'Workflow' ? workflowAnswer : bashAnswer(OUT_CHARS)))
+    on('fs.read', ($, e) => {
+      reads.push(e.path)
+      return { value: journalLines }
+    })
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: null }
+    })
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy', turnId: 't1' })
+    await $.tool.call({ tool: 'Workflow', name: 'proxy-rewrite', script: 'export default async () => {}' })
+    await world.clock.settle()
+    expect(reads, 'the launch reads the journal at once').toEqual(['/tmp/runs/w3/journal.jsonl'])
+
+    await $.turn.complete({ answer: 'implemented', durationMs: 300_000, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'agent-1', usage: TURN_USAGE })
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+    expect(reads.length, 'a call inside the refresh window reads nothing again').toBe(1)
+    await world.clock.advance(RUN_REFRESH_MS)
+    await $.tool.call({ tool: 'Bash', command: 'bun test' })
+    await world.clock.settle()
+    expect(reads.length, 'a call past the window re-reads the journal of the run still going').toBe(2)
+
+    expect((await $.command.run(saverRun('debug'))).text).toContain('runs 1 · loops 2 · active 1')
+    const band = textOf(await $.ui.render(bandRender(120)))
+    expect(band, 'the mark stays the quiet one').toContain('◌')
+    expect(band, 'a workflow going is what the band says while nothing is found').toContain('proxy-rewrite · check:C3 · 2 agents · 0 calls')
+
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+    expect(reads.length, 'the judge reads every journal once more before it asks').toBe(3)
+    expect(prompts[0]).toContain('proxy-rewrite | w3 | loops 2 | Σ5.0m | Σ22k tok | edits 0 | turn 1')
+    expect(prompts[0], 'the stage the journal gave the loop, and what it reported')
+      .toContain('a1 | proxy-rewrite | impl:C3 | opus | 1 | 5.0m | 22k | edits 0 | checks 0 | reads 0 | report 43ch | answer')
+    expect(prompts[0], 'a stage started and not yet reported is running').toContain('a2 | proxy-rewrite | check:C3 | ? | 0 | 0.0m | 0k | edits 0 | checks 0 | reads 0 | - | running')
+  })
+
+  test('the band ages a run with no loop yet by the clock, not by the last thing that happened', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', ($, e) => (e.tool === 'Workflow' ? workflowAnswer : bashAnswer(OUT_CHARS)))
+    on('fs.read', () => ({ value: '' }))
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy', turnId: 't1' })
+    await $.tool.call({ tool: 'Workflow', name: 'proxy-rewrite', script: 'export default async () => {}' })
+    await world.clock.settle()
+
+    const launched = textOf(await $.ui.render(bandRender(120)))
+    expect(launched, 'a run whose journal has named no loop yet is a run still going').toContain('proxy-rewrite · running · 0 agents')
+
+    await world.clock.advance(RUN_FRESH_MS)
+    const aged = textOf(await $.ui.render(bandRender(120)))
+    expect(aged, 'ten minutes on, nothing reported and no turn ended: the render reads the clock itself')
+      .not.toContain('proxy-rewrite')
+    expect(aged, 'so the band goes back to the calls it has watched').toContain('1 calls watched')
+  })
+
+  test('an Agent that went to the background names its loop for the judge', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    on('tool.call', ($, e) => (e.tool === 'Agent' ? agentAnswer : bashAnswer(OUT_CHARS)))
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: null }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.tool.call({ tool: 'Agent', description: 'explore src', prompt: 'look around', subagent_type: 'Explore' })
+    await $.turn.complete({ answer: 'found it', durationMs: 90_000, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'agent-9', usage: { ...TURN_USAGE, model: 'claude-sonnet-4-5' } })
+
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(prompts[0], 'the description the call gave is the loop\'s label, and no run owns it')
+      .toContain('a1 | - | explore src | sonnet | 1 | 1.5m | 22k | edits 0 | checks 0 | reads 0 | - | answer')
+  })
+
+  test('a turn that died is said on the band until the next one starts', async ($, on) => {
+    startsSaver(on)
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({})
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.turn.complete({ answer: '', durationMs: 5_000, isAborted: false, turnId: 't1', reason: 'error' })
+
+    const dead = textOf(await $.ui.render(bandRender(120)))
+    expect(dead).toContain('✕')
+    expect(dead).toContain('Last turn ended in an API error · type anything to continue')
+
+    await $.turn.start({ text: 'again', turnId: 't2' })
+    const revived = textOf(await $.ui.render(bandRender(120)))
+    expect(revived, 'the next prompt is the continue, so the band goes back to watching').not.toContain('Last turn ended')
+    expect(revived).toContain('◌')
+    expect(revived).toContain('watching')
+  })
+
+  test('the wait before a prompt is written on the turn it followed', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: null }
+    })
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 1)
+    await world.clock.advance(3 * 60_000)
+    await $.turn.start({ text: 'back', turnId: 't2' })
+
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    expect(prompts[0], 'three minutes passed between the answer and the next prompt').toContain('1 | 20000 | 1000 | 1000 | 1 | 60000 | 4 | idle 3m')
   })
 
   test('the band wraps what is beneath it and every other drawing falls through', async ($, on) => {

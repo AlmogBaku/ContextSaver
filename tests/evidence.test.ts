@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { agentAliases, aliasOf, baseline, rowsOf, sinks, sumOf } from '../hooks/core/evidence'
+import { agentAliases, aliasOf, baseline, foldRows, pairKey, rowsOf, sinks, sumOf } from '../hooks/core/evidence'
 import { initialState } from '../hooks/core/types'
 import type { Pattern, Row } from '../hooks/core/types'
+import { foldedPair } from './fixtures/patterns/foldedPair'
+import { sampleLoop } from './fixtures/spawns/sampleLoop'
 
 const row = (seq: number, ms: number, chars: number): Row => ({
   seq, id: `t${seq}`, tool: 'Bash', key: 'test:bun test', cls: 'test', agent: 'main', turn: seq,
@@ -40,6 +42,17 @@ describe('evidence', () => {
     expect(aliasOf(aliases, 'agent-2')).toEqual('a2')
     expect(aliasOf(aliases, 'agent-9'), 'a loop the rows never showed keeps its own id').toEqual('agent-9')
     expect([...agentAliases([]).entries()], 'the main loop is always named').toEqual([['main', 'main']])
+  })
+
+  test('agentAliases names the rows\' loops first, then the loops the rows never showed', async () => {
+    const inLoop = (seq: number, agent: string): Row => ({ ...row(seq, 100, 10), agent })
+    const rows = [inLoop(1, 'agent-7'), inLoop(2, 'agent-2')]
+    const loops = [sampleLoop({ id: 'agent-9' }), sampleLoop({ id: 'agent-7' }), sampleLoop({ id: 'agent-4' })]
+    expect([...agentAliases(rows, loops).entries()], 'the ledger order first, so every row keeps the alias it had')
+      .toEqual([['main', 'main'], ['agent-7', 'a1'], ['agent-2', 'a2'], ['agent-9', 'a3'], ['agent-4', 'a4']])
+    expect([...agentAliases([], loops).entries()], 'loops alone are named in their own order')
+      .toEqual([['main', 'main'], ['agent-9', 'a1'], ['agent-7', 'a2'], ['agent-4', 'a3']])
+    expect(agentAliases(rows, loops).get('agent-2'), 'a loop the ledger showed keeps the number the rows alone gave it').toBe(agentAliases(rows).get('agent-2'))
   })
 
   test('sinks names the consumers by the job they did, not by the tool that did it', async () => {
@@ -81,6 +94,59 @@ describe('evidence', () => {
       { label: 'agents', amount: 88_000, count: 1 },
     ])
     expect(sinks([inLoop, spawn], 'chars').total).toBe(20_000)
+  })
+
+  test('with loops known, the agents sink is the loops\' own time, and a Workflow launch is a spawn row too', async () => {
+    const spawn: Row = { ...row(3, 50, 300), tool: 'Agent', key: 'agent:general', cls: 'other' }
+    const launch: Row = { ...row(4, 50, 900), tool: 'Workflow', key: 'Workflow:proxy-rewrite', cls: 'other' }
+    const inLoop = { ...row(1, 40_000, 20_000), agent: 'agent-1' }
+    const loops = [sampleLoop({ id: 'agent-1', ms: 300_000 }), sampleLoop({ id: 'agent-2', ms: 120_000, ended: null })]
+    expect(sinks([inLoop, spawn, launch], 'ms', loops), 'the loops\' minutes, counted per loop; the rows\' 50 ms are not in it').toEqual({
+      total: 40_000,
+      sinks: [
+        { label: 'agents', amount: 420_000, count: 2 },
+        { label: 'tests', amount: 40_000, count: 1 },
+      ],
+    })
+    expect(sinks([inLoop, spawn, launch], 'ms'), 'without loops the spawn rows\' own time is all there is').toEqual({
+      total: 40_000,
+      sinks: [{ label: 'tests', amount: 40_000, count: 1 }, { label: 'agents', amount: 100, count: 2 }],
+    })
+    expect(sinks([inLoop, spawn, launch], 'chars', loops), 'the context is unchanged: the rows say what the results cost').toEqual({
+      total: 20_000,
+      sinks: [{ label: 'tests', amount: 20_000, count: 1 }, { label: 'agents', amount: 1_200, count: 2 }],
+    })
+  })
+
+  test('foldRows folds the rows the cap dropped onto their pairs: counted, dated, flagged, never cited', async () => {
+    const ask: Row = { ...row(4, 300_000, 400), tool: 'AskUserQuestion', key: 'AskUserQuestion:which gateway', cls: 'other', flags: ['ask', 'recommended'] }
+    const suite = pairKey(row(1, 0, 0))
+    const first = foldRows({}, [row(1, 100, 10), { ...row(2, 200, 20), agent: 'agent-1' }])
+    expect(first[suite], 'one pair, two rows, and the loop the first of them ran in').toEqual({
+      tool: 'Bash', key: 'test:bun test', cls: 'test', agent: 'main', count: 2, ms: 300, chars: 30,
+      firstTurn: 1, lastTurn: 2, flags: { ask: 0, recommended: 0, err: 0 },
+    })
+    const grown = foldRows(first, [{ ...row(3, 50, 5), flags: ['err'] }, ask])
+    expect(grown[suite], 'a later drop grows the fold it already has').toEqual({
+      ...first[suite], count: 3, ms: 350, chars: 35, lastTurn: 3, flags: { ask: 0, recommended: 0, err: 1 },
+    })
+    expect(grown[pairKey(ask)], 'a question is a pair of its own: its wait and its default are counted')
+      .toMatchObject({ count: 1, ms: 300_000, flags: { ask: 1, recommended: 1, err: 0 } })
+    expect(foldRows({}, []), 'nothing dropped, nothing folded').toEqual({})
+  })
+
+  test('sinks count the folds the cap left behind wherever their rows would have counted', async () => {
+    const folded = {
+      [pairKey({ tool: 'Bash', key: 'test:bun test' })]: foldedPair(),
+      [pairKey({ tool: 'Agent', key: 'agent:explore' })]: foldedPair({ tool: 'Agent', key: 'agent:explore', cls: 'other', count: 2, ms: 88_000, chars: 34_000 }),
+    }
+    expect(sinks([row(1, 60_000, 9_000)], 'ms', [], folded), 'the dropped runs are in the total; the dropped spawn rows stay beside it').toEqual({
+      total: 660_000,
+      sinks: [{ label: 'tests', amount: 660_000, count: 11 }, { label: 'agents', amount: 88_000, count: 2 }],
+    })
+    expect(sinks([row(1, 60_000, 9_000)], 'chars', [], folded).total, 'the same in context').toBe(99_000)
+    expect(sinks([row(1, 60_000, 9_000)], 'ms'), 'without the folds the rows are all there is')
+      .toEqual({ total: 60_000, sinks: [{ label: 'tests', amount: 60_000, count: 1 }] })
   })
 
   test('sinks count a rebuilt row for its size and never for a duration nobody recorded', async () => {

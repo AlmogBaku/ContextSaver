@@ -82,13 +82,14 @@ const DETAIL_ROWS = 3         // 'why', 'fix' and the summary row before the cit
 const STAT_ROWS = 2           // the stats line and the fix line of a folded card
 const GLYPHS = {
   live: '●', fixed: '✓', noted: '✎', ignored: '–', fix: '→', field: '›', quote: '↳',
-  check: '↻', write: '✎', tryOnce: '▸', skip: '–', checking: '◐', watching: '◌',
+  check: '↻', write: '✎', tryOnce: '▸', skip: '–', checking: '◐', watching: '◌', died: '✕',
 } as const
 const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.ignored, steer: GLYPHS.noted, kill: GLYPHS.fixed }
 // What a decision is called once it is taken: the same three words the verbs, the toasts and the replies use.
 const DECIDED_WORD: Record<Choice, string> = { keep: 'ignored', steer: 'fixed with a note', kill: 'fixed' }
-// The band's mark, one per state: a run in flight, cards waiting, a saving to show off, or a quiet watch.
+// The band's mark, one per state: a dead turn, a run in flight, cards waiting, a saving to show off, or a quiet watch.
 const BAND_MARK: Record<BandModel['state'], { text: string; color?: string; isDim?: true }> = {
+  died: { text: GLYPHS.died, color: TONES.hot },
   checking: { text: GLYPHS.checking, isDim: true },
   found: { text: GLYPHS.live, color: TONES.accent },
   saved: { text: GLYPHS.fixed, color: TONES.good },
@@ -123,6 +124,10 @@ const BAND_CHECKING = 'checking this session…'
 const BAND_WATCHING = 'watching'              // before the first row there is nothing to count
 const BAND_QUIET = 'nothing wasteful yet'
 const BAND_WATCHED = 'calls watched'
+const BAND_RUNNING = 'running'                // a workflow whose stage the journal has not named yet
+const BAND_DIED = 'Last turn ended in '
+const BAND_CONTINUE = 'type anything to continue'
+const DIED_WORD = { error: 'an API error', refusal: 'a refusal' } as const
 const BAND_SAVED = 'saved '
 const BAND_CONTEXT = ' of context'
 const BAND_SESSION = ' this session'
@@ -539,10 +544,12 @@ const totalText = (card: Card): string => {
   const { unit, calls, ms, chars } = card.total
   const plural = calls === 1 ? '' : 's'
   // A behavioural card counts turns and states what the judge estimates each one costs; the unit is
-  // the model's to say, never inferred from the evidence the details happened to keep.
-  return unit === 'turns'
-    ? joined([`${calls} turn${plural}`, chars > 0 ? `~${kilo(tokensOf(chars))} tokens per turn` : null])
-    : joined([`${calls} call${plural}`, ms > 0 ? duration(ms) : null, `${kilo(chars)} chars of context`])
+  // the model's to say, never inferred from the evidence the details happened to keep. A card that
+  // cites loops counts agents: their wall time is measured, and the estimate is what each turn of theirs cost.
+  const estimate = chars > 0 ? `~${kilo(tokensOf(chars))} tokens per turn` : null
+  if (unit === 'turns') return joined([`${calls} turn${plural}`, estimate])
+  if (unit === 'agents') return joined([`${calls} agent${plural}`, ms > 0 ? duration(ms) : null, estimate])
+  return joined([`${calls} call${plural}`, ms > 0 ? duration(ms) : null, `${kilo(chars)} chars of context`])
 }
 
 /** The details behind 'i': why, the fix, the summary, and the calls behind the claim. */
@@ -879,11 +886,29 @@ const savedLine = (model: BandModel): BandSegment[] => [
     : []),
 ]
 
+/** How the last turn died and what to do about it; the fact alone where the advice does not fit. */
+const diedLines = (died: BandModel['died']): string[] => {
+  const fact = `${BAND_DIED}${died === 'refusal' ? DIED_WORD.refusal : DIED_WORD.error}`
+  return [joined([fact, BAND_CONTINUE]), fact]
+}
+
+/** The workflow still going, longest phrasing first: the calls are given back first, then the stage, never the name. */
+const runningLines = (run: NonNullable<BandModel['running']>): string[] => {
+  const agents = counted(run.loops, 'agent')
+  return [
+    joined([run.name, run.label ?? BAND_RUNNING, agents, counted(run.calls, 'call')]),
+    joined([run.name, run.label ?? BAND_RUNNING, agents]),
+    joined([run.name, agents]),
+  ]
+}
+
 /** The teaser for the state the session is in, longest phrasing first. */
 const bandLines = (model: BandModel): BandSegment[][] => {
+  if (model.state === 'died') return diedLines(model.died).map(text => [{ text }])
   if (model.state === 'checking') return [[{ text: BAND_CHECKING, isDim: true }]]
   if (model.state === 'found') return foundLines(model).map(text => [{ text, color: TONES.accent }])
   if (model.state === 'saved') return [savedLine(model)]
+  if (model.running !== null) return runningLines(model.running).map(text => [{ text, isDim: true }])
   return [[{ text: model.calls === 0 ? BAND_WATCHING : joined([`${model.calls} ${BAND_WATCHED}`, BAND_QUIET]), isDim: true }]]
 }
 

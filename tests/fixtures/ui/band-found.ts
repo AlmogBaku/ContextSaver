@@ -3,6 +3,8 @@ import type { BandModel } from '../../../hooks/core/types'
 /** The band with two cards waiting: the teaser that says what they have already cost. */
 export const bandFound: BandModel = {
   state: 'found',
+  died: null,
+  running: null,
   fresh: 2,
   costPct: 12,
   costMs: 3_060_000,

@@ -11,14 +11,17 @@ const RESERVED = ['tool', 'tool_use_id', 'agentId', 'consent'] as const
 
 const HEAD_MAX = 80   // characters of result.text quoted as evidence (Row.head)
 
-// A leading `cd <dir> &&` or `VAR=value` is noise in front of the command that matters.
-const NOISE = /^(?:cd\s+[^\s&|;]+\s*&&\s*|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)/
+// A leading `cd <dir> &&`, `VAR=value`, `timeout <duration>` or `time` is noise in front of the command that matters.
+const NOISE = /^(?:cd\s+[^\s&|;]+\s*&&\s*|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|timeout\s+\d+[smhd]?\s+|time\s+)/
 
 // `a && b`, `a; b`, `a || b`: one call can carry several commands, and quoting is not worth parsing.
 const CHAIN = /&&|\|\||;/
 
+// From the first pipe or redirect on (an fd digit like `2>` goes with it): how the output was filtered, not what ran.
+const FILTER = /\s*(?:\d?[<>]|\|).*$/
+
 // Script runners: what follows them is the command that matters (longest first).
-const RUNNERS = ['npm run', 'bun run', 'bun x', 'pnpm run', 'yarn run', 'npx', 'bunx', 'pnpm', 'yarn'] as const
+const RUNNERS = ['npm run', 'bun run', 'bun x', 'pnpm run', 'yarn run', 'python3 -m', 'python -m', 'npx', 'bunx', 'pnpm', 'yarn'] as const
 
 // Script names seen after a runner (`bun run lint`), which no binary in the table covers.
 const SCRIPTS: Readonly<Record<string, CommandClass>> = { test: 'test', lint: 'lint', format: 'format', typecheck: 'typecheck', build: 'build' }
@@ -56,11 +59,19 @@ const stripNoise = (command: string): string => {
 
 const headToken = (command: string): string => command.split(' ')[0] ?? ''
 
+// The head by its basename: `venv/bin/python -m pytest` is `python -m pytest` to the table.
+const baseHead = (command: string): string => {
+  const head = headToken(command)
+  return `${head.slice(head.lastIndexOf('/') + 1)}${command.slice(head.length)}`
+}
+
 const tableClass = (command: string): CommandClass | null =>
   COMMANDS.find(([head]) => command === head || command.startsWith(`${head} `))?.[1] ?? null
 
+const bareOf = (segment: string): string => stripNoise(collapseWs(segment))
+
 const segmentClass = (segment: string): CommandClass => {
-  const bare = stripNoise(collapseWs(segment))
+  const bare = baseHead(bareOf(segment))
   const direct = tableClass(bare)
   if (direct !== null) return direct
   const runner = RUNNERS.find(r => bare === r || bare.startsWith(`${r} `))
@@ -69,12 +80,17 @@ const segmentClass = (segment: string): CommandClass => {
   return tableClass(script) ?? SCRIPTS[headToken(script)] ?? 'other'
 }
 
-/** Classifies a shell command by what it does, seeing through cd, env, runner prefixes and `&&`/`;`/`||` chains. */
+const segmentsOf = (command: string): string[] => collapseWs(command).split(CHAIN)
+
+/** Classifies a shell command by what it does, seeing through cd, env, timeout, runner prefixes and `&&`/`;`/`||` chains. */
 export const classOf = (command: string): CommandClass =>
-  collapseWs(command)
-    .split(CHAIN)
+  segmentsOf(command)
     .map(segmentClass)
     .find(cls => cls !== 'other') ?? 'other'
+
+// The key names what ran: the segment that classified, as typed, minus the noise before it and the filtering after it.
+const canonicalOf = (command: string): string =>
+  bareOf(segmentsOf(command).find(segment => segmentClass(segment) !== 'other') ?? '').replace(FILTER, '').trim()
 
 /** Computes the ledger key and command class of a call from its arguments alone. */
 export const normalize = (tool: string, input: unknown): { key: string; cls: CommandClass } => {
@@ -82,7 +98,8 @@ export const normalize = (tool: string, input: unknown): { key: string; cls: Com
   if (tool === 'Bash') {
     const command = collapseWs(asString(args.command) ?? '')
     const cls = classOf(command)
-    return { key: `${cls}:${command}`.slice(0, KEY_MAX), cls }
+    // An `other` command has no segment that named something: the whole pipeline is the key.
+    return { key: `${cls}:${cls === 'other' ? command : canonicalOf(command)}`.slice(0, KEY_MAX), cls }
   }
   if (FILE_TOOLS.includes(tool)) {
     const path = pathArg(args)
@@ -117,6 +134,8 @@ const flagsOf = (e: ToolEvent, result: ToolCallResult, res: Record<string, unkno
   const persisted = e.tool === 'Bash' ? asNumber(res.persistedOutputSize) : null
   // `bg` describes a call that ran: a denied or errored Bash started no background task.
   const isBackground = answered(result) && (e.run_in_background === true || asString(res.backgroundTaskId) !== null)
+  // An ask's `ms` is the wait for the person; `recommended` says the model marked an option for them.
+  const isAsk = e.tool === 'AskUserQuestion'
   return [
     result.isError === true ? 'err' : '',
     result.deny !== undefined ? 'denied' : '',
@@ -125,6 +144,8 @@ const flagsOf = (e: ToolEvent, result: ToolCallResult, res: Record<string, unkno
     e.tool === 'Bash' && isBackground ? 'bg' : '',
     e.tool === 'Bash' && asNumber(res.timedOutAfterMs) !== null ? 'timeout' : '',
     persisted !== null ? `persist=${persisted}` : '',
+    isAsk ? 'ask' : '',
+    isAsk && JSON.stringify(e.questions ?? '').includes('(Recommended)') ? 'recommended' : '',
   ].filter(flag => flag !== '')
 }
 

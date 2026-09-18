@@ -5,9 +5,10 @@ import {
   bandModel, cardOf, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce,
   tokensToCompaction, toStored, totalTokens, turnsToCompaction,
 } from '../hooks/core/patterns'
+import { parseJournal } from '../hooks/core/spawns'
 import { instructionOf, killPrompt } from '../hooks/core/text'
-import { JUDGE_MAX_BACKOFF, MAX_PATTERNS, NO_CALLS, ROW_CAP, SETTLE_TURNS } from '../hooks/core/types'
-import type { Action, Card, Pattern, Row, State } from '../hooks/core/types'
+import { JUDGE_MAX_BACKOFF, LOOP_CAP, MAX_PATTERNS, NO_CALLS, ROW_CAP, RUN_FRESH_MS, SETTLE_TURNS } from '../hooks/core/types'
+import type { Action, Card, Loop, Pattern, Row, State } from '../hooks/core/types'
 import { chattyPattern } from './fixtures/patterns/chattyPattern'
 import { claudeMdArtifact } from './fixtures/patterns/claudeMdArtifact'
 import { junkRegistry } from './fixtures/patterns/junkRegistry'
@@ -15,11 +16,15 @@ import { seedState } from './fixtures/patterns/seedState'
 import { suitePattern } from './fixtures/patterns/suitePattern'
 import { testRow } from './fixtures/patterns/testRow'
 import { turnEnd } from './fixtures/patterns/turnEnd'
+import { journalText } from './fixtures/spawns/journalText'
+import { sampleLoop } from './fixtures/spawns/sampleLoop'
+import { sampleRun } from './fixtures/spawns/sampleRun'
+import { spawnedState } from './fixtures/spawns/spawnedState'
 
 const withSeq = (over: Partial<Omit<Row, 'seq'>>, seq: number): Row => ({ ...testRow(over), seq })
 
-// `paneModel` names the loops once for the whole draw; a test drawing one card names them itself.
-const cardIn = (p: Pattern, state: State, n: number): Card => cardOf(p, state, n, agentAliases(state.rows))
+// `paneModel` names the loops once for the whole draw; a test drawing one card names them itself, the same way.
+const cardIn = (p: Pattern, state: State, n: number): Card => cardOf(p, state, n, agentAliases(state.rows, state.loops))
 
 const steered = (over: Partial<Pattern> = {}): Pattern => ({
   ...suitePattern, hits: ['r-1', 'r-2'], decision: 'steer', decidedAtTurn: 5, lastDecision: 'steer',
@@ -28,9 +33,123 @@ const steered = (over: Partial<Pattern> = {}): Pattern => ({
 
 describe('patterns', () => {
   test('turn.start counts the turn', async () => {
-    const one = reduce(seedState(), { type: 'turn.start' })
+    const one = reduce(seedState(), { type: 'turn.start', now: 0 })
     expect(one.turn).toBe(1)
-    expect(reduce(one, { type: 'turn.start' }).turn).toBe(2)
+    expect(reduce(one, { type: 'turn.start', now: 0 }).turn).toBe(2)
+  })
+
+  test('turn.start writes the wait since the last completed turn onto it, when that turn was dated', async () => {
+    const dated = seedState({ turn: 2, turns: [{ ...turnEnd({ at: 1_000 }), turn: 1, calls: 0 }, { ...turnEnd({ at: 5_000 }), turn: 2, calls: 0 }] })
+    const next = reduce(dated, { type: 'turn.start', now: 185_000 })
+    expect(next.turns.map(t => t.idleMs), 'only the last turn is dated; the one before kept its own').toEqual([0, 180_000])
+    const undated = seedState({ turn: 1, turns: [{ ...turnEnd({ at: 0 }), turn: 1, calls: 0 }] })
+    expect(reduce(undated, { type: 'turn.start', now: 185_000 }).turns[0]?.idleMs, 'a turn with no clock reading says nothing').toBe(0)
+    expect(reduce(dated, { type: 'turn.start', now: 4_000 }).turns[1]?.idleMs, 'a clock that ran backwards is no wait').toBe(0)
+  })
+
+  test('loop.turn creates the loop at its first turn and grows it turn by turn', async () => {
+    const first: Action = { type: 'loop.turn', agentId: 'agent-1', model: null, ms: 60_000, tokens: { input: 1_000, output: 200, cacheRead: 5_000, cacheCreate: 300 }, ended: 'answer', turn: 4 }
+    const one = reduce(seedState({ turn: 5, seq: 9 }), first)
+    expect(one.loops).toEqual([{
+      id: 'agent-1', run: null, label: null, phase: null, model: null, turns: 1, ms: 60_000,
+      tokens: { input: 1_000, output: 200, cacheRead: 5_000, cacheCreate: 300 }, ended: 'answer', firstTurn: 4, firstSeq: 9, outcome: null,
+      calls: 0, edits: 0, checks: 0, reads: 0,
+    }])
+    const two = reduce(one, { ...first, model: 'claude-opus-4-1', ms: 30_000, ended: 'error', turn: 5 })
+    expect(two.loops[0]).toMatchObject({ turns: 2, ms: 90_000, tokens: { input: 2_000, output: 400, cacheRead: 10_000, cacheCreate: 600 }, ended: 'error', model: 'claude-opus-4-1', firstTurn: 4 })
+    expect(reduce(two, { ...first, model: null, turn: 6 }).loops[0], 'a turn that names no model keeps the one known').toMatchObject({ model: 'claude-opus-4-1', ended: 'answer', turns: 3 })
+    const capped = Array.from({ length: LOOP_CAP + 1 }, (_, i) => ({ ...first, agentId: `agent-${i + 1}` }))
+      .reduce((state, action) => reduce(state, action), seedState())
+    expect(capped.loops.length).toBe(LOOP_CAP)
+    expect(capped.loops[0]?.id, 'the oldest is dropped').toBe('agent-2')
+  })
+
+  test('agent.start names a loop and its model, and a row of an unknown loop creates a bare one', async () => {
+    const named = reduce(seedState({ turn: 3, seq: 2 }), { type: 'agent.start', agentId: 'agent-1', description: 'run the suite', model: 'claude-sonnet-4-5' })
+    expect(named.loops[0]).toMatchObject({ id: 'agent-1', label: 'run the suite', model: 'claude-sonnet-4-5', run: null, turns: 0, firstTurn: 3, firstSeq: 2 })
+    const relabelled = reduce(named, { type: 'agent.start', agentId: 'agent-1', description: '', model: null })
+    expect(relabelled.loops[0], 'an empty description and no model change nothing').toMatchObject({ label: 'run the suite', model: 'claude-sonnet-4-5' })
+    const byRow = reduce(seedState({ turn: 6, seq: 4 }), { type: 'row', row: testRow({ id: 'r-9', agent: 'agent-7', turn: 6 }) })
+    expect(byRow.loops).toEqual([{
+      id: 'agent-7', run: null, label: null, phase: null, model: null, turns: 0, ms: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 }, ended: null, firstTurn: 6, firstSeq: 5, outcome: null,
+      calls: 1, edits: 0, checks: 1, reads: 0,
+    }])
+    expect(reduce(byRow, { type: 'row', row: testRow({ id: 'r-10', agent: 'agent-7', turn: 7 }) }).loops[0], 'a second row is counted on the loop and changes nothing else')
+      .toEqual({ ...byRow.loops[0], calls: 2, checks: 2 })
+    expect(reduce(seedState(), { type: 'row', row: testRow() }).loops, 'the main loop is no agent').toEqual([])
+  })
+
+  test('a row is counted on its loop as it lands, so the count outlives the row', async () => {
+    const edit = testRow({ id: 'r-e', tool: 'Edit', key: '/src/a.ts', cls: 'other', paths: ['/src/a.ts'], agent: 'agent-1', turn: 4 })
+    const read = testRow({ id: 'r-r', tool: 'Read', key: '/src/a.ts:-', cls: 'read', agent: 'agent-1', turn: 4 })
+    const main = testRow({ id: 'r-m', turn: 4 })
+    const state = [edit, read, main].reduce((s, row) => reduce(s, { type: 'row', row }), seedState({ turn: 4, loops: [sampleLoop()] }))
+    expect(state.loops[0], 'two of its own rows: an edit and a read; the main loop\'s row is not its').toMatchObject({ id: 'agent-1', calls: 2, edits: 1, checks: 0, reads: 1 })
+    const full = seedState({
+      turn: 4, seq: ROW_CAP, loops: [sampleLoop({ calls: ROW_CAP, checks: ROW_CAP })],
+      rows: Array.from({ length: ROW_CAP }, (_, i) => withSeq({ id: `old-${i}`, agent: 'agent-1' }, i + 1)),
+    })
+    const capped = reduce(full, { type: 'row', row: testRow({ id: 'r-new', agent: 'agent-1', turn: 4 }) })
+    expect(capped.rows.some(r => r.id === 'old-0'), 'the oldest row is gone').toBe(false)
+    expect(capped.loops[0], 'and the loop still counts it').toMatchObject({ calls: ROW_CAP + 1, checks: ROW_CAP + 1 })
+  })
+
+  test('run.start appends a run once, and run.journal fills its loops in', async () => {
+    const launched = reduce(seedState({ turn: 4, seq: 3 }), { type: 'run.start', run: { id: 'w3', name: 'proxy-rewrite', dir: '/tmp/runs/w3' }, now: 1_000_000 })
+    expect(launched.runs).toEqual([sampleRun()])
+    expect(reduce(launched, { type: 'run.start', run: { id: 'w3', name: 'proxy-rewrite', dir: null }, now: 2_000_000 }), 'a resume is the run already known').toEqual(launched)
+    const read = reduce(launched, { type: 'run.journal', runId: 'w3', entries: parseJournal(journalText), now: 1_050_000 })
+    expect(read.runs[0]?.refreshedAt).toBe(1_050_000)
+    expect(read.loops.map(l => [l.id, l.run, l.label, l.phase, l.outcome])).toEqual([
+      ['agent-1', 'w3', 'impl:C3', 'build', { kind: 'report', chars: 'Implemented C3: the proxy now retries once.'.length }],
+      ['agent-2', 'w3', 'review:C3-r1', null, { kind: 'findings', critical: 0, high: 1, medium: 0, low: 2 }],
+      ['agent-3', null, null, null, { kind: 'report', chars: JSON.stringify({ summary: 'ok', files: 3 }).length }],
+    ])
+    expect(read.loops[0], 'a loop the journal created is dated by the turn of the read').toMatchObject({ firstTurn: 4, firstSeq: 3, turns: 0 })
+    const again = reduce(read, { type: 'run.journal', runId: 'w3', entries: [{ kind: 'started', agentId: 'agent-1', label: null, phase: null }], now: 1_060_000 })
+    expect(again.loops[0], 'a started entry with nothing in it keeps what is known').toMatchObject({ label: 'impl:C3', phase: 'build' })
+    expect(reduce(read, { type: 'run.journal', runId: 'w9', entries: [], now: 1 }).runs[0]?.refreshedAt, 'an unknown run refreshes nothing').toBe(1_050_000)
+  })
+
+  test('the band says the session died, and which run is going', async () => {
+    const lastTurn = (ended: 'error' | 'refusal' | 'aborted'): State => seedState({ turn: 3, turns: [{ ...turnEnd({ ended, at: 9_000 }), turn: 3, calls: 1 }] })
+    const died = lastTurn('error')
+    expect(bandModel(died)).toMatchObject({ state: 'died', died: 'error' })
+    expect(bandModel({ ...died, judge: { ...died.judge, running: true } }).state, 'a dead turn outranks a check in flight').toBe('died')
+    expect(bandModel(reduce(died, { type: 'turn.start', now: 10_000 })), 'a new prompt revives it').toMatchObject({ state: 'watching', died: null })
+    expect(bandModel(lastTurn('refusal')).died).toBe('refusal')
+    expect(bandModel(lastTurn('aborted')).died, 'an abort is the person, not a death').toBe(null)
+    const spawned = spawnedState()
+    expect(bandModel(spawned).running, 'the run with an unended loop: its loops, their rows, the stage running')
+      .toEqual({ name: 'proxy-rewrite', loops: 3, calls: 6, label: 'review:C3-r1' })
+    const ended = spawnedState({ loops: spawned.loops.map(l => ({ ...l, ended: 'answer' as const })) })
+    expect(bandModel(ended, 1_000_000 + RUN_FRESH_MS).running, 'every loop ended and the run is old').toBe(null)
+    const young = seedState({ runs: [sampleRun({ at: 5_000 })] })
+    expect(bandModel(young, 5_000 + RUN_FRESH_MS - 1).running, 'a run too young to have a loop yet').toEqual({ name: 'proxy-rewrite', loops: 0, calls: 0, label: null })
+    expect(bandModel(young).running, 'with no clock given the newest reading the state holds is the clock').toEqual({ name: 'proxy-rewrite', loops: 0, calls: 0, label: null })
+    expect(bandModel(young, 5_000 + RUN_FRESH_MS).running).toBe(null)
+  })
+
+  test('a card citing loops quotes each loop as evidence and counts agents', async () => {
+    const p: Pattern = {
+      ...chattyPattern, id: 'multi-agent:check-loops-for-shell-steps', category: 'multi-agent',
+      hits: ['agent:agent-2', 'agent:agent-4'], estTokensPerTurn: 30_000,
+    }
+    const state = spawnedState({ patterns: [p], cards: [p.id] })
+    const card = cardIn(p, state, 1)
+    expect(card.total, 'two loops, their time, the estimate in chars').toEqual({ unit: 'agents', calls: 2, ms: 132_000, chars: 120_000 })
+    expect(card.stats).toBe('2× · turns 8–9')
+    expect(card.evidence).toEqual([
+      { turn: 9, what: 'explore src · sonnet', agent: 'a4', ms: 30_000, chars: 0, head: '12k tokens · 0 edits' },
+      { turn: 8, what: 'check:C3 · claude-sonnet-4-5', agent: 'a2', ms: 102_000, chars: 0, head: '48k tokens · 0 edits' },
+    ])
+    const bare: Loop = sampleLoop({ id: 'agent-5', label: null, model: null, firstTurn: 9, tokens: { input: 400, output: 0, cacheRead: 0, cacheCreate: 0 } })
+    const unnamed = cardIn({ ...p, hits: ['agent:agent-5'] }, spawnedState({ loops: [...state.loops, bare] }), 1)
+    expect(unnamed.evidence[0]).toEqual({ turn: 9, what: 'agent · ?', agent: 'a5', ms: 300_000, chars: 0, head: '0k tokens · 0 edits' })
+    expect(paneModel(state, []).wasters[0]?.evidence[0]?.agent, 'the pane names the loop the same way').toBe('a4')
+    expect(debugDump(state)).toContain('runs 1 · loops 4 · active 1')
+    expect(debugDump(seedState())).toContain('runs 0 · loops 0 · active 0')
   })
 
   test('row numbers the ledger, caps it and grows a matching pattern', async () => {
@@ -51,6 +170,28 @@ describe('patterns', () => {
     expect(capped.rows).toHaveLength(ROW_CAP)
     expect(capped.rows[0]?.id).toBe('old-1')
     expect(capped.rows[ROW_CAP - 1]?.id).toBe('r-new')
+  })
+
+  test('the row the cap drops is folded into its pair, so a long session keeps counting it', async () => {
+    const full = seedState({
+      seq: ROW_CAP,
+      rows: Array.from({ length: ROW_CAP }, (_, i) => withSeq({ id: `old-${i + 1}`, flags: i === 0 ? ['err'] : [] }, i + 1)),
+    })
+    const capped = reduce(full, { type: 'row', row: testRow({ id: 'r-new', turn: 2 }) })
+    expect(capped.rows, 'the ledger is still capped').toHaveLength(ROW_CAP)
+    expect(capped.folded, 'and the row it pushed off is counted under its pair, with no id to cite').toEqual({
+      'Bash\ttest:bun test': {
+        tool: 'Bash', key: 'test:bun test', cls: 'test', agent: 'main', count: 1, ms: 60_000, chars: 9_000,
+        firstTurn: 1, lastTurn: 1, flags: { ask: 0, recommended: 0, err: 1 },
+      },
+    })
+    const twice = reduce(capped, { type: 'row', row: testRow({ id: 'r-newer', turn: 2 }) })
+    expect(twice.folded['Bash\ttest:bun test'], 'the next drop grows the same fold').toMatchObject({ count: 2, ms: 120_000 })
+    expect(paneModel(twice, []).header.context?.total, 'the header counts them, so a long session is not one that never happened')
+      .toBe((ROW_CAP + 2) * 9_000)
+    expect(reduce(twice, { type: 'reset' }).folded, 'a cleared session has nothing folded either').toEqual({})
+    const adopted = reduce(full, { type: 'adopt', rows: [testRow({ id: 'a-1', turn: 3, flags: ['recovered'] })] })
+    expect(adopted.folded['Bash\ttest:bun test'], 'history over the cap is folded the same way').toMatchObject({ count: 1 })
   })
 
   test('adopt numbers the recovered rows, catches the turn up and arms a remembered pattern', async () => {
@@ -611,7 +752,7 @@ describe('patterns', () => {
       .toMatchObject({ instruction: null })
     expect(model.artifacts).toEqual([claudeMdArtifact])
     // A run in flight wins over a card waiting, a card waiting over a saving to show off (§5.5).
-    expect(bandModel(state)).toEqual({ state: 'checking', fresh: 1, costPct: 1.1, costMs: 60_000, savedPct: 4.5, savedMs: 192_000, calls: 2, paneOpen: false })
+    expect(bandModel(state)).toEqual({ state: 'checking', died: null, running: null, fresh: 1, costPct: 1.1, costMs: 60_000, savedPct: 4.5, savedMs: 192_000, calls: 2, paneOpen: false })
     const quietJudge = { ...state, judge: { ...state.judge, running: false } }
     expect(bandModel(quietJudge), 'the waiting card and what it has already cost').toMatchObject({ state: 'found', costPct: 1.1, costMs: 60_000 })
     expect(bandModel({ ...quietJudge, cards: [] }), 'nothing waiting, so the saving is the news').toMatchObject({ state: 'saved', costPct: 0, costMs: 0 })
@@ -619,7 +760,7 @@ describe('patterns', () => {
     expect(empty.wasters).toEqual([])
     expect(empty.decided).toEqual([])
     expect(empty.header).toMatchObject({ percent: null, tokensToCompaction: null, turnsToCompaction: null, savedPct: 0 })
-    expect(bandModel(seedState())).toEqual({ state: 'watching', fresh: 0, costPct: 0, costMs: 0, savedPct: 0, savedMs: 0, calls: 0, paneOpen: false })
+    expect(bandModel(seedState())).toEqual({ state: 'watching', died: null, running: null, fresh: 0, costPct: 0, costMs: 0, savedPct: 0, savedMs: 0, calls: 0, paneOpen: false })
   })
 
   test('tokensToCompaction and turnsToCompaction fall back and go null', async () => {
@@ -692,7 +833,7 @@ describe('patterns', () => {
     })
     const before = JSON.stringify(state)
     const actions: Action[] = [
-      { type: 'turn.start' },
+      { type: 'turn.start', now: 0 },
       { type: 'row', row: testRow({ id: 'r-2', turn: 6 }) },
       { type: 'turn.complete', stat: turnEnd() },
       { type: 'usage', usage: { window: 200_000, tokens: 10, percent: 5 }, now: 1 },

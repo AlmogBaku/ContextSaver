@@ -6,7 +6,7 @@ import { Band, Pane } from '../hooks/ui'
 import { logoCells } from '../hooks/core/logo'
 import { gauge } from '../hooks/core/text'
 import { sparkline } from '../hooks/core/trend'
-import type { Actions, PaneModel, Site, Ui } from '../hooks/core/types'
+import type { Actions, BandModel, PaneModel, Site, Ui } from '../hooks/core/types'
 import { awaitingPane } from './fixtures/ui/awaiting-pane'
 import { bandChecking } from './fixtures/ui/band-checking'
 import { bandFound } from './fixtures/ui/band-found'
@@ -303,6 +303,56 @@ describe('ui', () => {
     expect(holds(watching, 'ContextSaver ◌  312 calls watched · nothing wasteful yet')).toEqual(true)
     expect(holds(cold, 'ContextSaver ◌  watching'), 'before the first row there is nothing to count').toEqual(true)
     expect(holds(cold, 'calls watched')).toEqual(false)
+  })
+
+  test('the band says the last turn died, and how, until the next one starts', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      return Band({ ui: resolved, model: { ...bandWatching, state: 'died', died: 'error' }, site: BAND_SITE, actions })
+    })
+
+    const dead = await $.ui.render(BAND_HOST)
+
+    expect(holds(dead, 'ContextSaver ✕  Last turn ended in an API error · type anything to continue')).toEqual(true)
+    expect(cellsOf(dead)).toEqual(BAND_SITE.bodyColumns - BAND_RESERVE)
+    expect(overrun(dead)).toEqual([])
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the band drew no elements')
+    const at = (columns: number, died: 'error' | 'refusal'): unknown =>
+      Band({ ui, model: { ...bandWatching, state: 'died', died }, site: { bodyColumns: columns, maxRows: 8 }, actions })
+
+    expect(holds(at(100, 'refusal'), 'ContextSaver ✕  Last turn ended in a refusal · type anything to continue')).toEqual(true)
+    expect(holds(at(60, 'error'), 'Last turn ended in an API error'), 'the fact stays where the advice does not fit').toEqual(true)
+    expect(holds(at(60, 'error'), 'type anything'), 'and the sentence is never cut mid-word').toEqual(false)
+  })
+
+  test('the band names the workflow that is running while nothing is found, and shortens it whole', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    const running: NonNullable<BandModel['running']> = { name: 'proxy-rewrite', loops: 3, calls: 41, label: 'review:C3-r1' }
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      return Band({ ui: resolved, model: { ...bandWatching, running }, site: BAND_SITE, actions })
+    })
+
+    const tree = await $.ui.render(BAND_HOST)
+
+    expect(holds(tree, 'ContextSaver ◌  proxy-rewrite · review:C3-r1 · 3 agents · 41 calls'), 'the mark stays the quiet one').toEqual(true)
+    expect(overrun(tree)).toEqual([])
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the band drew no elements')
+    const at = (columns: number, over: Partial<typeof running> = {}): unknown =>
+      Band({ ui, model: { ...bandWatching, running: { ...running, ...over } }, site: { bodyColumns: columns, maxRows: 8 }, actions })
+
+    expect(holds(at(100, { label: null, loops: 1, calls: 1 }), 'proxy-rewrite · running · 1 agent · 1 call'), 'a run whose stage is unknown is running').toEqual(true)
+    expect(holds(at(70), 'proxy-rewrite · review:C3-r1 · 3 agents'), 'the calls are the first thing the row gives back').toEqual(true)
+    expect(holds(at(70), '41 calls')).toEqual(false)
+    expect(holds(at(55), 'proxy-rewrite · 3 agents'), 'then the stage').toEqual(true)
+    expect(holds(at(55), 'review')).toEqual(false)
   })
 
   test('the empty pane is one quiet frame, and Check now stays in the header', async ($, on) => {
@@ -613,6 +663,19 @@ describe('ui', () => {
     expect(drawnRows(tree)).toContain('2 turns · ~1.2k tokens per turn')
     expect(holds(tree, 'turn 15   no tool calls   6.1k answer')).toEqual(true)
     expect(holds(tree, '↳ "To recap the plan')).toEqual(true)
+  })
+
+  test('the details of a finding that cites loops count agents and their time', async ($, on) => {
+    const { actions } = recorder()
+    const [first, ...rest] = chattyPane.wasters
+    if (first === undefined) throw new Error('the chatty pane holds no waster')
+    const model: PaneModel = { ...chattyPane, wasters: [{ ...first, total: { unit: 'agents', calls: 2, ms: 420_000, chars: 4_800 } }, ...rest] }
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
+      Pane({ ui: $.ui.resolve(e), model, site: WIDE_SITE, placement: 'dock', actions }))
+
+    const tree = await $.ui.render(PANE_HOST)
+
+    expect(drawnRows(tree)).toContain('2 agents · 7m · ~1.2k tokens per turn')
   })
 
   // Bug (c): the field opened pre-filled with the fix, a line longer than the seat, so a one-line field drew

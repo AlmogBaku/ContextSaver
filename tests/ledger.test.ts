@@ -61,13 +61,45 @@ describe('ledger', () => {
     expect(table.map(([command]) => classOf(command))).toEqual(table.map(([, cls]) => cls))
   })
 
-  test('the key of a compound command stays the whole command', () => {
-    expect(normalize('Bash', { command: "printf '\\n' >> README.md && bun test" }))
-      .toEqual({ key: "test:printf '\\n' >> README.md && bun test", cls: 'test' })
+  test('classOf sees through timeout, time and a path to the head, and knows python -m', () => {
+    const table: readonly (readonly [string, CommandClass])[] = [
+      ['timeout 900 bunx vitest run src', 'test'], ['timeout 30s pytest', 'test'], ['timeout 2m npm run lint', 'lint'],
+      ['time cargo build', 'build'], ['cd x && timeout 5h time bun test', 'test'],
+      ['venv/bin/python -m pytest tests/agent', 'test'], ['python -m pytest tests', 'test'], ['python3 -m pytest', 'test'],
+      ['/usr/bin/git status', 'git'], ['./node_modules/.bin/tsc --noEmit', 'typecheck'], ['venv/bin/pytest -q', 'test'],
+      ['python -m http.server', 'other'], ['timeout', 'other'], ['timeouts 3 bun test', 'other'], ['time', 'other'],
+    ]
+    expect(table.map(([command]) => classOf(command))).toEqual(table.map(([, cls]) => cls))
+  })
+
+  test('the key of a compound command names the segment that classified it', () => {
+    expect(normalize('Bash', { command: "printf '\\n' >> README.md && bun test" })).toEqual({ key: 'test:bun test', cls: 'test' })
+    expect(normalize('Bash', { command: 'cd /tmp/x && timeout 600 bunx vitest run a.test.ts' })).toEqual({ key: 'test:bunx vitest run a.test.ts', cls: 'test' })
+    expect(normalize('Bash', { command: 'nproc; timeout 900 bunx vitest run src 2>&1 | grep -E "Tests"' })).toEqual({ key: 'test:bunx vitest run src', cls: 'test' })
+    expect(normalize('Bash', { command: 'bunx tsc -p tsconfig.proxy.json --noEmit 2>&1 | tail -2; echo "tsc $?"' }))
+      .toEqual({ key: 'typecheck:bunx tsc -p tsconfig.proxy.json --noEmit', cls: 'typecheck' })
+  })
+
+  test('the key of a Bash command names what ran, not how its output was filtered', () => {
+    expect(normalize('Bash', { command: 'bunx vitest run packages/proxy 2>&1 | tail -12' })).toEqual({ key: 'test:bunx vitest run packages/proxy', cls: 'test' })
+    expect(normalize('Bash', { command: 'bunx vitest run packages/proxy 2>&1 | grep -E "FAIL" | head -4' }).key).toBe('test:bunx vitest run packages/proxy')
+    expect(normalize('Bash', { command: 'timeout 900 bunx vitest run src' })).toEqual({ key: 'test:bunx vitest run src', cls: 'test' })
+    expect(normalize('Bash', { command: 'bun test 2>&1' })).toEqual({ key: 'test:bun test', cls: 'test' })
+    expect(normalize('Bash', { command: 'bun test > out.log' })).toEqual({ key: 'test:bun test', cls: 'test' })
+    expect(normalize('Bash', { command: 'git apply < fix.patch' })).toEqual({ key: 'git:git apply', cls: 'git' })
+    expect(normalize('Bash', { command: 'FOO=1 bun test --coverage' })).toEqual({ key: 'test:bun test --coverage', cls: 'test' })
+    // The class comes from the head's basename; the key keeps the text as typed.
+    expect(normalize('Bash', { command: 'timeout 3000 venv/bin/python -m pytest tests/agent' }))
+      .toEqual({ key: 'test:venv/bin/python -m pytest tests/agent', cls: 'test' })
+    expect(normalize('Bash', { command: "sed -n '1,40p' a.ts" })).toEqual({ key: "read:sed -n '1,40p' a.ts", cls: 'read' })
+    // An `other` command is its whole pipeline: a jq pipeline is its pipes.
+    expect(normalize('Bash', { command: "jq -r '.x' f.json | tr -d '\\n'" })).toEqual({ key: "other:jq -r '.x' f.json | tr -d '\\n'", cls: 'other' })
+    expect(normalize('Bash', { command: 'cd x && echo hi | wc -l' })).toEqual({ key: 'other:cd x && echo hi | wc -l', cls: 'other' })
+    expect(normalize('Bash', { command: `bun test ${'x'.repeat(300)}` }).key.length).toBe(KEY_MAX)
   })
 
   test('normalize keys each tool family and caps the key', () => {
-    expect(normalize('Bash', { command: 'cd x &&  bun   test' })).toEqual({ key: 'test:cd x && bun test', cls: 'test' })
+    expect(normalize('Bash', { command: 'cd x &&  bun   test' })).toEqual({ key: 'test:bun test', cls: 'test' })
     expect(normalize('Bash', {})).toEqual({ key: 'other:', cls: 'other' })
     expect(normalize('Read', { file_path: '/w/a.ts', offset: 2, limit: 40 })).toEqual({ key: '/w/a.ts:2-40', cls: 'read' })
     expect(normalize('Read', { file_path: '/w/a.ts' })).toEqual({ key: '/w/a.ts:-', cls: 'read' })
@@ -124,7 +156,7 @@ describe('ledger', () => {
   test('rowOf flags an error and a deny', () => {
     const errored = rowOf(bashErrored.e, bashErrored.result, 9000, 4)
     expect(errored.flags).toEqual(['err'])
-    expect(errored.key).toBe('test:cd packages/api && npm test')
+    expect(errored.key).toBe('test:npm test')
     expect(errored.chars).toBe(20)
 
     const denied = rowOf(bashDenied.e, bashDenied.result, 5, 4)
@@ -166,8 +198,22 @@ describe('ledger', () => {
 
     const timedOut = rowOf(bashTimedOut.e, bashTimedOut.result, 120000, 8)
     expect(timedOut.flags).toEqual(['bg', 'timeout'])
-    expect(timedOut.key).toBe('test:FOO=1 bun test --coverage')
+    expect(timedOut.key).toBe('test:bun test --coverage')
     expect(timedOut.paths).toEqual(['/w/coverage/lcov.info'])
+  })
+
+  test('rowOf flags an AskUserQuestion, and one that recommended an answer', () => {
+    const questions = [{ question: 'Ship it?', header: 'Ship', options: [{ label: 'Yes (Recommended)', description: 'now' }, { label: 'No', description: 'wait' }] }]
+    const answered = { result: { questions, answers: { 'Ship it?': 'Yes (Recommended)' } }, text: 'User answered: Yes' }
+    expect(rowOf({ tool: 'AskUserQuestion', tool_use_id: 'call_20', questions }, answered, 41000, 14).flags).toEqual(['ask', 'recommended'])
+
+    const plain = [{ question: 'Which?', header: 'Pick', options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }] }]
+    expect(rowOf({ tool: 'AskUserQuestion', tool_use_id: 'call_21', questions: plain }, { result: {}, text: 'B' }, 5000, 14).flags).toEqual(['ask'])
+    expect(rowOf({ tool: 'AskUserQuestion', tool_use_id: 'call_22' }, { result: {}, text: '' }, 10, 14).flags).toEqual(['ask'])
+    // A denied or errored ask is still an ask: the wait for the person is what the row records.
+    expect(rowOf({ tool: 'AskUserQuestion', tool_use_id: 'call_23', questions }, { deny: 'no' }, 10, 14).flags).toEqual(['denied', 'ask', 'recommended'])
+    // Only an ask is flagged: the text is not read for the marker on other tools.
+    expect(rowOf({ tool: 'Bash', tool_use_id: 'call_24', command: 'echo (Recommended)' }, { result: {}, text: '(Recommended)' }, 1, 14).flags).toEqual([])
   })
 
   test('rowOf counts Edit lines from gitDiff, else from the patch, and drops a staged path', () => {

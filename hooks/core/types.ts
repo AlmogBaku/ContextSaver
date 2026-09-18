@@ -16,7 +16,7 @@ export const JUDGE_MAX_BACKOFF = 4
 export const JUDGE_BUDGET_SHARE = 0.03
 export const JUDGE_LEDGER_ROWS = 150          // full rows rendered; older rows are folded into `~` summary lines
 export const MAX_FINDINGS = 6
-export const MAX_BEHAVIORAL_FINDINGS = 2      // findings with signature: null per judge run
+export const MAX_BEHAVIORAL_FINDINGS = 3      // findings with signature: null per judge run (agent findings are signature-null too)
 export const MAX_PATTERNS = 50
 export const ROW_CAP = 2000
 export const KIND_MAX = 120
@@ -36,6 +36,10 @@ export const JUDGE_MIN_NEW_ROWS = 40          // mid-turn cadence: ledger rows s
 export const JUDGE_MIN_GAP_MS = 300_000       // mid-turn cadence: at least five minutes between runs
 export const TREND_TURNS = 10                 // context samples the header's trend draws
 export const SINKS = 3                        // named sinks the Time and Context rows show
+export const LOOP_CAP = 400                   // loops kept (oldest dropped)
+export const AGENTS_ROWS = 60                 // loop lines the AGENTS block renders in full; older ones fold per run
+export const RUN_REFRESH_MS = 10_000          // a running workflow's journal is re-read at most this often
+export const RUN_FRESH_MS = 600_000           // a run with no loop yet counts as active this long after its launch
 
 export type CommandClass = 'test' | 'lint' | 'format' | 'typecheck' | 'build' | 'install' | 'git' | 'read' | 'search' | 'other'
 export type Category = 'execution' | 'reading' | 'production' | 'behavior' | 'communication' | 'multi-agent' | 'environment' | 'process' | 'other'
@@ -49,12 +53,19 @@ export type Row = {
   turn: number
   ms: number; chars: number
   head: string             // first 80 chars of result.text, control characters stripped; quoted as evidence in the pane, never sent to the judge
-  flags: string[]          // 'err' (tool reported an error) | 'denied' (result.deny: the user or a policy said no) | 'dedup' (Read type 'file_unchanged') | 'trunc' (truncatedByTokenCap) | 'bg' (run_in_background or backgroundTaskId) | 'timeout' (timedOutAfterMs) | `persist=${persistedOutputSize}` | 'recovered' (rebuilt from the transcript at load: ms is 0 and agent reads 'main')
+  flags: string[]          // 'err' (tool reported an error) | 'denied' (result.deny: the user or a policy said no) | 'dedup' (Read type 'file_unchanged') | 'trunc' (truncatedByTokenCap) | 'bg' (run_in_background or backgroundTaskId) | 'timeout' (timedOutAfterMs) | `persist=${persistedOutputSize}` | 'ask' (AskUserQuestion: ms is the wait for the person) | 'recommended' (an ask whose questions carry '(Recommended)') | 'recovered' (rebuilt from the transcript at load: ms is 0 and agent reads 'main')
   lines: { add: number; del: number } | null   // Edit: gitDiff.additions/deletions else counted from structuredPatch; Write: content line count as add
   paths: string[]          // absolute paths this call edited (Edit/Write filePath unless staged; Bash bashEditDiff.changedFiles)
   spawn: { type: string; requested: string | null; resolved: string | null; status: string | null; tokens: number | null; edits: number | null; promptChars: number } | null   // Agent rows only
 }
-export type TurnStat = { turn: number; input: number; output: number; cacheRead: number; cacheCreate: number; calls: number; ms: number; answerChars: number; answerHead: string; aborted: boolean; context: number | null }   // answerHead: first 100 chars of e.answer, for evidence quotes; context: tokens in the window after the turn (usage), null when unknown — growth between turns is the pace compaction runs at
+export type TurnStat = { turn: number; input: number; output: number; cacheRead: number; cacheCreate: number; calls: number; ms: number; answerChars: number; answerHead: string; aborted: boolean; ended: TurnEnd; at: number; idleMs: number; context: number | null }   // answerHead: first 100 chars of e.answer, for evidence quotes; ended: how the turn ended; at: clock at completion; idleMs: wait until the next turn started (0 until it does); context: tokens in the window after the turn (usage), null when unknown — growth between turns is the pace compaction runs at
+export type TurnEnd = 'answer' | 'aborted' | 'refusal' | 'error'
+export type Tokens = { input: number; output: number; cacheRead: number; cacheCreate: number }
+export type Outcome = { kind: 'findings'; critical: number; high: number; medium: number; low: number } | { kind: 'report'; chars: number }
+export type Loop = { id: string; run: string | null; label: string | null; phase: string | null; model: string | null; turns: number; ms: number; tokens: Tokens; ended: TurnEnd | null; firstTurn: number; firstSeq: number; outcome: Outcome | null; calls: number; edits: number; checks: number; reads: number }   // one spawned agent loop: `id` is its agentId (the ledger's `agent`), `run` the workflow run that launched it, `ended` null while it runs; calls/edits/checks/reads count its own rows as they land, so the line stays whole once ROW_CAP drops them
+export type Folded = { tool: string; key: string; cls: CommandClass; agent: string; count: number; ms: number; chars: number; firstTurn: number; lastTurn: number; flags: { ask: number; recommended: number; err: number } }   // one (tool, key) pair's rows dropped past ROW_CAP: nothing citable, everything counted; `agent` is 'main' or the first loop seen
+export type Run = { id: string; name: string; dir: string | null; turn: number; seq: number; at: number; refreshedAt: number }   // at: clock at launch; refreshedAt: last journal read (0 never)
+export type JournalEntry = { kind: 'started'; agentId: string; label: string | null; phase: string | null } | { kind: 'result'; agentId: string; outcome: Outcome }
 export type Signature = { tool: string; key: string }
 export type ArtifactKind = 'claude-md' | 'skill' | 'agent-brief' | 'settings-allow'
 export type Proposal = { kind: ArtifactKind; title: string; body: string }
@@ -74,7 +85,7 @@ export type StoredPattern = {
 }
 /** Session-only fields. */
 export type Pattern = StoredPattern & {
-  hits: string[]                   // evidence handles: row ids (tool_use_id) or `turn:<n>`; grows with matching rows; cost/baseline from rows only
+  hits: string[]                   // evidence handles: row ids (tool_use_id), `turn:<n>` or `agent:<agentId>`; grows with matching rows; cost/baseline from rows only
   decision: Choice | null
   decidedAtTurn: number | null
   instruction: string | null       // the text sent for steer/kill
@@ -84,7 +95,7 @@ export type Pattern = StoredPattern & {
 
 /** What one fork of the judge cost, in the four token counts the API reports. */
 export type JudgeUsage = { input: number; output: number; cacheRead: number; cacheCreate: number }
-/** What one judge run reported: findings returned, findings kept, one short reason per drop, and what the fork cost (null when it returned nothing). */
+/** What one judge run reported: findings returned, findings kept, one short line per drop and per cap a kept finding missed, and what the fork cost (null when it returned nothing). */
 export type JudgeRun = { returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
 
 /** One cited call (or turn) as the details render it: what ran, in which loop, what it cost, what it answered. */
@@ -105,7 +116,7 @@ export type Card = {
   stats: string
   why: string
   fix: string
-  total: { unit: 'calls' | 'turns'; calls: number; ms: number; chars: number }   // cited calls, their wall time and their context; `unit: 'turns'` when the pattern cites turns instead, so `calls` counts turns and `chars` is the per-turn estimate
+  total: { unit: 'calls' | 'turns' | 'agents'; calls: number; ms: number; chars: number }   // cited calls, their wall time and their context; `unit: 'turns'` when the pattern cites turns instead, so `calls` counts turns and `chars` is the per-turn estimate; `unit: 'agents'` when it cites loops, so `calls` counts loops and `ms` is their sum
   evidence: readonly Evidence[]                          // ≤ CARD_EVIDENCE cited calls, newest first
 }
 export type Artifact = { patternId: string; kind: ArtifactKind; title: string; path: string; content: string; savingPct: number; mode: 'append' | 'write' | 'merge-settings' }
@@ -116,7 +127,10 @@ export type State = {
   turn: number
   seq: number                      // last Row.seq issued
   rows: Row[]                      // capped at ROW_CAP (oldest dropped)
+  folded: Record<string, Folded>   // the rows ROW_CAP dropped, folded per `${tool}\t${key}`: STATS, the LEDGER's `~` lines and the sinks count them, so a long session's totals stay whole
   turns: TurnStat[]
+  loops: Loop[]                    // every agent loop seen, oldest first, capped at LOOP_CAP (oldest dropped)
+  runs: Run[]                      // every Workflow launched this session, oldest first
   usage: Usage
   overhead: { memory: number; mcp: number; agents: number } | null
   compactions: number[]            // turn indices at which session.compact fired
@@ -137,12 +151,16 @@ export type State = {
 }
 
 export const initialState = (cwd: string, window: number): State => ({
-  cwd, turn: 0, seq: 0, rows: [], turns: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
+  cwd, turn: 0, seq: 0, rows: [], folded: {}, turns: [], loops: [], runs: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
   judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null }, pendingCheck: false, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
 export type Action =
-  | { type: 'turn.start' }
+  | { type: 'turn.start'; now: number }                        // now: dates the idle wait since the last completed turn
+  | { type: 'loop.turn'; agentId: string; model: string | null; ms: number; tokens: Tokens; ended: TurnEnd; turn: number }   // one turn of an agent loop completed
+  | { type: 'agent.start'; agentId: string; description: string; model: string | null }   // an Agent tool result: names the loop
+  | { type: 'run.start'; run: { id: string; name: string; dir: string | null }; now: number }   // a Workflow tool result: a run launched (an id already present is a resume)
+  | { type: 'run.journal'; runId: string; entries: JournalEntry[]; now: number }   // a run's journal read: stages and outcomes of its loops
   | { type: 'row'; row: Omit<Row, 'seq'> }
   | { type: 'adopt'; rows: readonly Omit<Row, 'seq'>[] }      // rows rebuilt from the transcript of a session joined late
   | { type: 'turn.complete'; stat: Omit<TurnStat, 'turn' | 'calls'> }
@@ -221,7 +239,9 @@ export type PaneModel = {
 }
 /** The band's one teaser line: which of the four states the session is in, and the figures that state names. */
 export type BandModel = {
-  state: 'checking' | 'found' | 'saved' | 'watching'   // the first that applies: a judge run in flight, cards waiting, a saving credited, else watching
+  state: 'died' | 'checking' | 'found' | 'saved' | 'watching'   // the first that applies: the last turn died, a judge run in flight, cards waiting, a saving credited, else watching
+  died: TurnEnd | null     // the last turn's `ended` when it was an error or a refusal and no turn has started since
+  running: { name: string; loops: number; calls: number; label: string | null } | null   // the newest active workflow run: its loops, their rows, the newest unended loop's stage
   fresh: number            // cards awaiting a decision
   costPct: number          // what those cards have already cost, as a share of the window
   costMs: number           // and in wall time

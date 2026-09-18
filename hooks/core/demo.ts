@@ -27,7 +27,7 @@ const sample = (
 const inExplore = (row: Omit<Row, 'seq'>): Omit<Row, 'seq'> => ({ ...row, agent: EXPLORE_AGENT })
 
 const turnSample = (input: number, output: number, ms: number, answer: string): Omit<TurnStat, 'turn' | 'calls'> => ({
-  input, output, cacheRead: 180_000, cacheCreate: 7_000, ms, answerChars: answer.length, answerHead: answer, aborted: false, context: null,
+  input, output, cacheRead: 180_000, cacheCreate: 7_000, ms, answerChars: answer.length, answerHead: answer, aborted: false, ended: 'answer', at: 0, idleMs: 0, context: null,
 })
 
 /** The usage the demo's header draws from: a third of a million-token window spent, with a compaction threshold. */

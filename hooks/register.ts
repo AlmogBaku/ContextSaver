@@ -2,16 +2,18 @@ import type { ModelForkResult, On, PaneOpenArgs, RenderElement } from 'claude-co
 
 import { adoptRows } from './core/adopt'
 import { demoForkUsage, demoPatterns, demoRows, demoTurns, demoUsage } from './core/demo'
-import { buildPrompt, merge, parseReply, shouldRun, spentOf, usageOf } from './core/judge'
+import { buildPrompt, judgeAliases, merge, parseReply, shouldRun, spentOf, usageOf } from './core/judge'
 import { rowOf } from './core/ledger'
+import type { ToolEvent } from './core/ledger'
 import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce, toStored, usageLine } from './core/patterns'
 import { appendedTo, bulletOnly, mergeSettings, propose } from './core/rules'
+import { activeRuns, agentOf, journalPath, parseJournal, runOf } from './core/spawns'
 import { collapseWs, duration, fit, instructionOf, pctOf } from './core/text'
 import {
   AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, JUDGE_MIN_ROWS, MAX_PATTERNS, PANE_ID,
-  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, STEER_RING_TRIES, STEER_RING_WAIT_MS, initialState,
+  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, RUN_REFRESH_MS, STEER_RING_TRIES, STEER_RING_WAIT_MS, initialState,
 } from './core/types'
-import type { Action, Actions, Artifact, Choice, State, Ui } from './core/types'
+import type { Action, Actions, Artifact, Choice, Run, State, Tokens, Ui } from './core/types'
 import type { Host } from './host'
 import { Band, Pane } from './ui'
 
@@ -133,6 +135,35 @@ export function register(on: On): void {
     }
   }
 
+  // The four counts a turn was billed, zero where no response came back to bill.
+  const tokensOf = (u: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } | undefined): Tokens =>
+    ({ input: u?.input_tokens ?? 0, output: u?.output_tokens ?? 0, cacheRead: u?.cache_read_input_tokens ?? 0, cacheCreate: u?.cache_creation_input_tokens ?? 0 })
+
+  // An `Agent` result names its loop, but the description it was given is the call's own argument, so the
+  // value is handed over with it; every other tool's result is read as it came.
+  const spawnValue = (e: ToolEvent, value: unknown): unknown =>
+    e.tool === 'Agent' && typeof e.description === 'string' && typeof value === 'object' && value !== null
+      ? { ...value, description: e.description }
+      : value
+
+  // One run's journal, read and folded in; a read that fails still stamps the run, so it is not retried at once.
+  const readJournal = async (engine: Host, run: Run, now: number): Promise<void> => {
+    const path = journalPath(run)
+    if (path === null) return
+    const entries = await engine.readFile(path).then(parseJournal).catch(() => [])
+    dispatch({ type: 'run.journal', runId: run.id, entries, now })
+  }
+
+  // The journals of the runs still going, at most every RUN_REFRESH_MS each — every run's when forced: a
+  // launch reads its own at once, and the judge reads them all before it asks. Never awaited from a hook.
+  const refreshRuns = async (force: boolean): Promise<void> => {
+    const engine = host
+    if (engine === null || state.runs.length === 0) return
+    const now = await engine.now()
+    const due = force ? state.runs : activeRuns(state, now).filter(run => now - run.refreshedAt >= RUN_REFRESH_MS)
+    await Promise.all(due.map(run => readJournal(engine, run, now)))
+  }
+
   // What the run put in front of the user: a recurrence is news too, and it is the D4 moment this exists for.
   const checkedText = (queued: number): string =>
     queued === 0 ? 'ContextSaver: nothing new' : `ContextSaver: ${queued} new waster${queued === 1 ? '' : 's'}`
@@ -161,10 +192,15 @@ export function register(on: On): void {
     const seq = state.seq
     const now = await engine.now()
     dispatch({ type: 'judge.start', now, seq })
+    // AGENTS is read off the journals, so they are brought up to date once, here, before the prompt is built.
+    await refreshRuns(true).catch(() => undefined)
+    // One alias table for the run: the loops keep spawning while the fork thinks, and a new agent's first
+    // row would renumber the `agent:aN` handles the reply cites against the AGENTS the prompt printed.
+    const aliases = judgeAliases(state)
     let reply: ModelForkResult | null = null
     let failed: string | null = null
     try {
-      reply = await engine.fork(buildPrompt(state))
+      reply = await engine.fork(buildPrompt(state, aliases))
     } catch (err) {
       failed = messageOf(err)
     }
@@ -174,7 +210,7 @@ export function register(on: On): void {
       return
     }
     try {
-      const { findings, focus, time, context, dropped, returned } = parseReply(reply.text, state)
+      const { findings, focus, time, context, dropped, returned } = parseReply(reply.text, state, aliases)
       const merged = merge(state, findings)
       // A finding the registry cap evicted never becomes a card, so it is dropped, not kept.
       const reasons = [...dropped, ...merged.evicted.map(id => `${id}: evicted, over MAX_PATTERNS (${MAX_PATTERNS})`)]
@@ -475,9 +511,11 @@ export function register(on: On): void {
     }
   })
 
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     try {
-      dispatch({ type: 'turn.start' })
+      // The clock dates the wait since the last answer, so TURNS can say the person was away.
+      const now = host === null ? 0 : await host.now()
+      dispatch({ type: 'turn.start', now })
       return next(e)
     } catch {
       return next(e)
@@ -500,6 +538,13 @@ export function register(on: On): void {
       dispatch({ type: 'row', row: rowOf(e, result, ended - started, state.turn) })
       const row = state.rows[state.rows.length - 1]
       if (isDebug && row !== undefined) engine.log(`ContextSaver row r${row.seq} ${row.tool} ${row.key} ${row.ms}ms ${row.chars}ch`)
+      // A `Workflow` result is a run launched, an `Agent` result a loop named; a launch reads its journal at
+      // once, and any run still going is re-read on the plugin's own cadence — detached, the call is answered.
+      const run = runOf(result.result)
+      if (run !== null) dispatch({ type: 'run.start', run, now: ended })
+      const agent = agentOf(spawnValue(e, result.result))
+      if (agent !== null) dispatch({ type: 'agent.start', ...agent })
+      void refreshRuns(run !== null).catch(() => undefined)
       // One agentic turn can run for hours, so the cadence is judged here too, not only between turns.
       judgeAt(ended, 'tool.call')
       const pending = state.notes
@@ -514,8 +559,14 @@ export function register(on: On): void {
   on('turn.complete', async ($, e, next) => {
     try {
       const engine = host
-      if (engine === null || e.agentId !== undefined) return next(e)
+      if (engine === null) return next(e)
       const u = e.usage
+      // A subagent's turn is its loop's: what it cost and how it ended go onto the loop, and nothing else
+      // moves — the window is the main loop's to sample, and so is the cadence.
+      if (e.agentId !== undefined) {
+        dispatch({ type: 'loop.turn', agentId: e.agentId, model: u?.model ?? null, ms: e.durationMs, tokens: tokensOf(u), ended: e.reason, turn: state.turn })
+        return next(e)
+      }
       // The window is sampled before the turn is recorded: how full it is after this turn is the turn's
       // own figure, and its growth over the last turns is the pace compaction actually runs at. The
       // sample is optional, though: a refused `session.usage` costs this turn its context reading, never
@@ -525,14 +576,14 @@ export function register(on: On): void {
       dispatch({
         type: 'turn.complete',
         stat: {
-          input: u?.input_tokens ?? 0,
-          output: u?.output_tokens ?? 0,
-          cacheRead: u?.cache_read_input_tokens ?? 0,
-          cacheCreate: u?.cache_creation_input_tokens ?? 0,
+          ...tokensOf(u),
           ms: e.durationMs,
           answerChars: e.answer.length,
           answerHead: e.answer.slice(0, ANSWER_HEAD),
           aborted: e.isAborted,
+          ended: e.reason,
+          at: now,
+          idleMs: 0,
           context: seen?.context.tokens ?? null,
         },
       })
@@ -572,19 +623,24 @@ export function register(on: On): void {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const engine = host
     try {
-      if (host === null || e.props.hasSurvey || e.surface === 'mobile') return next(e)
+      if (engine === null || e.props.hasSurvey || e.surface === 'mobile') return next(e)
       if (e.props.bodyColumns !== state.columns) observe({ type: 'columns', columns: e.props.bodyColumns })
     } catch {
       return next(e)
     }
     // Drawn once: a band we cannot build answers with what is beneath it, never with a second dispatch.
     const below: RenderElement = await next(e)
+    // The clock, read once per draw: the newest reading the state holds is a turn's end or a run's launch, so
+    // a loopless run would read as fresh for the rest of a quiet session. A host that will not say the time
+    // leaves the band that newest reading of its own rather than undrawn.
+    const now = await engine.now().catch(() => null)
     try {
       const { Box, Text, Button, Input, Raster } = $.ui.resolve(e) as unknown as Ui
       const band = Band({
         ui: { Box, Text, Button, Input, Raster },
-        model: bandModel(state),
+        model: now === null ? bandModel(state) : bandModel(state, now),
         site: { bodyColumns: e.props.bodyColumns, maxRows: e.props.maxRows },
         actions,
       })

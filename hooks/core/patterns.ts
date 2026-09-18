@@ -1,17 +1,21 @@
-import { agentAliases, aliasOf, baseline, rowsOf, sinks, sumOf } from './evidence'
+import { agentAliases, aliasOf, baseline, foldRows, rowsOf, sinks, sumOf } from './evidence'
+import { activeRuns, countRow } from './spawns'
 import { collapseWs, duration, instructionOf, killPrompt, median, pctOf } from './text'
 import {
   ALTERNATIVE_MAX, CARD_EVIDENCE, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, FILE_TOOLS,
-  JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, MAIN_AGENT, MAX_PATTERNS, NO_CALLS, ROW_CAP,
+  JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, LOOP_CAP, MAIN_AGENT, MAX_PATTERNS, NO_CALLS, ROW_CAP,
   SETTLE_TURNS, TREND_TURNS, initialState,
 } from './types'
 import type {
-  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Evidence, Header, JudgeRun, JudgeUsage,
-  PaneModel, Pattern, Proposal, Row, Signature, Sinks, State, StoredPattern, TurnStat,
+  Action, Artifact, BandModel, Card, Choice, CommandClass, DecidedRow, Evidence, Header, JournalEntry, JudgeRun,
+  JudgeUsage, Loop, PaneModel, Pattern, Proposal, Row, Signature, Sinks, State, StoredPattern, Tokens, TurnStat,
 } from './types'
 
 // The `:offset-limit` slice `normalize` appends to a Read key: the path is what the details name.
 const READ_RANGE = /:\d*-\d*$/
+
+// The loop an `agent:<id>` evidence handle names.
+const AGENT_HANDLE = /^agent:(.+)$/
 
 const GROWTH_TURNS = 5     // turns with a context sample the pace to compaction is read from
 const GROWTH_SAMPLES = 3   // growth samples below which no pace is stated at all
@@ -39,9 +43,16 @@ const turnHandle = (handle: string): number | null => {
   return n === undefined ? null : Number(n)
 }
 
-const turnsCited = (p: Pattern, rows: readonly Row[]): number[] => {
+const loopsCited = (p: Pattern, state: State): Loop[] =>
+  p.hits.flatMap(handle => {
+    const id = AGENT_HANDLE.exec(handle)?.[1]
+    const loop = id === undefined ? undefined : state.loops.find(l => l.id === id)
+    return loop === undefined ? [] : [loop]
+  })
+
+const turnsCited = (p: Pattern, state: State, rows: readonly Row[]): number[] => {
   const fromHandles = p.hits.map(turnHandle).filter((n): n is number => n !== null)
-  return [...rows.map(r => r.turn), ...fromHandles].sort((a, b) => a - b)
+  return [...rows.map(r => r.turn), ...fromHandles, ...loopsCited(p, state).map(l => l.firstTurn)].sort((a, b) => a - b)
 }
 
 const newTokens = (t: TurnStat): number => t.input + t.output + t.cacheCreate
@@ -115,12 +126,81 @@ const settleAtTurn = (state: State, p: Pattern): Settle => {
   return { pattern: { ...p, openedAtTurn: null }, ms: base.ms, chars: base.chars + accrued, requeue: null }
 }
 
+const NO_TOKENS: Tokens = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 }
+
+const addTokens = (a: Tokens, b: Tokens): Tokens =>
+  ({ input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheCreate: a.cacheCreate + b.cacheCreate })
+
+// A loop known by nothing but its id yet: dated by the turn and the row that first showed it.
+const bareLoop = (id: string, firstTurn: number, firstSeq: number): Loop => ({
+  id, run: null, label: null, phase: null, model: null, turns: 0, ms: 0, tokens: NO_TOKENS, ended: null, firstTurn, firstSeq, outcome: null,
+  calls: 0, edits: 0, checks: 0, reads: 0,
+})
+
+// Every change to a loop: created where unknown, grown where known, the oldest dropped past the cap.
+const withLoop = (loops: readonly Loop[], id: string, grow: (l: Loop) => Loop, first: { turn: number; seq: number }): Loop[] => {
+  const known = loops.some(l => l.id === id)
+  const grown = known ? loops.map(l => (l.id === id ? grow(l) : l)) : [...loops, grow(bareLoop(id, first.turn, first.seq))]
+  return grown.slice(-LOOP_CAP)
+}
+
+const applyLoopTurn = (state: State, a: Extract<Action, { type: 'loop.turn' }>): State => ({
+  ...state,
+  loops: withLoop(state.loops, a.agentId, l => ({
+    ...l, turns: l.turns + 1, ms: l.ms + a.ms, tokens: addTokens(l.tokens, a.tokens), ended: a.ended, model: a.model ?? l.model,
+  }), { turn: a.turn, seq: state.seq }),
+})
+
+const applyAgentStart = (state: State, a: Extract<Action, { type: 'agent.start' }>): State => ({
+  ...state,
+  loops: withLoop(state.loops, a.agentId, l => ({
+    ...l, label: a.description.length > 0 ? a.description : l.label, model: a.model ?? l.model,
+  }), { turn: state.turn, seq: state.seq }),
+})
+
+const applyRunStart = (state: State, run: { id: string; name: string; dir: string | null }, now: number): State =>
+  state.runs.some(r => r.id === run.id)
+    ? state   // a resume: the run is the one already known, dated at its first launch
+    : { ...state, runs: [...state.runs, { ...run, turn: state.turn, seq: state.seq, at: now, refreshedAt: 0 }] }
+
+// A `started` entry names the loop's run and stage; a `result` entry what it returned. Either creates the loop.
+const applyEntry = (state: State, runId: string, loops: readonly Loop[], entry: JournalEntry): Loop[] =>
+  withLoop(loops, entry.agentId, l =>
+    entry.kind === 'started'
+      ? { ...l, run: runId, label: entry.label ?? l.label, phase: entry.phase ?? l.phase }
+      : { ...l, outcome: entry.outcome }, { turn: state.turn, seq: state.seq })
+
+const applyRunJournal = (state: State, a: Extract<Action, { type: 'run.journal' }>): State => ({
+  ...state,
+  loops: a.entries.reduce((loops, entry) => applyEntry(state, a.runId, loops, entry), state.loops),
+  runs: state.runs.map(r => (r.id === a.runId ? { ...r, refreshedAt: a.now } : r)),
+})
+
+// The wait before this prompt is written onto the turn it followed, so TURNS can say the person was away.
+const applyTurnStart = (state: State, now: number): State => {
+  const last = state.turns[state.turns.length - 1]
+  const dated = last !== undefined && last.at > 0 ? { ...last, idleMs: Math.max(0, now - last.at) } : last
+  return { ...state, turn: state.turn + 1, turns: dated === undefined ? state.turns : [...state.turns.slice(0, -1), dated] }
+}
+
+// The ledger with the cap applied: a row it pushes off the front is folded into its pair, never simply lost,
+// so STATS, the LEDGER's `~` lines and the sinks still count a call the judge can no longer cite.
+const capped = (state: State, rows: readonly Row[]): Pick<State, 'rows' | 'folded'> => {
+  const over = rows.length - ROW_CAP
+  return over <= 0
+    ? { rows: [...rows], folded: state.folded }
+    : { rows: rows.slice(over), folded: foldRows(state.folded, rows.slice(0, over)) }
+}
+
 const applyRow = (state: State, row: Omit<Row, 'seq'>): State => {
   const seq = state.seq + 1
   return {
     ...state,
     seq,
-    rows: [...state.rows, { ...row, seq }].slice(-ROW_CAP),
+    ...capped(state, [...state.rows, { ...row, seq }]),
+    // A row of a loop nobody has named yet names it here, so the aliases stay in the ledger's order; every
+    // row of a loop is counted on it here, so its line reads whole after ROW_CAP has dropped the row.
+    loops: row.agent === MAIN_AGENT ? state.loops : withLoop(state.loops, row.agent, l => countRow(l, row), { turn: row.turn, seq }),
     ...applySettlements(state, state.patterns.map(p => settleWithRow(state, p, row))),
   }
 }
@@ -136,7 +216,7 @@ const applyAdopt = (state: State, rows: readonly Omit<Row, 'seq'>[]): State => {
     ...state,
     seq,
     turn: Math.max(state.turn, ...seeded.map(row => row.turn)),
-    rows: [...state.rows, ...seeded].slice(-ROW_CAP),
+    ...capped(state, [...state.rows, ...seeded]),
     patterns: state.patterns.map(p => grownWith(p, seeded)),
     // The mid-turn cadence starts where the history ends: adopted rows are not new work, so a session
     // joined late waits for JUDGE_MIN_NEW_ROWS of its own. `/saver check` still judges them on request.
@@ -240,7 +320,15 @@ const applyReset = (state: State): State => ({
 export const reduce = (state: State, action: Action): State => {
   switch (action.type) {
     case 'turn.start':
-      return { ...state, turn: state.turn + 1 }
+      return applyTurnStart(state, action.now)
+    case 'loop.turn':
+      return applyLoopTurn(state, action)
+    case 'agent.start':
+      return applyAgentStart(state, action)
+    case 'run.start':
+      return applyRunStart(state, action.run, action.now)
+    case 'run.journal':
+      return applyRunJournal(state, action)
     case 'row':
       return applyRow(state, action.row)
     case 'adopt':
@@ -292,7 +380,7 @@ export const reduce = (state: State, action: Action): State => {
 const statsOf = (p: Pattern, state: State, rows: readonly Row[]): string => {
   const cost = sumOf(rows)
   const pct = pctOf(cost.chars, state.usage.window)
-  const turns = turnsCited(p, rows)
+  const turns = turnsCited(p, state, rows)
   const first = turns[0]
   const last = turns[turns.length - 1]
   // Zero segments are dropped whole: turn handles and rebuilt rows carry no duration, and `0s` would claim a suite that ran for minutes cost nothing.
@@ -329,20 +417,36 @@ const citedTurnStats = (p: Pattern, state: State): TurnStat[] =>
     .map(n => (n === null ? undefined : state.turns.find(t => t.turn === n)))
     .filter((t): t is TurnStat => t !== undefined)
 
+const ktokOf = (l: Loop): number => Math.round((l.tokens.input + l.tokens.cacheCreate + l.tokens.output) / 1000)
+
+// A cited loop, quoted as one line of evidence: its stage and model, dated by the turn that spawned it.
+const citedLoop = (state: State, aliases: ReadonlyMap<string, string>, l: Loop): Evidence => ({
+  turn: l.firstTurn,
+  what: `${l.label ?? 'agent'} · ${l.model ?? '?'}`,
+  agent: aliasOf(aliases, l.id),
+  ms: l.ms,
+  chars: 0,
+  head: `${ktokOf(l)}k tokens · ${l.edits} edits`,
+})
+
 const evidenceOf = (p: Pattern, state: State, rows: readonly Row[], aliases: ReadonlyMap<string, string>): Evidence[] => {
   const turns: Evidence[] = citedTurnStats(p, state)
     .map(t => ({ turn: t.turn, what: NO_CALLS, agent: null, ms: 0, chars: t.answerChars, head: t.answerHead }))
+  const loops: Evidence[] = loopsCited(p, state).map(l => citedLoop(state, aliases, l))
   // Reversed first, so two calls inside one turn also read newest-first once the stable sort has run.
-  return [...citedRows(rows, aliases).reverse(), ...turns]
+  return [...citedRows(rows, aliases).reverse(), ...loops.reverse(), ...turns]
     .sort((a, b) => b.turn - a.turn)
     .slice(0, CARD_EVIDENCE)
 }
 
-// A pattern with no row in hand cites turns, not calls: it counts them, and its context cost is the
+// A pattern with no row in hand cites loops or turns, not calls: it counts them, and its context cost is the
 // judge's per-turn estimate. The unit is stated here, so the drawing never has to guess it back.
 const totalOf = (p: Pattern, state: State, rows: readonly Row[]): Card['total'] => {
   if (rows.length > 0) return { unit: 'calls', calls: rows.length, ...sumOf(rows) }
-  return { unit: 'turns', calls: citedTurnStats(p, state).length, ms: 0, chars: (p.estTokensPerTurn ?? 0) * 4 }
+  const loops = loopsCited(p, state)
+  const chars = (p.estTokensPerTurn ?? 0) * 4
+  if (loops.length > 0) return { unit: 'agents', calls: loops.length, ms: loops.reduce((ms, l) => ms + l.ms, 0), chars }
+  return { unit: 'turns', calls: citedTurnStats(p, state).length, ms: 0, chars }
 }
 
 /** Derives the waster card in seat `n` from a pattern, the evidence it cites and the ledger's loop aliases. */
@@ -376,7 +480,7 @@ const trendOf = (state: State): number[] =>
 
 // Before the first row nothing was measured, and a total of zero would read as a session that cost nothing.
 const sinksOf = (state: State, measure: 'ms' | 'chars'): Sinks | null =>
-  state.rows.length === 0 ? null : sinks(state.rows, measure)
+  state.rows.length === 0 ? null : sinks(state.rows, measure, state.loops, state.folded)
 
 const headerOf = (state: State): Header => ({
   percent: state.usage.percent ?? null,
@@ -414,7 +518,7 @@ const decidedRowOf = (state: State, p: Decided): DecidedRow => ({
 export const paneModel = (state: State, artifacts: Artifact[]): PaneModel => {
   // One alias table for the whole draw: the naming is the ledger's, not a card's, and the pane
   // redraws on every ledger row and every keystroke in the Fix… field.
-  const aliases = agentAliases(state.rows)
+  const aliases = agentAliases(state.rows, state.loops)
   return {
     header: headerOf(state),
     // Numbered as they are drawn, so `/saver keep 2` names the card the person is looking at.
@@ -446,19 +550,46 @@ const waitingCost = (state: State): { ms: number; chars: number } =>
       { ms: 0, chars: 0 },
     )
 
-// The first state that applies wins: a run in flight, then cards waiting, then a saving to show off.
-const bandState = (state: State): BandModel['state'] => {
+// The last turn's end when it was an error or a refusal and no prompt has followed it: the session stopped.
+const diedOf = (state: State): BandModel['died'] => {
+  const last = state.turns[state.turns.length - 1]
+  if (last === undefined || last.turn !== state.turn) return null
+  return last.ended === 'error' || last.ended === 'refusal' ? last.ended : null
+}
+
+// The newest run still going: how many loops it has spawned, how many calls they made, which stage is running.
+const runningOf = (state: State, now: number): BandModel['running'] => {
+  const active = activeRuns(state, now)
+  const run = active[active.length - 1]
+  if (run === undefined) return null
+  const loops = state.loops.filter(l => l.run === run.id)
+  const ids = new Set(loops.map(l => l.id))
+  const going = loops.filter(l => l.ended === null)
+  return { name: run.name, loops: loops.length, calls: state.rows.filter(r => ids.has(r.agent)).length, label: going[going.length - 1]?.label ?? null }
+}
+
+// The first state that applies wins: a dead turn, a run in flight, then cards waiting, then a saving to show off.
+const bandState = (state: State, died: BandModel['died']): BandModel['state'] => {
+  if (died !== null) return 'died'
   if (state.judge.running) return 'checking'
   if (state.cards.length > 0) return 'found'
   if (state.saved.chars > 0 || state.saved.ms > 0) return 'saved'
   return 'watching'
 }
 
-/** Builds the one teaser line the band shows above the prompt. */
-export const bandModel = (state: State): BandModel => {
+// The latest clock the state has seen: a turn's completion or a run's launch. Without a clock a loopless run
+// would read as fresh forever, so the band takes the newest reading it holds when the caller has none.
+const clockOf = (state: State): number =>
+  Math.max(0, ...state.turns.map(t => t.at), ...state.runs.map(r => r.at))
+
+/** Builds the one teaser line the band shows above the prompt; `now` dates a loopless run's freshness. */
+export const bandModel = (state: State, now: number = clockOf(state)): BandModel => {
   const cost = waitingCost(state)
+  const died = diedOf(state)
   return {
-    state: bandState(state),
+    state: bandState(state, died),
+    died,
+    running: runningOf(state, now),
     fresh: state.cards.length,
     costPct: pctOf(cost.chars, state.usage.window),
     costMs: cost.ms,
@@ -620,6 +751,7 @@ export const debugDump = (state: State, spoke = false): string => {
   return [
     `ContextSaver · turn ${state.turn} · seq ${state.seq} · rows ${state.rows.length} · turns ${state.turns.length} · patterns ${state.patterns.length}`,
     `rows ${classCounts(state.rows)}`,
+    `runs ${state.runs.length} · loops ${state.loops.length} · active ${activeRuns(state, clockOf(state)).length}`,
     sinkLine('time', 'ms', sinksOf(state, 'ms')),
     sinkLine('context', 'ch', sinksOf(state, 'chars')),
     ...patternLines(state),

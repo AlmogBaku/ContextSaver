@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { JUDGE_PROMPT, buildPrompt, costOf, merge, parseReply, shouldRun, spentOf, usageOf } from '../hooks/core/judge'
+import { JUDGE_PROMPT, buildPrompt, costOf, judgeAliases, merge, parseReply, shouldRun, spentOf, usageOf } from '../hooks/core/judge'
 import { debugDump } from '../hooks/core/patterns'
-import { JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, MAX_PATTERNS } from '../hooks/core/types'
+import { ALTERNATIVE_MAX, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, KIND_MAX, MAX_PATTERNS } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
 import { judgeFinding } from './fixtures/judge/judgeFinding'
 import { judgePattern } from './fixtures/judge/judgePattern'
@@ -10,6 +10,9 @@ import { judgeState } from './fixtures/judge/judgeState'
 import { rawFinding } from './fixtures/judge/rawFinding'
 import { replyText } from './fixtures/judge/replyText'
 import { rows } from './fixtures/judge/rows'
+import { foldedPair } from './fixtures/patterns/foldedPair'
+import { sampleLoop } from './fixtures/spawns/sampleLoop'
+import { spawnedState } from './fixtures/spawns/spawnedState'
 
 const SUITE_ID = 'execution:full-suite-after-each-edit'
 
@@ -106,7 +109,7 @@ describe('judge', () => {
 
   test('the prompt asks the three questions, states the ladder and reserves the two sentences', ($, _on) => {
     expect(JUDGE_PROMPT, 'the question the user asked their agent is one of ours now')
-      .toContain('Answer three narrow questions. What repeated:')
+      .toContain('Answer four narrow questions. What repeated:')
     expect(JUDGE_PROMPT).toContain('Where the time and the context went:')
     expect(JUDGE_PROMPT).toContain('What is going in circles: the same failing command retried with no diagnostic step between')
     expect(JUDGE_PROMPT, 'the ladder from nothing to a finding')
@@ -153,6 +156,17 @@ describe('judge', () => {
   test('buildPrompt folds the rows past the ledger window into summary lines', ($, _on) => {
     const prompt = buildPrompt(judgeState({ rows: Array.from({ length: 160 }, (_, i) => filler(i + 1)) }))
     expect(prompt).toContain('~ | Bash | test:bun test | ×10 | Σ1000ch')
+  })
+
+  test('buildPrompt counts the rows the cap dropped and says what a waits line is', ($, _on) => {
+    expect(JUDGE_PROMPT, 'the STATS heading names the line, the two figures on it, and that it cannot be cited')
+      .toContain('then `waits:` — every AskUserQuestion this session, its total wait and how many carried a recommended default; not citable, but the time it held the session is a fact to explain.')
+    const prompt = buildPrompt(judgeState({ folded: { 'Bash\ttest:bun test': foldedPair({ count: 40, ms: 2_400_000, chars: 400_000 }) } }))
+    expect(prompt, 'the pair reads forty-three runs, not the three the ledger still holds')
+      .toContain('Bash | test:bun test | test | ×43 | Σ2580000ms | Σ429400ch | turns 1-6')
+    expect(prompt, 'and the context total counts what it can no longer show').toContain('total Σ476160ch')
+    expect(prompt, 'while the rows it offers as evidence are still the window\'s own').toContain('largest rows:\nr5 | Bash')
+    expect(prompt, 'the folded pair is summarised in the ledger too').toContain('~ | Bash | test:bun test | ×40 | Σ400000ch')
   })
 
   test('parseReply reads a valid reply and maps aliases to tool_use_ids', ($, _on) => {
@@ -266,19 +280,103 @@ describe('judge', () => {
     expect(parseReply(replyText([renamed]), kept).findings).toEqual([])
   })
 
-  test('parseReply keeps at most six findings and two behavioural ones', ($, _on) => {
+  test('parseReply keeps at most six findings and three behavioural ones', ($, _on) => {
     const many = Array.from({ length: 8 }, (_, i) => rawFinding({ id: `execution:suite-${i + 1}` }))
     expect(parseReply(replyText(many), judgeState()).findings.length).toBe(6)
-    const three = [
+    const four = [
       behavioural('communication:restates-plan'),
       behavioural('communication:recaps-finished-work'),
       behavioural('communication:asks-what-it-knows'),
+      behavioural('communication:explains-the-obvious'),
       rawFinding(),
     ]
-    const findings = parseReply(replyText(three), judgeState()).findings
-    expect(findings.map(f => f.id)).toEqual([
-      'communication:restates-plan', 'communication:recaps-finished-work', 'execution:full-suite-after-each-edit',
+    const parsed = parseReply(replyText(four), judgeState())
+    expect(parsed.findings.map(f => f.id), 'agent findings are signature-null too, so the ceiling is three').toEqual([
+      'communication:restates-plan', 'communication:recaps-finished-work', 'communication:asks-what-it-knows',
+      'execution:full-suite-after-each-edit',
     ])
+    expect(parsed.dropped).toEqual(['communication:explains-the-obvious: over MAX_BEHAVIORAL_FINDINGS (3)'])
+  })
+
+  test('the prompt asks the proportion question, names the AGENTS block and cites loops as agent handles', ($, _on) => {
+    expect(JUDGE_PROMPT).toContain('What was out of proportion: which spawned work — an agent, a workflow stage, a review or verification round — cost far more than what it produced')
+    expect(JUDGE_PROMPT).toContain('or `agent:<alias>` where `<alias>` is an `alias` printed in AGENTS — turn and agent handles only for findings whose `signature` is null.')
+    expect(JUDGE_PROMPT).toContain('at most three with `signature: null`')
+    expect(JUDGE_PROMPT, 'breadth is one decision, weight is judged').toContain('Breadth is one decision; weight is not: every stage of a workflow (each `label` in AGENTS) is a decision of its own')
+    expect(JUDGE_PROMPT).toContain('a loop whose rows are only checks that passed, with `edits 0` and a report as its outcome (AGENTS `checks` > 0) — a shell step given a model')
+    expect(JUDGE_PROMPT).toContain('one review per stage that found a medium or higher; a loop that edited; a fan-out\'s breadth on its own.')
+    expect(JUDGE_PROMPT).toContain('an `ask` row that held the turn for minutes while no agent ran')
+    expect(JUDGE_PROMPT).toContain('a question whose answer the transcript shows changed the plan.')
+    expect(JUDGE_PROMPT).toContain('- Parallelism: calls issued together with nothing between them are one decision, and agents on disjoint scopes launched at once are one decision — one, not none: their weight is judged under multi-agent.')
+    expect(JUDGE_PROMPT).toContain('For agent handles it is the tokens one avoided loop would have cost, grounded in AGENTS `tok`, conservative end.')
+    expect(JUDGE_PROMPT).toContain('"id":"multi-agent:check-loops-for-shell-steps"')
+    expect(JUDGE_PROMPT).toContain('"id":"multi-agent:review-rounds-that-find-only-lows"')
+    expect(JUDGE_PROMPT).toContain('## AGENTS — the loops this session spawned.')
+    expect(JUDGE_PROMPT).toContain('{{AGENTS}}\n\n## TURNS')
+    expect(JUDGE_PROMPT).toContain('then `| aborted`, `| error` or `| refusal` when the turn ended that way and `| idle <m>m` when the next prompt came a minute or more later')
+    expect(JUDGE_PROMPT).toContain('`ask` (an AskUserQuestion: its `ms` is the wait for the person) `recommended` (its options named a default)')
+    const prompt = buildPrompt(spawnedState())
+    expect(prompt).toContain('## AGENTS')
+    expect(prompt).toContain('\na2 | proxy-rewrite | check:C3 | sonnet | 1 | 1.7m | 48k | edits 0 | checks 4 | reads 0 | report 1600ch | answer\n')
+    expect(prompt, 'the agents sink is the loops\' time').toContain('agents | ×4 | Σ492000ms | apart')
+    expect(prompt).not.toContain('{{')
+  })
+
+  test('parseReply accepts agent handles under a null signature, stored by loop id, and caps the estimate on their tokens', ($, _on) => {
+    const shellStep = (over: Record<string, unknown> = {}): Record<string, unknown> => rawFinding({
+      id: 'multi-agent:check-loops-for-shell-steps', category: 'multi-agent',
+      kind: 'Claude keeps spawning an agent per chunk whose only job is to run passing checks',
+      evidence: ['agent:a2', 'agent:a4'], signature: null, est_tokens_per_turn: 48_000, ...over,
+    })
+    const parsed = parseReply(replyText([shellStep()]), spawnedState())
+    expect(parsed.findings[0]?.evidence, 'the alias is a naming; the hit is the id').toEqual(['agent:agent-2', 'agent:agent-4'])
+    expect(parsed.findings[0]?.estTokensPerTurn, 'the median of the cited loops\' new tokens: 48k and 12k').toBe(30_000)
+    expect(parseReply(replyText([shellStep({ est_tokens_per_turn: 9_000 })]), spawnedState()).findings[0]?.estTokensPerTurn).toBe(9_000)
+    const mixed = parseReply(replyText([shellStep({ evidence: ['agent:a2', 'turn:5'], est_tokens_per_turn: 48_000 })]), spawnedState())
+    expect(mixed.findings[0]?.estTokensPerTurn, 'with a turn handle beside it the cap is the turns\', as before').toBe(1_350)
+    const reason = (over: Record<string, unknown>): string[] => parseReply(replyText([shellStep(over)]), spawnedState()).dropped
+    expect(reason({ evidence: ['agent:a2', 'agent:a9'] })).toEqual(['multi-agent:check-loops-for-shell-steps: evidence agent:a9 not in AGENTS'])
+    expect(reason({ evidence: ['agent:a2', 'r3'], signature: { tool: 'Bash', key: 'test:bun test' } }))
+      .toEqual(['multi-agent:check-loops-for-shell-steps: evidence agent:a2 needs signature null'])
+    expect(reason({ evidence: ['agent:agent-2', 'agent:agent-4'] }), 'the raw id is not a handle the blocks printed')
+      .toEqual(['multi-agent:check-loops-for-shell-steps: evidence agent:agent-2 not in AGENTS'])
+    expect(parseReply(replyText([shellStep()]), judgeState()).findings, 'no loops, no agent handles').toEqual([])
+  })
+
+  test('parseReply reads agent handles under the alias table the prompt printed, not the one the rows grew into', ($, _on) => {
+    const before = spawnedState()
+    const aliases = judgeAliases(before)
+    expect(buildPrompt(before, aliases), 'a4 is the loose explore loop no row ever showed').toContain('\na4 | - | explore src | sonnet |')
+    // While the judge thought, a new agent's first row landed: it is named by the rows now, ahead of every loop-only alias.
+    const late: Row = {
+      seq: 14, id: 'toolu_14', tool: 'Bash', key: 'test:bun test', cls: 'test', agent: 'agent-5', turn: 9,
+      ms: 5_000, chars: 300, head: 'PASS', flags: [], lines: null, paths: [], spawn: null,
+    }
+    const after = spawnedState({ seq: 14, rows: [...before.rows, late], loops: [...before.loops, sampleLoop({ id: 'agent-5', run: null, label: null, firstTurn: 9, firstSeq: 14 })] })
+    expect(judgeAliases(after).get('agent-4'), 'the live table has renumbered the loop').toBe('a5')
+    const finding = rawFinding({
+      id: 'multi-agent:check-loops-for-shell-steps', category: 'multi-agent',
+      kind: 'Claude keeps spawning an agent per chunk whose only job is to run passing checks',
+      evidence: ['agent:a2', 'agent:a4'], signature: null, est_tokens_per_turn: 48_000,
+    })
+    expect(parseReply(replyText([finding]), after, aliases).findings[0]?.evidence, 'the reply names what the prompt showed')
+      .toEqual(['agent:agent-2', 'agent:agent-4'])
+    expect(parseReply(replyText([finding]), after, aliases).findings[0]?.estTokensPerTurn, 'and the cap is taken over those loops: 48k and 12k').toBe(30_000)
+  })
+
+  test('merge dates an agent handle by the turn its loop was spawned in', ($, _on) => {
+    const killed = (turn: number) => spawnedState({
+      patterns: [judgePattern({
+        id: 'multi-agent:check-loops-for-shell-steps', category: 'multi-agent', signature: null,
+        decision: 'kill', decidedAtTurn: turn, openedAtTurn: turn, instruction: 'run checks as a shell step',
+      })],
+    })
+    const finding = judgeFinding({
+      id: 'multi-agent:check-loops-for-shell-steps', category: 'multi-agent', signature: null,
+      evidence: ['agent:agent-2', 'agent:agent-4'],
+    })
+    expect(merge(killed(7), [finding]).recurred, 'a2 was spawned at turn 8, after the kill at 7').toEqual(['multi-agent:check-loops-for-shell-steps'])
+    expect(merge(killed(9), [finding]).recurred).toEqual([])
   })
 
   test('merge reuses a known id, extending its hits and refreshing its text', ($, _on) => {
@@ -361,13 +459,37 @@ describe('judge', () => {
       { id: 'Execution:X' },
       { id: 'reading:foo', category: 'execution' },
       { kind: 'Runs the suite again' },
-      { kind: `Claude keeps ${'x'.repeat(120)}` },
+      { kind: `Claude keeps ${'x'.repeat(KIND_MAX * 2)}` },
       { alternative: '' },
-      { alternative: 'x'.repeat(201) },
+      { alternative: 'x'.repeat(ALTERNATIVE_MAX * 2 + 1) },
       { confidence: 0.4 },
       { confidence: 1.2 },
     ]
     broken.forEach(over => expect(parseReply(replyText([rawFinding(over)]), judgeState()).findings).toEqual([]))
+  })
+
+  // A model cannot count characters; a cap it misses by ten should cost a note, not the finding.
+  test('parseReply keeps a finding that ran over the kind or fix cap and notes the length', ($, _on) => {
+    const over = rawFinding({ kind: `Claude keeps ${'x'.repeat(KIND_MAX - 2)}`, alternative: 'x'.repeat(ALTERNATIVE_MAX + 6) })
+    const parsed = parseReply(replyText([over]), judgeState())
+    expect(parsed.findings[0]?.kind.length, 'kept as it came: the pane wraps, so nothing is cut').toBe(KIND_MAX + 11)
+    expect(parsed.findings[0]?.alternative.length).toBe(ALTERNATIVE_MAX + 6)
+    expect(parsed.dropped, 'and the run report says both caps were missed, as it says a sentence was trimmed').toEqual([
+      `${SUITE_ID}: kind: ${KIND_MAX + 11} chars, over ${KIND_MAX}`,
+      `${SUITE_ID}: alternative: ${ALTERNATIVE_MAX + 6} chars, over ${ALTERNATIVE_MAX}`,
+    ])
+    const twice = parseReply(replyText([rawFinding({ kind: `Claude keeps ${'x'.repeat(KIND_MAX * 2)}` })]), judgeState())
+    expect(twice.findings, 'twice the cap is another kind of answer, not a miss').toEqual([])
+    expect(twice.dropped).toEqual([`${SUITE_ID}: kind is ${KIND_MAX * 2 + 13} chars, over twice ${KIND_MAX}`])
+  })
+
+  test('parseReply lowercases the id slug a model typed in the work\'s own spelling', ($, _on) => {
+    const chunk = parseReply(replyText([rawFinding({ id: 'execution:C6-suite-after-every-fix' })]), judgeState())
+    expect(chunk.findings[0]?.id, 'one behaviour keeps one id, whatever the case of the chunk it names')
+      .toBe('execution:c6-suite-after-every-fix')
+    expect(chunk.dropped, 'nothing to report: the id was usable').toEqual([])
+    expect(parseReply(replyText([rawFinding({ id: 'Execution:C6' })]), judgeState()).findings,
+      'the category is an enum, not a slug: its case is not ours to fold').toEqual([])
   })
 
   test('parseReply nulls an unusable proposal but keeps the finding', ($, _on) => {
