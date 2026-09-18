@@ -2,15 +2,16 @@
 
 <h1><img src="assets/logo.png" alt="" height="40" align="top"> ContextSaver</h1>
 
-**Stop Claude Code from wasting tokens doing useless shit, in realtime.**
+**Catches what's bogging down your Claude Code session and lets you fix it in one click.**
 
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-5769F7)](https://claude.com/claude-code) [![tests](https://img.shields.io/badge/tests-217%20passing-3fb950)](scripts/check.sh) [![dependencies](https://img.shields.io/badge/dependencies-0-3fb950)](#development) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
-A Claude Code plugin that catches Claude repeating wasteful behaviour in your session and lets you stop
-it with one click. Things like running the full test suite after every one-line edit, reading the same
-file for the fourth time, or dumping a 2,000-line log into the context to find one traceback.
+Sessions bog down when Claude repeats a pattern it didn't need to. Running the full test suite after
+every one-line edit. Reading the same file for the fourth time. Dumping a 2,000-line log into context
+to find one traceback. Each of these had a shorter path to the same result — that gap is the waste.
+ContextSaver spots those patterns as they compound and surfaces them while you can still act.
 
 <p align="center">
   <img src="docs/screenshot.png" width="880"
@@ -19,15 +20,15 @@ file for the fourth time, or dumping a 2,000-line log into the context to find o
 
 ## Features
 
-- **It names the behaviour, not the big output.** "Claude keeps running the whole suite after every
+- **It names the pattern, not the big output.** "Claude keeps running the whole suite after every
   one-file edit — 3×, ~9% of context, 3m 12s." The calls behind the claim are one keypress away.
 - **Nothing to configure.** No thresholds, no rules to tune. The plugin gathers the evidence and the
-  model decides what was waste, so it catches things nobody wrote a rule for.
+  model asks: was there a shorter path to the same result? That catches things nobody wrote a rule for.
 - **It works mid-turn.** Long agentic turns are checked while they run, and your fix reaches Claude on
   its next tool result, then rides every prompt after it, so it survives compaction.
 - **It shows where your session went.** One line each for time and context, and a plain sentence on what
   those minutes and tokens actually bought.
-- **It stays quiet.** A single occurrence is never a finding. A wrong card costs you more than a missed one.
+- **It stays quiet.** A single occurrence is never a finding. A wrong card costs more than a missed one.
 - **Fixes outlive the session.** Turn a decision into a CLAUDE.md rule, a skill, an agent brief or a
   permission rule, written only when you click `Write`.
 - **It never touches your work.** No tool denied, no output trimmed, no error hidden. If a hook throws,
@@ -89,9 +90,9 @@ waiting for your next prompt.
 Every tool call becomes a row in a session ledger: what ran, how long it took, how much it added to your
 context, which files it touched. About every 30k tokens and three turns — or every 40 calls and five
 minutes inside a long turn — a background fork of your session's model reads the transcript and that
-ledger, then answers three questions: what has already repeated and wasted something, where the time and
-context went, and what is going in circles. Whatever it finds becomes a card, with the costs computed
-from the ledger rather than guessed by the model.
+ledger, then asks: what has repeated and bogged things down, where did the time and context actually go,
+and was there a shorter path to the same result? Whatever it finds becomes a card, with the costs
+computed from the ledger rather than guessed by the model.
 
 `Fix` and `Fix…` send instructions; they never block a tool. The text arrives on Claude's next tool
 result and is attached to every later prompt for the rest of the session.
@@ -112,6 +113,9 @@ product spec is [`docs/PRD.md`](docs/PRD.md).
 - **Durations are wall time.** They include the time a permission prompt spent waiting for you, and the
   model is told as much.
 - **Terminal and desktop only.** On mobile surfaces the plugin keeps its ledger and draws nothing.
+- **The band speaks for dead turns and running workflows.** After a turn that ended in an API error or a
+  refusal it reads `✕ Last turn ended in … · type anything to continue` until your next prompt; while a
+  workflow runs and nothing is found it names the run, its stage, its agents and their calls.
 
 ## Development
 
