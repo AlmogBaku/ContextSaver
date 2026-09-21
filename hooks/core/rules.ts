@@ -18,12 +18,13 @@ export const appendedTo = (existing: string | null, content: string): string => 
   return base + glue + (base === '' ? content.replace(/^\n+/, '') : content)
 }
 
-/** Renders the file an artifact kind writes: where it goes, what it says, how it lands. */
-export const render = (kind: ArtifactKind, p: Proposal, cwd: string): Pick<Artifact, 'path' | 'content' | 'mode'> => {
+/** Renders the file an artifact kind writes: where it goes, what it says, how it lands.
+ *  `claudeMdPath` overrides where a claude-md rule lands, so a rule can be kept out of a tracked repo. */
+export const render = (kind: ArtifactKind, p: Proposal, cwd: string, claudeMdPath?: string | null): Pick<Artifact, 'path' | 'content' | 'mode'> => {
   if (kind === 'skill') return { path: `${cwd}/.claude/skills/${slug(p.title)}/SKILL.md`, content: skillDoc(p), mode: 'write' }
   if (kind === 'agent-brief') return { path: `${cwd}/.claude/agents/${slug(p.title)}.md`, content: briefDoc(p), mode: 'write' }
   if (kind === 'settings-allow') return { path: `${cwd}/.claude/settings.json`, content: p.body, mode: 'merge-settings' }
-  return { path: `${cwd}/CLAUDE.md`, content: `\n${CLAUDE_MD_HEADING}\n${bulletOf(p.body)}`, mode: 'append' }
+  return { path: claudeMdPath || `${cwd}/CLAUDE.md`, content: `\n${CLAUDE_MD_HEADING}\n${bulletOf(p.body)}`, mode: 'append' }
 }
 
 /** Returns the artifacts that make this session's decisions permanent, largest saving first. */
@@ -48,7 +49,7 @@ const artifactsOf = (state: State, p: Pattern): Artifact[] => {
     kind: proposal.kind,
     title: proposal.title,
     savingPct: pctOf(baseline(state, p).chars * 3, state.usage.window),
-    ...render(proposal.kind, proposal, state.cwd),
+    ...render(proposal.kind, proposal, state.cwd, state.claudeMdPath),
   }]
 }
 

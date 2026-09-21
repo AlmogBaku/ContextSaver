@@ -456,12 +456,15 @@ export function register(on: On): void {
         writeFile: (path, text) => $.fs.write(path, text),
         exists: path => $.fs.exists(path),
         debugFlag: () => $.env.get('CONTEXTSAVER_DEBUG'),
+        claudeMdPath: () => $.env.get('CONTEXTSAVER_CLAUDE_MD'),
       }
       host = engine
       const u = await engine.usage({ breakdown: 'summary' })
       const now = await engine.now()
       const stored = parseRegistry(await engine.storeGet(`patterns:${e.cwd}`))
-      state = { ...initialState(e.cwd, u.context.window), patterns: stored.map(fromStored) }
+      // An unreadable or unset override leaves the target null: a claude-md rule lands in the working directory's CLAUDE.md, as before.
+      const claudeMdTarget = await engine.claudeMdPath().catch(() => undefined)
+      state = { ...initialState(e.cwd, u.context.window), claudeMdPath: claudeMdTarget || null, patterns: stored.map(fromStored) }
       dispatch({
         type: 'usage',
         usage: { window: u.context.window, compactAt: u.context.breakdown?.autoCompactThreshold, tokens: u.context.tokens, percent: u.context.percent },

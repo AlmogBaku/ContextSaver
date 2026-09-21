@@ -124,6 +124,7 @@ export type Usage = { tokens?: number; window: number; percent?: number; compact
 
 export type State = {
   cwd: string
+  claudeMdPath: string | null     // CONTEXTSAVER_CLAUDE_MD: where a claude-md rule lands; null = `${cwd}/CLAUDE.md`
   turn: number
   seq: number                      // last Row.seq issued
   rows: Row[]                      // capped at ROW_CAP (oldest dropped)
@@ -151,7 +152,7 @@ export type State = {
 }
 
 export const initialState = (cwd: string, window: number): State => ({
-  cwd, turn: 0, seq: 0, rows: [], folded: {}, turns: [], loops: [], runs: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
+  cwd, claudeMdPath: null, turn: 0, seq: 0, rows: [], folded: {}, turns: [], loops: [], runs: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
   judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null }, pendingCheck: false, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 

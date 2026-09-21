@@ -19,6 +19,13 @@ describe('rules', () => {
     expect(bulletOf('Run targeted tests.')).toBe('- Run targeted tests.\n')
   })
 
+  test('claude-md honours a CONTEXTSAVER_CLAUDE_MD target and falls back to the working directory', async () => {
+    expect(render('claude-md', ruleProposals['claude-md'], '/repo', '/home/me/.claude/CLAUDE.md').path).toBe('/home/me/.claude/CLAUDE.md')
+    expect(render('claude-md', ruleProposals['claude-md'], '/repo', null).path, 'no override falls back').toBe('/repo/CLAUDE.md')
+    expect(render('claude-md', ruleProposals['claude-md'], '/repo', '').path, 'an empty override falls back').toBe('/repo/CLAUDE.md')
+    expect(render('skill', ruleProposals.skill, '/repo', '/home/me/.claude/CLAUDE.md').path, 'only claude-md moves').toBe('/repo/.claude/skills/targeted-test-run-fast/SKILL.md')
+  })
+
   test('claude-md flattens a multi-line body into one bullet and never doubles the marker', async () => {
     const body = 'First rule.\nSecond rule.'
     expect(render('claude-md', { kind: 'claude-md', title: 'T', body }, '/repo').content).toBe('\n## ContextSaver\n- First rule. Second rule.\n')

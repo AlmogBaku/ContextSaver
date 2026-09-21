@@ -48,4 +48,6 @@ export type Host = {
   exists(p: string): Promise<boolean>
   /** $.env.get('CONTEXTSAVER_DEBUG') — read the debug flag. */
   debugFlag(): Promise<string | undefined>
+  /** $.env.get('CONTEXTSAVER_CLAUDE_MD') — read the claude-md target override. */
+  claudeMdPath(): Promise<string | undefined>
 }
