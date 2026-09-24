@@ -79,8 +79,12 @@ ContextSaver/
   hooks/core/judge.ts                shouldRun(), buildPrompt(), parseReply(), merge(); JUDGE_PROMPT (Appendix A, verbatim)   (WP3)
   hooks/core/rules.ts                propose(), templates, mergeSettings()
   hooks/core/demo.ts                 demoRows(), demoPatterns() — the sample session behind the debug-only `/saver demo`
+  hooks/say/en.ts                    the complete bundle and its types: Texts, PartialTexts, EN            (section 12)
+  hooks/say/fr.ts                    French, as PartialTexts; es.ts de.ts zh-CN.ts ja.ts likewise
+  hooks/say/say.ts                   LANGUAGES, sayOf(), setSay(), say()
+  hooks/say/index.ts                 re-exports, so every module imports from one place
   hooks/ui.tsx                       Band(), RulesPane()
-  tests/{ledger,adopt,patterns,judge,rules,demo}.test.ts  tests/ui.test.tsx  tests/register.test.ts  tests/fixtures/*
+  tests/{ledger,adopt,patterns,judge,rules,demo,say}.test.ts  tests/ui.test.tsx  tests/register.test.ts  tests/fixtures/*
   scripts/check.sh  scripts/smoke.sh  tsconfig.json  README.md  LICENSE  .gitignore
 ```
 
@@ -718,6 +722,141 @@ Agent facts in the pane header; a size for a spawn whose loop never reaches `tur
 
 ---
 
+## 12. v0.5 — The mod speaks your language
+
+### 12.0 Why
+
+A card is an interruption written to be read at a glance, mid-work. Read in a second language it is read
+slower, and a card read slower is a card dismissed. The whole surface moves together or the translation is
+worth little: the pane, the band, what `/saver` answers — and the findings themselves, since a French pane
+whose cards say *Claude keeps running the whole suite* is a pane in two languages.
+
+Nothing about this is any one language. English is the bundle every other is typed against; the system is
+what makes the next one cheap. v0.5 ships six: `en`, `fr`, `es`, `de`, `zh-CN`, `ja`.
+
+### 12.1 The bundle (`hooks/say/`) — WP-L1
+
+`en.ts` holds the types and the one complete bundle, in six groups: `pane`, `band`, `command`,
+`categories`, `judge`, `config`. A line that takes an argument is a function, never a template assembled at
+the call site — word order and plural are the translator's, and a caller gluing two halves together would
+have decided both for them.
+
+A language is a file of `PartialTexts`: the keys it translated and no others. `sayOf(tag)` lays it over
+English group by group, so a half-finished translation draws its own words where it has them and English
+where it has not; a misspelt key is a compile error, and a tag no file answers to is English, silently —
+the option is written by hand and outlives the files beside it.
+
+`setSay` settles the bundle once, at `register`, and `say()` reads it. The holder exists so that a language
+does not have to be carried down through every view model, the reducer and each pure function's parameters.
+Writing the `/config` row reloads the module, which calls `setSay` again with the new value, so there is
+nothing to keep in step.
+
+What is **not** in the bundle is deliberate: the glyphs, `ContextSaver` itself, `/saver` and its
+subcommands, the nine `Category` enum values inside an id, the evidence handles, the signatures and the
+sink labels. A word that is typed or matched may not move with the language.
+
+### 12.2 Where it reaches — WP-L2
+
+- `ui.tsx` — every label, hint and ladder rung. `CHECK_CELLS` and `RULES_CELLS` were constants counted off
+  the English labels; they are now measured off the words in hand, since a translation is free to spend
+  more cells and a reserve that is too small squeezes the buttons at the row's right edge. A row of
+  controls gives back its glyphs, then its gaps (`controlsFitting`); the rules footer, whose three German
+  verbs still leave the title nothing, stacks the controls under the title instead — a row that costs
+  nothing on a pane that scrolls, and never drawn on the inline one, which draws a count line.
+- `patterns.ts` — a card's stats line, its `ignored ·` prefix and the line quoted under a cited loop.
+- `text.ts` — `instructionOf` and `killPrompt`, the two texts a decision is sent to Claude inside.
+- `register.ts` — every reply and every toast, and the command's `description` and `argumentHint`. It takes
+  `options` now, and reads `options.language` there and nowhere else.
+- `config.describe` on `contextsaver.language` — the row's label, and its help extended with the tags
+  `LANGUAGES` really has. The options themselves cannot be rewritten from a hook, so the manifest lists
+  them: that is the one duplication, and adding a language means touching it.
+
+### 12.3 Cells, not characters — WP-L5
+
+A terminal gives an East Asian ideograph two cells and a Latin letter one, and every reserve, ladder and
+column in the drawing is a number of cells. Measuring `.length` was right for as long as every bundle was
+Latin; `zh-CN` and `ja` would have been laid out at half their real width and run through every border on
+screen. So `core/text.ts` gained `widthOf` (Unicode TR #11 Wide and Fullwidth → 2, the rest → 1),
+`padCells`, and a `fit` that truncates by cells; `ui.tsx` measures with them throughout. For a Latin
+bundle `widthOf` is `length`, so nothing about English, French, Spanish or German moved.
+
+`linesOf` also had to learn to break a word: Chinese and Japanese are written without spaces, so a whole
+`why` sentence arrives at the wrap as one word and would otherwise have been one truncated line. `pieces`
+cuts it where those scripts wrap, at a character, and each full piece then takes a line of its own — so no
+space is inserted inside a sentence that never had one.
+
+Two more places a non-Latin bundle reached:
+
+- `slug` whitelisted `a-z0-9`, so a rule the judge titled in Japanese slugged to nothing and a skill would
+  have been written to `…/skills//SKILL.md`. It keeps any letter or digit now (`\p{Letter}`, `\p{Number}`),
+  which for a Latin title is the same expression it always was, and `rules.ts` falls back through the body
+  to a constant so a path can never have a hole in it.
+- `sayOf` matches a tag without case against the real keys, so `zh-CN` keeps the spelling BCP 47 gives it
+  in the manifest, in the menu and in `LANGUAGES` alike.
+
+### 12.4 The judge — WP-L3
+
+`JUDGE_PROMPT` stays English: it is the model's instruction sheet, and translating three thousand words of
+counting rules would be a second prompt to keep correct. Instead it gains a `{{LANGUAGE}}` placeholder
+between the LEDGER and its last line, filled from `say().judge.directive`. English fills it with nothing —
+the placeholder and the blank line under it are replaced as one string, so the prompt English is handed is
+this document's, to the character.
+
+A language that wants its findings in its own words fills two keys:
+
+- `judge.directive` — the paragraph, written in English because a consigne in the prompt's own language is
+  the one that is followed. It names the fields whose prose moves (`kind`, `why`, `alternative`, `time`,
+  `context`, a proposal's `title` and `body`) and, explicitly, everything that does not: the JSON keys, the
+  id and its slug, the nine category names, the evidence handles, the signature copied character for
+  character from a row, and the proposal's `kind`. A translated one of those discards the finding.
+- `judge.kindPrefix` — the words every `kind` opens with. The prompt asks for them and `findingOf` tests
+  for them, off this one key, so the two can never drift. None of the six carries an apostrophe: a prefix
+  matched character for character is no place for one the model may straighten.
+
+English's `Claude keeps ` runs into a gerund, and only two of the five follow it there. The prefix is the
+one place the grammar of a language is the plugin's problem, so each directive says what comes after it:
+
+| | prefix | what follows |
+|---|---|---|
+| `fr` | `Claude continue de ` | infinitive — *relancer toute la suite* |
+| `es` | `Claude sigue ` | gerund — *ejecutando toda la suite* |
+| `de` | `Claude wiederholt ` | a noun phrase, since German cannot carry on with a gerund — *den kompletten Testlauf nach jeder Änderung* |
+| `zh-CN` | `Claude 反复` | the verb, with no space after the prefix — *在每次单文件编辑后运行整个测试套件* |
+| `ja` | `Claude は繰り返し` | the clause, its verb at the end — *単一ファイルの編集ごとにテストスイート全体を実行しています* |
+
+Leaving both out is a complete answer: the chrome is translated and the cards keep coming back in English.
+
+### 12.5 Testing a language — WP-L4
+
+`scripts/replay.ts` takes `--lang <tag>` and calls `setSay` before anything is built, so the harness of
+§11.5 is what checks a translation over a real session rather than a fixture:
+
+```sh
+bun run scripts/replay.ts <session-id> --prompt --lang fr | tail -8   # the directive the fork is handed
+bun run scripts/replay.ts <session-id> --judge  --lang fr             # the findings it comes back with
+```
+
+`--prompt` shows the paragraph landing after the LEDGER and before the last line; `--judge` reads the
+reply back through that language's own `kindPrefix`, so a translation whose directive the model ignores
+shows up as `returned N, kept 0` with the prefix named in the drop reason. A tag `LANGUAGES` does not
+carry is refused here rather than falling back: the plugin is silent about an unknown tag on purpose, a
+dev tool told to replay in a language that does not exist has misunderstood its operator.
+
+Beside it: `tests/say.test.ts` covers the bundle, the merge, the two judge contracts and the two gutter
+labels a translation cannot degrade out of; the width test in `tests/ui.test.tsx` runs thirteen pane
+models and four band models over eight widths in every language the plugin ships — which is what caught
+the two reserves counted off the English labels, and then the German rules footer.
+
+### 12.6 Not built in v0.5
+
+Numbers stay as they are — `9.9k`, `3m 50s`, `~4%` — rather than taking the language's own decimal mark:
+`/saver debug` and the replay harness read them back, and a comma there would be a second format to parse.
+`/saver demo`'s sample cards stay English; they are a drawing aid behind `CONTEXTSAVER_DEBUG`, not a
+session's own words. Patterns already in the store keep the language they were found in until the behaviour
+is found again — they are the judge's sentences, and re-translating them would be inventing evidence.
+
+---
+
 ## Appendix A — The judge prompt (verbatim; `JUDGE_PROMPT` in `core/judge.ts`)
 
 Merged from the synthesized draft and both critics' revisions; every column it names exists in `Row`/`TurnStat`/`KeyStat` (sections 4, 5.1) and is rendered by `buildPrompt` (section 5.3). Static part ≈ 3,050 words (whitespace-separated) / ≈ 19 kB.
@@ -838,8 +977,12 @@ Three `review:*` loops of one run, each `edits 0` with outcome `3 low`, a fix lo
 ## LEDGER — `id | tool | key | cls | agent | turn | ms | chars | flags | paths`, oldest first (a spawn row lands after the rows it caused: an agent's own calls finish before its Agent row does). Agents are named `a1`, `a2`… in order of first appearance; `main` is the main loop. `ms` is wall time and includes any wait on a permission prompt, so a long `ms` alone is not machine cost. A row flagged `recovered` was rebuilt from the transcript before this plugin joined the session: its `ms` is 0 and its agent reads `main`, so never reason about its duration or which loop ran it. flags: `err` `denied` `dedup` `trunc` `bg` `timeout` `persist=<bytes>` `ask` (an AskUserQuestion: its `ms` is the wait for the person) `recommended` (its options named a default) `+adds/-dels` `agent=<type>/<model>/<status>/<tokens>tok/<edits>edits/<promptChars>pch`, or `-`. Rows older than the window are folded into `~ | tool | key | ×count | Σchars` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
 {{LEDGER}}
 
+{{LANGUAGE}}
+
 Return the JSON object only.
 ```
+
+`{{LANGUAGE}}` and the blank line under it are replaced together (section 12.3): English asks for nothing there and the prompt above is what it is handed, to the character.
 
 ---
 

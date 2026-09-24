@@ -1,4 +1,4 @@
-import type { ModelForkResult, On, PaneOpenArgs, RenderElement } from 'claude-code'
+import type { ModelForkResult, On, PaneOpenArgs, PluginOptions, RenderElement } from 'claude-code'
 
 import { adoptRows } from './core/adopt'
 import { demoForkUsage, demoPatterns, demoRows, demoTurns, demoUsage } from './core/demo'
@@ -15,13 +15,10 @@ import {
 } from './core/types'
 import type { Action, Actions, Artifact, Choice, Run, State, Tokens, Ui } from './core/types'
 import type { Host } from './host'
+import { LANGUAGE_TAGS, say, setSay } from './say'
 import { Band, Pane } from './ui'
 
-const FIX_USAGE = 'Usage: /saver fix [n] [instruction] (a leading number is the card the pane draws; without one: the card whose Fix… field is open, else card 1)'
-const SAVER_USAGE = 'Usage: /saver [check | fix [n] [text] | ignore <n> | debug | reset]'
-const NOTHING_TEXT = 'ContextSaver: nothing to decide on'
-const CHECKING_TEXT = 'ContextSaver: checking this session for waste…'
-const ALREADY_TEXT = 'ContextSaver: already checking'
+const CONFIG_LANG_KEY = `${PLUGIN_NAME}.language`   // the `/config` row that picks the language
 const ANSWER_HEAD = 100   // characters of the turn's answer kept as an evidence quote
 const CARD_KIND = 60      // characters of a card's behaviour quoted back in a command's reply
 const DEMO_CONTEXT = [120_000, 190_000, 250_000, 320_000]   // `/saver demo`: the window filling up to the sample's own 32%, so the trend draws
@@ -38,8 +35,15 @@ const REQUESTED: readonly JudgeReason[] = ['/saver check', 'load']
  * behaviours, the band and the pane that let the user fix or ignore them.
  *
  * @param on the engine's registrar
+ * @param options what `/config` holds for this plugin; only `language` is read, and it is read
+ *   here and nowhere else — writing that row reloads the module, so `register` runs again with the
+ *   new value and there is nothing to keep in step.
  */
-export function register(on: On): void {
+export function register(on: On, options: PluginOptions = {}): void {
+  // Before anything else: the command's own words are read when it is registered, and every line the
+  // pane draws is read when it is drawn, both of which happen under a hook below.
+  setSay(options['language'])
+
   let state: State = initialState('', 0)
   let host: Host | null = null
   let isDebug = false
@@ -67,7 +71,7 @@ export function register(on: On): void {
     const pct = pctOf(state.saved.chars - before.chars, state.usage.window)
     const grew = [...(ms > 0 ? [`+${duration(ms)}`] : []), ...(pct > 0 ? [`+~${pct}%`] : [])]
     if (grew.length === 0) return
-    host?.toast(`${grew.join(' · ')} context saved`)
+    host?.toast(say().command.savedToast(grew.join(' · ')))
   }
 
   const openIds = (): string[] => state.patterns.filter(p => p.openedAtTurn !== null).map(p => p.id)
@@ -166,7 +170,7 @@ export function register(on: On): void {
 
   // What the run put in front of the user: a recurrence is news too, and it is the D4 moment this exists for.
   const checkedText = (queued: number): string =>
-    queued === 0 ? 'ContextSaver: nothing new' : `ContextSaver: ${queued} new waster${queued === 1 ? '' : 's'}`
+    queued === 0 ? say().command.nothingNew : say().command.found(queued)
 
   // A run that reported nothing: a cold snapshot, a refusal, or a failure of ours.
   const judgedNothing = (error: string): Action => ({
@@ -181,10 +185,10 @@ export function register(on: On): void {
     if (reason === 'load' && !asked) {
       if (armedSpoke) return
       armedSpoke = true
-      host?.toast(`ContextSaver: could not check yet — ${failure}`)
+      host?.toast(say().command.notCheckedYet(failure))
       return
     }
-    if (REQUESTED.includes(reason) || asked) host?.toast(`ContextSaver: check failed — ${failure}`)
+    if (REQUESTED.includes(reason) || asked) host?.toast(say().command.checkFailed(failure))
   }
 
   const judgeOnce = async (engine: Host, reason: JudgeReason): Promise<void> => {
@@ -282,10 +286,10 @@ export function register(on: On): void {
     if (forking || state.judge.running) {
       // The run already going answers this ask: nothing is forked, and nobody is left without a reply.
       asked = true
-      return ALREADY_TEXT
+      return say().command.alreadyChecking
     }
     void runJudge('/saver check').catch(() => undefined)
-    return CHECKING_TEXT
+    return say().command.checking
   }
 
   const togglePane = async (): Promise<void> => {
@@ -310,9 +314,9 @@ export function register(on: On): void {
     if (p === undefined) return
     dispatch({ type: 'decide', patternId, choice, text })
     if (state.patterns.find(q => q.id === patternId)?.decision !== choice) return
-    if (choice === 'keep') host?.toast(`ContextSaver: ignored "${p.kind}"`)
-    if (choice === 'kill') host?.toast(`ContextSaver: fixed — ${p.alternative}`)
-    if (choice === 'steer') host?.toast(`ContextSaver: fixed with your note — ${firstLine(text ?? '')}`)
+    if (choice === 'keep') host?.toast(say().command.toastIgnored(p.kind))
+    if (choice === 'kill') host?.toast(say().command.toastFixed(p.alternative))
+    if (choice === 'steer') host?.toast(say().command.toastNoted(firstLine(text ?? '')))
     persist()
   }
 
@@ -321,22 +325,22 @@ export function register(on: On): void {
 
   const cardReply = (patternId: string, seat: number, tail: string): string => {
     const kind = state.patterns.find(q => q.id === patternId)?.kind ?? patternId
-    return `ContextSaver: card ${seat} — "${fit(kind, CARD_KIND)}" · ${tail}`
+    return say().command.card(seat, fit(kind, CARD_KIND), tail)
   }
 
   const numberOf = (token: string): number | null => (/^\d+$/.test(token) ? Number(token) : null)
 
   // A number no card wears is a numbering mistake, whichever verb typed it: it is refused, never obeyed.
-  const noCardText = (n: number): string => `ContextSaver: no card ${n} (1–${state.cards.length})`
+  const noCardText = (n: number): string => say().command.noCard(n, state.cards.length)
 
   // `/saver ignore 2` and `/saver fix 2` decide the card the pane numbers 2, and say which one they took.
   const decideByNumber = (choice: Choice, token: string): string => {
-    if (state.cards.length === 0) return NOTHING_TEXT
+    if (state.cards.length === 0) return say().command.nothingToDecide
     const n = numberOf(token)
-    if (n === null) return SAVER_USAGE
+    if (n === null) return say().command.usage
     const patternId = state.cards[n - 1]
     if (patternId === undefined) return noCardText(n)
-    const reply = cardReply(patternId, n, choice === 'keep' ? 'ignored' : 'fixed')
+    const reply = cardReply(patternId, n, choice === 'keep' ? say().command.outcomeIgnored : say().command.outcomeFixed)
     decide(patternId, choice)
     return reply
   }
@@ -344,7 +348,7 @@ export function register(on: On): void {
   const steerSubmit = (patternId: string, text: string): void => {
     const wanted = text.trim()
     if (wanted === '') {
-      host?.toast('ContextSaver: write the instruction first')
+      host?.toast(say().command.writeFirst)
       return
     }
     decide(patternId, 'steer', wanted)
@@ -364,7 +368,7 @@ export function register(on: On): void {
       if (a.mode === 'write') await engine.writeFile(a.path, a.content)
       if (a.mode === 'merge-settings') await engine.writeFile(a.path, mergeSettings(existing, a.content))
       dispatch({ type: 'artifact.done', patternId: a.patternId, kind: a.kind, written: true })
-      engine.toast(`Wrote ${a.path}`)
+      engine.toast(say().command.wrote(a.path))
     } catch (err) {
       engine.toast(messageOf(err))
     }
@@ -373,7 +377,7 @@ export function register(on: On): void {
   const tryArtifact = (a: Artifact): void => {
     dispatch({ type: 'standing.add', text: instructionOf(collapseWs(bodyOf(a.content)) || a.title) })
     dispatch({ type: 'artifact.done', patternId: a.patternId, kind: a.kind, written: true })
-    host?.toast(`Trying "${a.title}" for this session`)
+    host?.toast(say().command.trying(a.title))
   }
 
   // The key the pane draws a card's Fix… field under.
@@ -403,7 +407,7 @@ export function register(on: On): void {
       denied = deny
     }
     // The ring stayed put, so the keystrokes are the composer's: the way in is the line the person is owed.
-    engine.toast(`ContextSaver: the composer has your keys — type /saver fix ${seatOf(patternId)} <your note>`)
+    engine.toast(say().command.composerHasKeys(seatOf(patternId)))
     if (isDebug) engine.log(`${PLUGIN_NAME}: the ring never reached ${steerFieldKey(patternId)} — ${denied}`)
   }
 
@@ -474,7 +478,8 @@ export function register(on: On): void {
         overhead: { memory: tokensOf(breakdown?.memoryFiles), mcp: tokensOf(breakdown?.mcpTools), agents: tokensOf(breakdown?.agents) },
       })
       try {
-        await engine.registerCommand(COMMAND)
+        // The name and its subcommands are typed, so they never move; only what `/help` reads does.
+        await engine.registerCommand({ ...COMMAND, description: say().command.description, argumentHint: say().command.argumentHint })
       } catch (err) {
         engine.log(`${PLUGIN_NAME}: /${COMMAND.name} is taken — ${messageOf(err)}`)
       }
@@ -673,7 +678,7 @@ export function register(on: On): void {
       const [sub = ''] = args.split(/\s+/)
       if (sub === '' || sub === 'rules') {
         await togglePane()
-        return { text: state.paneOpen ? 'ContextSaver pane shown' : 'ContextSaver pane hidden' }
+        return { text: state.paneOpen ? say().command.paneShown : say().command.paneHidden }
       }
       if (sub === 'check') return { text: checkNow() }
       if (sub === 'fix') {
@@ -682,16 +687,16 @@ export function register(on: On): void {
         // A leading number is always the card: folding a mistyped one back into the instruction would
         // fix the wrong card with a garbled sentence, and `standing` keeps it for the whole session.
         const n = numberOf(first)
-        if (state.cards.length === 0) return { text: NOTHING_TEXT }
+        if (state.cards.length === 0) return { text: say().command.nothingToDecide }
         if (n !== null && (n < 1 || n > state.cards.length)) return { text: noCardText(n) }
         const text = (n === null ? rest : rest.slice(first.length)).trim()
         // Nothing after the number sends the fix the card already offers; a note sends the note instead.
-        if (text === '') return { text: n === null ? FIX_USAGE : decideByNumber('kill', first) }
+        if (text === '') return { text: n === null ? say().command.fixUsage : decideByNumber('kill', first) }
         const patternId = n === null ? (state.steering ?? state.cards[0]) : state.cards[n - 1]
         const seat = patternId === undefined ? 0 : seatOf(patternId)
-        if (patternId === undefined || seat === 0) return { text: FIX_USAGE }
+        if (patternId === undefined || seat === 0) return { text: say().command.fixUsage }
         steerSubmit(patternId, text)
-        return { text: cardReply(patternId, seat, `fixed with your note: ${text}`) }
+        return { text: cardReply(patternId, seat, say().command.outcomeNoted(text)) }
       }
       if (sub === 'ignore') return { text: decideByNumber('keep', args.slice(sub.length).trim()) }
       if (sub === 'demo' && isDebug) {
@@ -715,14 +720,14 @@ export function register(on: On): void {
           spent: spentOf(usage), error: null, returned: patterns.length, kept: patterns.length, dropped: [], usage,
         })
         await openPane()
-        return { text: 'ContextSaver: demo wasters loaded' }
+        return { text: say().command.demoLoaded }
       }
       if (sub === 'debug') return { text: debugDump(state, armedSpoke) }
       if (sub === 'reset') {
         resetSession()
-        return { text: 'ContextSaver: session state reset' }
+        return { text: say().command.reset }
       }
-      return { text: SAVER_USAGE }
+      return { text: say().command.usage }
     } catch {
       return next(e)
     }
@@ -737,6 +742,18 @@ export function register(on: On): void {
     }
     return result
   })
+
+  // The languages there are, rather than the ones the manifest happened to list when it was written: a
+  // row's options cannot be rewritten here (`ConfigDescribeResult` omits them), but its label and its help
+  // can, so a language added to `LANGUAGES` shows up in the menu's help at once — and the row reads in the
+  // language already chosen, which is the one place a person checks after changing it.
+  on('config.describe', { key: CONFIG_LANG_KEY }, async (_$, e, next) =>
+    next({
+      ...e,
+      label: say().config.languageLabel,
+      description: `${e.description ?? ''} ${say().config.languageAvailable(LANGUAGE_TAGS)}`.trim(),
+    }),
+  )
 
   on('ui.close', { id: PANE_ID }, async ($, e, next) => {
     const result = await next(e)

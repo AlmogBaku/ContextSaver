@@ -7,6 +7,7 @@ import { logoCells } from '../hooks/core/logo'
 import { gauge } from '../hooks/core/text'
 import { sparkline } from '../hooks/core/trend'
 import type { Actions, BandModel, PaneModel, Site, Ui } from '../hooks/core/types'
+import { DEFAULT_LANGUAGE, LANGUAGE_TAGS, setSay } from '../hooks/say'
 import { awaitingPane } from './fixtures/ui/awaiting-pane'
 import { bandChecking } from './fixtures/ui/band-checking'
 import { bandFound } from './fixtures/ui/band-found'
@@ -856,6 +857,60 @@ describe('ui', () => {
     const deep = Pane({ ui, model: manyWasters, site: { bodyColumns: 80, maxRows: 30 }, placement: 'dock', actions })
     const twelfth = nodesOf(deep).find(node => node.type === 'Box' && textOf(node) === '12')
     expect(cellsOf(twelfth), 'a two-digit number is not flush against the dot').toBeGreaterThan('12'.length)
+  })
+
+  test('no row runs past the body in any language the plugin ships', async ($, on) => {
+    const { actions } = recorder()
+    let resolved: Ui | null = null
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) => {
+      resolved = $.ui.resolve(e)
+      const { Box } = resolved
+      return <Box />
+    })
+
+    await $.ui.render(PANE_HOST)
+
+    const ui: Ui | null = resolved
+    if (ui === null) throw new Error('the pane drew no elements')
+    // Every label the cells are reserved against is a word a translation may spend more of — and in a
+    // wide script every character spends two. The reserves are measured rather than counted off the
+    // English labels, and every bundle the plugin ships is held to the same widths here.
+    const models = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, quietPane, millionPane, fillingPane, fullPane, manyWasters]
+    try {
+      for (const tag of LANGUAGE_TAGS) {
+        setSay(tag)
+        for (const model of models) {
+          for (const columns of [40, 56, 60, 70, 80, 100, 120, 160]) {
+            const site = { bodyColumns: columns, maxRows: 30 }
+            const dock = Pane({ ui, model, site, placement: 'dock', actions })
+            const inline = Pane({ ui, model, site, placement: 'inline', actions })
+            expect(cellsOf(dock), `${tag} dock ${columns}`).toBeLessThanOrEqual(columns)
+            expect(cellsOf(inline), `${tag} inline ${columns}`).toBeLessThanOrEqual(columns)
+            expect(overrun(dock), `${tag} dock ${columns} controls`).toEqual([])
+            expect(overrun(inline), `${tag} inline ${columns} controls`).toEqual([])
+            expect(Math.max(0, ...rowEnds(dock, 0)), `${tag} dock rows at ${columns}`).toBeLessThanOrEqual(columns)
+            expect(Math.max(0, ...rowEnds(inline, 0)), `${tag} inline rows at ${columns}`).toBeLessThanOrEqual(columns)
+          }
+        }
+        for (const model of [bandFound, bandSaved, bandChecking, bandWatching]) {
+          for (const columns of [40, 56, 60, 70, 80, 100, 120, 160]) {
+            const band = Band({ ui, model, site: { bodyColumns: columns, maxRows: 8 }, actions })
+            expect(cellsOf(band), `${tag} band ${columns}`).toBeLessThanOrEqual(columns - BAND_RESERVE)
+            expect(overrun(band), `${tag} band ${columns} controls`).toEqual([])
+          }
+        }
+      }
+      setSay('fr')
+      const latin = textOf(Pane({ ui, model: twoWasters, site: WIDE_SITE, placement: 'dock', actions }))
+      expect(latin, 'the verbs are the person’s own words').toContain('Corriger')
+      expect(latin, 'and so is the tag on a card').toContain('exécution')
+      setSay('ja')
+      const wide = textOf(Pane({ ui, model: twoWasters, site: WIDE_SITE, placement: 'dock', actions }))
+      expect(wide, 'a wide script draws its own words too').toContain('修正')
+      expect(wide).not.toContain('Ignore')
+    } finally {
+      setSay(DEFAULT_LANGUAGE)
+    }
   })
 
   test('the inline pane is budgeted against the seat, and a verb is never what gets cut', async ($, on) => {

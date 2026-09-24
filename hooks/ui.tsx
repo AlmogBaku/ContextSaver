@@ -4,7 +4,7 @@
 import type { RenderElement } from 'claude-code'
 
 import { logoCells } from './core/logo'
-import { collapseWs, duration, fit, gauge, kilo, tokensOf } from './core/text'
+import { collapseWs, duration, fit, gauge, kilo, padCells, tokensOf, widthOf } from './core/text'
 import { sparkline } from './core/trend'
 import { NO_CALLS, PANE_INLINE_ROWS, PANE_TITLE } from './core/types'
 import type {
@@ -22,6 +22,7 @@ import type {
   PaneProps,
   Ui,
 } from './core/types'
+import { say } from './say'
 
 // Layout numbers of this drawing only. §9.12 puts constants in types.ts; types.ts is the shared
 // contract and carries no layout cells, so these stay private to the drawing (README "Theme"
@@ -38,7 +39,6 @@ const GLYPH_CELLS = 2         // the waster's '●' and the space after it
 const CALL_GAP = 3            // cells between the columns of an evidence row
 const CALL_MIN_WHAT = 8       // cells the command or path keeps before the cost is dropped whole
 const CALL_SEP = ' · '        // between a cited call's wall time and its size
-const CALL_UNIT = ' ch'       // the unit the widest rung of the cost ladder spells out
 const QUOTE_MAX = 60          // characters of a result quoted under the call that produced it
 const FIX_CELLS = 2           // the fix row's '→' and the space after it
 const FIELD_CELLS = 2         // the Fix… row's '›' and the space after it
@@ -53,9 +53,7 @@ const TREND_GAP = 2           // spaces between the gauge and the trend
 const LOGO_GAP = 3            // cells between the mark and the header's own column
 const LOGO_MIN_CELLS = 40     // header cells below which the mark is dropped whole, like any other segment
 const VERB_GAP = 3
-const RULES_CELLS = 22        // '✎ Write' + '▸ Try' + '– Skip' and the gaps between them
 const RULES_MIN_TITLE = 8     // a rule's title keeps this many cells before its kind label is dropped whole
-const CHECK_CELLS = 11        // '↻ Check now'
 const INFO_CELLS = 1          // 'i'
 const CONTROL_GAP = 2         // cells between a row's text and the Button at its right edge
 const STATUS_GAP = 4          // cells between the pane's name and what the judge has cost beside it
@@ -85,8 +83,6 @@ const GLYPHS = {
   check: '↻', write: '✎', tryOnce: '▸', skip: '–', checking: '◐', watching: '◌', died: '✕',
 } as const
 const DECIDED_GLYPH: Record<Choice, string> = { keep: GLYPHS.ignored, steer: GLYPHS.noted, kill: GLYPHS.fixed }
-// What a decision is called once it is taken: the same three words the verbs, the toasts and the replies use.
-const DECIDED_WORD: Record<Choice, string> = { keep: 'ignored', steer: 'fixed with a note', kill: 'fixed' }
 // The band's mark, one per state: a dead turn, a run in flight, cards waiting, a saving to show off, or a quiet watch.
 const BAND_MARK: Record<BandModel['state'], { text: string; color?: string; isDim?: true }> = {
   died: { text: GLYPHS.died, color: TONES.hot },
@@ -95,77 +91,93 @@ const BAND_MARK: Record<BandModel['state'], { text: string; color?: string; isDi
   saved: { text: GLYPHS.fixed, color: TONES.good },
   watching: { text: GLYPHS.watching, isDim: true },
 }
-const ARTIFACT_LABEL: Record<ArtifactKind, string> = {
-  'claude-md': 'CLAUDE.md',
-  skill: 'skill',
-  'agent-brief': 'agent brief',
-  'settings-allow': 'permission rule',
-}
 const TRYABLE: readonly ArtifactKind[] = ['claude-md', 'skill', 'agent-brief']
 const HITS = /^\d+×$/               // a stats segment that is a hit count, e.g. '3×'
-const TIME_LABEL = 'Time'
-const CONTEXT_LABEL = 'Context'
-const TIME_LEAD = 'in tools'        // '3h 12m in tools', the total before the named sinks
-const CONTEXT_LEAD = 'from tools'   // '410k from tools'
-const SAVED_LABEL = 'Saved '
-const JUDGE_LABEL = 'Judge '
-const TOKENS_UNIT = ' tokens'
 const SEP = ' · '                   // between two figures, or between a figure and the sentence about it
-const NOTHING_YET = 'nothing stands out yet'   // the tail of a budget row before the judge has spoken
-const DECIDED_LABEL = 'Decided'
-const RULES_LABEL = 'Rules for next session'
-const STEER_HINT = 'Enter sends · Fix… again closes · or /saver fix <n> <text>'
-const EMPTY_TEXT = 'Watching quietly. Nothing repeating yet.'
-const AWAITING_TEXT = 'awaiting the first turn'
-const CHECK_LABEL = `${GLYPHS.check} Check now`
-const CHECKING_LABEL = 'Checking…'
-const CHECKING_TEXT = 'checking this session… usually 10–20 s'
-const BAND_CHECKING = 'checking this session…'
-const BAND_WATCHING = 'watching'              // before the first row there is nothing to count
-const BAND_QUIET = 'nothing wasteful yet'
-const BAND_WATCHED = 'calls watched'
-const BAND_RUNNING = 'running'                // a workflow whose stage the journal has not named yet
-const BAND_DIED = 'Last turn ended in '
-const BAND_CONTINUE = 'type anything to continue'
-const DIED_WORD = { error: 'an API error', refusal: 'a refusal' } as const
-const BAND_SAVED = 'saved '
-const BAND_CONTEXT = ' of context'
-const BAND_SESSION = ' this session'
 const BAND_GAP = '  '                         // cells between the mark and the teaser line
 const HOUR_MS = 3_600_000
 const MINUTE_MS = 60_000
-const FULL_PANE_HINT = '/saver for the full pane'
-const VERBS_HINT = '/saver fix|ignore <n>'   // the keyboard route to the verbs, for a pane that lost the keys
-// The keys the pane is worked with, said once in its last row: the person's own chord is what focuses a pane
-// the surface would not hand the keyboard to, and nothing else on screen says so.
-const KEYS_FOCUS = 'ctrl+x tab focuses this pane'
-const KEYS_MOVE = 'Tab moves'
-const KEYS_PRESS = 'Enter presses'
-const KEYS_BACK = 'Esc hands the keys back'
+
+// The 'Check now' button: measured off the words in hand rather than counted once, since a translation is
+// free to spend more cells on them — and the header reserves whichever of its two labels is the wider.
+const checkLabel = (): string => `${GLYPHS.check} ${say().pane.checkNow}`
+const checkCells = (): number => Math.max(widthOf(checkLabel()), widthOf(say().pane.checking))
+
 // The row's phrasings, longest first: the verbs by number are given back first, then the keys the Tab ring
 // makes obvious once the pane holds them. The chord itself is the one clause a narrow pane keeps.
-const KEYS_LINES: readonly (readonly string[])[] = [
-  [KEYS_FOCUS, KEYS_MOVE, KEYS_PRESS, KEYS_BACK],
-  [KEYS_FOCUS, KEYS_MOVE, KEYS_BACK],
-  [KEYS_FOCUS, KEYS_BACK],
-  [KEYS_FOCUS],
-]
+const keysLines = (): readonly (readonly string[])[] => {
+  const { keysFocus, keysMove, keysPress, keysBack } = say().pane
+  return [
+    [keysFocus, keysMove, keysPress, keysBack],
+    [keysFocus, keysMove, keysBack],
+    [keysFocus, keysBack],
+    [keysFocus],
+  ]
+}
 
 // The cells one card's cited calls are laid out against: three columns, the cost's own rung of the ladder.
 type CallColumns = { turn: number; what: number; alias: number; time: number; unit: boolean; cost: boolean }
 
+// One row of controls as it is drawn: the label on each, and the gap between them.
+type Controls = { labels: readonly string[]; gap: number }
+
+/** The cells a row of controls draws: its labels and the gaps between them. */
+const controlCells = (row: Controls): number =>
+  row.labels.reduce((n, label) => n + widthOf(label), 0) + row.gap * Math.max(0, row.labels.length - 1)
+
+/**
+ * A row of controls in the cells it has: the glyphs are given back first, then the gaps between them.
+ *
+ * The word on a control is the one thing never cut — it is what the person presses, and a verb they have
+ * to guess at is a verb they do not press. A translation is free to spend more cells on one than English
+ * does, so the row is measured rather than counted once against the words this file happened to be
+ * written with.
+ */
+const controlsFitting = (words: readonly string[], glyphs: readonly string[], gap: number, cells: number): Controls => {
+  const marked = words.map((word, at) => `${glyphs[at] ?? ''} ${word}`)
+  const bare = { labels: words, gap: 1 }
+  const ladder: Controls[] = [{ labels: marked, gap }, { labels: marked, gap: 1 }, { labels: words, gap }, bare]
+  return ladder.find(row => controlCells(row) <= cells) ?? bare
+}
+
 // One run of the band's teaser: the words and the tone they carry. A segment with neither is plain text.
 type BandSegment = { text: string; color?: string; isDim?: true }
 
-/** Wraps text into at most `rows` lines of `cells` characters, the last cut with '…'. */
+/**
+ * Breaks a word wider than its row into pieces that fit.
+ *
+ * Chinese and Japanese are written without spaces, so a whole sentence reaches the wrap as one word: cut
+ * here it wraps where those scripts wrap, at a character, instead of arriving as one truncated line. Each
+ * full piece then overflows the line it is offered and takes one of its own, so no space is inserted
+ * inside a sentence that never had one.
+ */
+const pieces = (word: string, width: number): string[] => {
+  const out: string[] = []
+  let piece = ''
+  let used = 0
+  for (const ch of word) {
+    const cells = widthOf(ch)
+    if (used + cells > width) {
+      out.push(piece)
+      piece = ''
+      used = 0
+    }
+    piece += ch
+    used += cells
+  }
+  return piece === '' ? out : [...out, piece]
+}
+
+/** Wraps text into at most `rows` lines of `cells` display cells, the last cut with '…'. */
 const linesOf = (text: string, cells: number, rows: number): string[] => {
   const width = Math.max(8, cells)
   const lines = collapseWs(text)
     .split(' ')
+    .flatMap(word => (widthOf(word) <= width ? [word] : pieces(word, width)))
     .reduce<string[]>((acc, word) => {
       const last = acc[acc.length - 1] ?? ''
       const joined = last === '' ? word : `${last} ${word}`
-      return joined.length <= width ? [...acc.slice(0, -1), joined] : [...acc, word]
+      return widthOf(joined) <= width ? [...acc.slice(0, -1), joined] : [...acc, word]
     }, [''])
   // Every line is cut to the width, not only the last: a word longer than the row would otherwise
   // reach past whatever frames it, and a card's border is what it pokes through.
@@ -262,14 +274,14 @@ const gaugeRow = (ui: Ui, header: Header, percent: number, cells: number): Rende
  */
 const contextText = (header: Header, room: number): string => {
   const percent = header.percent === null ? null : `${Math.round(header.percent)}%`
-  const used = percent === null ? null : `${percent} of context`
+  const used = percent === null ? null : say().pane.contextUsed(percent)
   const tokens = header.tokensToCompaction === null || header.tokensToCompaction <= 0
     ? null
     : kilo(header.tokensToCompaction)
-  const near = tokens === null ? null : `${tokens} tokens to compaction`
-  const nearer = tokens === null ? null : `${tokens} to compaction`
+  const near = tokens === null ? null : say().pane.toCompaction(tokens)
+  const nearer = tokens === null ? null : say().pane.toCompactionShort(tokens)
   const turns = near !== null && header.turnsToCompaction !== null && header.turnsToCompaction > 0
-    ? `about ${header.turnsToCompaction} turn${header.turnsToCompaction === 1 ? '' : 's'}`
+    ? say().pane.turnsLeft(header.turnsToCompaction)
     : null
   const ladder = [
     joined([used, near, turns]),
@@ -279,32 +291,33 @@ const contextText = (header: Header, room: number): string => {
     joined([used]),
     joined([percent]),
   ]
-  return ladder.find(text => text.length <= room) ?? ''
+  return ladder.find(text => widthOf(text) <= room) ?? ''
 }
 
 /** What the judge has cost, for the end of the name row: the runs, and the tokens while they fit. */
 const judgeText = (header: Header, room: number): string => {
-  const runs = `${header.judgeRuns} run${header.judgeRuns === 1 ? '' : 's'}`
+  const label = say().pane.judge
+  const runs = say().pane.judgeRuns(header.judgeRuns)
   const spent = header.judgeTokens > 0 ? kilo(header.judgeTokens) : null
   // A judge that has not run yet is not a figure: 'Check now' already says the run is there to be had.
   const ladder = header.judgeRuns === 0
     ? []
     : [
-      `${JUDGE_LABEL}${joined([runs, spent === null ? null : `${spent}${TOKENS_UNIT}`])}`,
-      `${JUDGE_LABEL}${joined([runs, spent])}`,
-      `${JUDGE_LABEL}${runs}`,
+      `${label}${joined([runs, spent === null ? null : say().pane.judgeTokens(spent)])}`,
+      `${label}${joined([runs, spent])}`,
+      `${label}${runs}`,
     ]
-  return ladder.find(text => text.length <= room) ?? ''
+  return ladder.find(text => widthOf(text) <= room) ?? ''
 }
 
 /** What the saved row draws: what the session got back, and that a run is in flight. */
 const savedTexts = (header: Header, room: number): { saved: string; tail: string } => {
   const pct = header.savedPct > 0 ? `~${header.savedPct}%` : null
   const ms = header.savedMs > 0 ? duration(header.savedMs) : null
-  const tail = header.judgeRunning ? CHECKING_TEXT : ''
+  const tail = header.judgeRunning ? say().pane.checkingLong : ''
   const cells = (row: { saved: string; tail: string }): number =>
-    (row.saved === '' ? 0 : SAVED_LABEL.length + row.saved.length)
-    + (row.tail === '' ? 0 : (row.saved === '' ? 0 : SEP.length) + row.tail.length)
+    (row.saved === '' ? 0 : widthOf(say().pane.saved) + widthOf(row.saved))
+    + (row.tail === '' ? 0 : (row.saved === '' ? 0 : SEP.length) + widthOf(row.tail))
   const ladder = [
     { saved: joined([pct, ms]), tail },
     { saved: joined([pct, ms]), tail: '' },
@@ -318,17 +331,18 @@ const savedTexts = (header: Header, room: number): { saved: string; tail: string
 const checkButton = (ui: Ui, header: Header, actions: Actions): RenderElement => {
   const { Button } = ui
   return header.judgeRunning
-    ? <Button key="check" plain dimColor onPress={() => undefined}>{CHECKING_LABEL}</Button>
-    : <Button key="check" plain onPress={() => actions.check()}>{CHECK_LABEL}</Button>
+    ? <Button key="check" plain dimColor onPress={() => undefined}>{say().pane.checking}</Button>
+    : <Button key="check" plain onPress={() => actions.check()}>{checkLabel()}</Button>
 }
 
 /** The header's first row: the product's name, what the judge has cost, and its button at the right edge. */
 const nameRow = (ui: Ui, header: Header, actions: Actions, cells: number): RenderElement => {
   const { Box, Text } = ui
   // The surface already draws the pane's own title, so a row too tight for both keeps the button.
-  const name = cells >= PANE_TITLE.length + CHECK_CELLS + CONTROL_GAP ? PANE_TITLE : ''
-  const judge = name === '' ? '' : judgeText(header, cells - name.length - STATUS_GAP - CHECK_CELLS - CONTROL_GAP)
-  const lead = name.length + (judge === '' ? 0 : STATUS_GAP + judge.length)
+  const check = checkCells()
+  const name = cells >= PANE_TITLE.length + check + CONTROL_GAP ? PANE_TITLE : ''
+  const judge = name === '' ? '' : judgeText(header, cells - name.length - STATUS_GAP - check - CONTROL_GAP)
+  const lead = name.length + (judge === '' ? 0 : STATUS_GAP + widthOf(judge))
   return (
     <Box flexDirection="row" width={cells} justifyContent="space-between">
       {name === ''
@@ -355,12 +369,12 @@ const savedRows = (ui: Ui, header: Header, cells: number, isCompact: boolean): R
   const { saved, tail } = savedTexts(header, cells)
   return [
     <Text wrap="truncate-end">
-      {saved === '' ? null : <Text dimColor>{SAVED_LABEL}</Text>}
+      {saved === '' ? null : <Text dimColor>{say().pane.saved}</Text>}
       {saved === '' ? null : <Text color={TONES.good}>{saved}</Text>}
       {tail === '' ? null : <Text dimColor>{`${saved === '' ? '' : SEP}${tail}`}</Text>}
     </Text>,
     ...(header.judgeRunning && tail === '' && !isCompact
-      ? [<Text dimColor wrap="truncate-end">{fit(CHECKING_TEXT, cells)}</Text>]
+      ? [<Text dimColor wrap="truncate-end">{fit(say().pane.checkingLong, cells)}</Text>]
       : []),
   ]
 }
@@ -373,7 +387,7 @@ const sinkRow = (ui: Ui, label: string, total: string, sentence: string, cells: 
   const { Text } = ui
   const value = gutterValue(cells)
   const figure = fit(total, value)
-  const room = value - figure.length - SEP.length
+  const room = value - widthOf(figure) - SEP.length
   // A sentence left a handful of cells says nothing, so it is dropped whole rather than cut to nothing.
   const tail = room >= HINT_MIN ? `${SEP}${fit(collapseWs(sentence), room)}` : ''
   return gutterRow(ui, label, (
@@ -400,8 +414,8 @@ const headerSection = (
   const budgets = isCompact
     ? []
     : [
-      ...(header.time === null ? [] : [{ label: TIME_LABEL, figure: `${span(header.time.total)} ${TIME_LEAD}`, sentence: header.judgeTime }]),
-      ...(header.context === null ? [] : [{ label: CONTEXT_LABEL, figure: `${kilo(header.context.total)} ${CONTEXT_LEAD}`, sentence: header.judgeContext }]),
+      ...(header.time === null ? [] : [{ label: say().pane.time, figure: `${span(header.time.total)} ${say().pane.timeLead}`, sentence: header.judgeTime }]),
+      ...(header.context === null ? [] : [{ label: say().pane.context, figure: `${kilo(header.context.total)} ${say().pane.contextLead}`, sentence: header.judgeContext }]),
     ]
   // Indented to the cards' content column, so the labels and the card titles start at one x.
   return (
@@ -411,27 +425,27 @@ const headerSection = (
         <Box flexDirection="column" width={room}>
           {nameRow(ui, header, actions, room)}
           {header.percent === null
-            ? <Text dimColor wrap="truncate-end">{fit(AWAITING_TEXT, room)}</Text>
+            ? <Text dimColor wrap="truncate-end">{fit(say().pane.awaiting, room)}</Text>
             : <Text wrap="truncate-end">{context}</Text>}
           {header.percent === null ? null : gaugeRow(ui, header, header.percent, room)}
           {savedRows(ui, header, room, isCompact)}
         </Box>
       </Box>
       {budgets.length === 0 ? null : blank(ui)}
-      {budgets.map(budget => sinkRow(ui, budget.label, budget.figure, budget.sentence ?? NOTHING_YET, cells))}
+      {budgets.map(budget => sinkRow(ui, budget.label, budget.figure, budget.sentence ?? say().pane.nothingYet, cells))}
       {blank(ui)}
     </Box>
   )
 }
 
 /** The category tag a title row wears, dropped whole once the card is narrower than TAG_MIN_CELLS. */
-const tagOf = (card: Card, cells: number): string => (cells < TAG_MIN_CELLS ? '' : card.category)
+const tagOf = (card: Card, cells: number): string => (cells < TAG_MIN_CELLS ? '' : say().categories[card.category])
 
 /** The cells a title row keeps once its tag, the 'i' Button and the gaps around them are reserved. */
 const titleValue = (cells: number, tag: string): number =>
   Math.max(
     NUMBER_CELLS + GLYPH_CELLS + TITLE_MIN,
-    cells - INFO_CELLS - CONTROL_GAP - (tag === '' ? 0 : tag.length + CONTROL_GAP),
+    cells - INFO_CELLS - CONTROL_GAP - (tag === '' ? 0 : widthOf(tag) + CONTROL_GAP),
   )
 
 /** A waster's title row: its number, the accent dot, the behaviour in bold, then its tag and 'i'. */
@@ -452,28 +466,31 @@ const titleRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderEl
           ))}
         </Box>
       </Box>
-      {tag === '' ? null : <Box width={tag.length}><Text dimColor wrap="truncate-end">{tag}</Text></Box>}
-      <Button key={`card:${card.patternId}:info`} plain dimColor onPress={() => actions.info(card.patternId)}>i</Button>
+      {tag === '' ? null : <Box width={widthOf(tag)}><Text dimColor wrap="truncate-end">{tag}</Text></Box>}
+      <Button key={`card:${card.patternId}:info`} plain dimColor onPress={() => actions.info(card.patternId)}>{say().pane.info}</Button>
     </Box>
   )
 }
 
-/** The action row: Fix, Fix… and Ignore, three cells apart, each behind its own glyph. */
-const verbsRow = (ui: Ui, card: Card, actions: Actions): RenderElement => {
+/** The action row: Fix, Fix… and Ignore, three cells apart, each behind its own glyph while the row holds them. */
+const verbsRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderElement => {
   const { Box, Button } = ui
   const id = card.patternId
+  const { fix, fixNote, ignore } = say().pane
+  const row = controlsFitting([fix, fixNote, ignore], [GLYPHS.fixed, GLYPHS.noted, GLYPHS.ignored], VERB_GAP, cells)
+  const [kill = fix, steer = fixNote, keep = ignore] = row.labels
   // The labels are the person's words; the keys stay the decisions' own, so a press is still a kill or a keep.
   return (
-    <Box flexDirection="row" gap={VERB_GAP}>
-      <Button key={`card:${id}:kill`} plain onPress={() => actions.kill(id)}>{`${GLYPHS.fixed} Fix`}</Button>
-      <Button key={`card:${id}:steer`} plain onPress={() => actions.steer(id)}>{`${GLYPHS.noted} Fix…`}</Button>
-      <Button key={`card:${id}:keep`} plain onPress={() => actions.keep(id)}>{`${GLYPHS.ignored} Ignore`}</Button>
+    <Box flexDirection="row" gap={row.gap}>
+      <Button key={`card:${id}:kill`} plain onPress={() => actions.kill(id)}>{kill}</Button>
+      <Button key={`card:${id}:steer`} plain onPress={() => actions.steer(id)}>{steer}</Button>
+      <Button key={`card:${id}:keep`} plain onPress={() => actions.keep(id)}>{keep}</Button>
     </Box>
   )
 }
 
 /** The widest of the texts, in cells. */
-const widest = (texts: readonly string[]): number => texts.reduce((n, text) => Math.max(n, text.length), 0)
+const widest = (texts: readonly string[]): number => texts.reduce((n, text) => Math.max(n, widthOf(text)), 0)
 
 /** The wall time of a cited call as its row draws it; '' when nothing measured it (a turn, a rebuilt row). */
 const callTime = (e: Evidence): string => (e.what === NO_CALLS || e.ms <= 0 ? '' : duration(e.ms))
@@ -483,10 +500,12 @@ const callTime = (e: Evidence): string => (e.what === NO_CALLS || e.ms <= 0 ? ''
  * the unit spelled out while the row holds it. A row nothing timed keeps the column, so the sizes read as one.
  */
 const callMeta = (e: Evidence, time: number, hasUnit: boolean): string => {
-  const size = e.what === NO_CALLS ? `${kilo(e.chars)} answer` : `${kilo(e.chars)}${hasUnit ? CALL_UNIT : ''}`
+  const size = e.what === NO_CALLS
+    ? say().pane.answerSize(kilo(e.chars))
+    : `${kilo(e.chars)}${hasUnit ? say().pane.charsUnit : ''}`
   if (time === 0) return size
   const spent = callTime(e)
-  return spent === '' ? `${' '.repeat(time + CALL_SEP.length)}${size}` : `${spent.padStart(time)}${CALL_SEP}${size}`
+  return spent === '' ? `${' '.repeat(time + CALL_SEP.length)}${size}` : `${padCells(spent, time, true)}${CALL_SEP}${size}`
 }
 
 /**
@@ -494,7 +513,7 @@ const callMeta = (e: Evidence, time: number, hasUnit: boolean): string => {
  * then the alias, then the cost dropped whole while the widest row cannot hold them.
  */
 const callColumns = (evidence: readonly Evidence[], cells: number): CallColumns => {
-  const turn = widest(evidence.map(e => `turn ${e.turn}`))
+  const turn = widest(evidence.map(e => say().pane.turnCell(e.turn)))
   const alias = widest(evidence.map(e => e.agent ?? ''))
   const time = widest(evidence.map(callTime))
   const bare = { turn, alias: 0, time: 0, unit: false, cost: false }
@@ -514,9 +533,9 @@ const callColumns = (evidence: readonly Evidence[], cells: number): CallColumns 
 
 /** The cells one evidence row draws, laid out against the card's shared columns. */
 const callCells = (e: Evidence, cols: CallColumns): { turn: string; what: string; alias: string; meta: string } => ({
-  turn: `turn ${e.turn}`.padEnd(cols.turn),
-  what: fit(e.what, cols.what).padEnd(cols.what),
-  alias: cols.alias === 0 ? '' : (e.agent ?? '').padEnd(cols.alias),
+  turn: padCells(say().pane.turnCell(e.turn), cols.turn),
+  what: padCells(fit(e.what, cols.what), cols.what),
+  alias: cols.alias === 0 ? '' : padCells(e.agent ?? '', cols.alias),
   meta: cols.cost ? callMeta(e, cols.time, cols.unit) : '',
 })
 
@@ -542,14 +561,13 @@ const callBlock = (ui: Ui, e: Evidence, cols: CallColumns, cells: number, isComp
 /** The one dim summary row of the details: what the cited evidence adds up to, in the unit the model counted. */
 const totalText = (card: Card): string => {
   const { unit, calls, ms, chars } = card.total
-  const plural = calls === 1 ? '' : 's'
   // A behavioural card counts turns and states what the judge estimates each one costs; the unit is
   // the model's to say, never inferred from the evidence the details happened to keep. A card that
   // cites loops counts agents: their wall time is measured, and the estimate is what each turn of theirs cost.
-  const estimate = chars > 0 ? `~${kilo(tokensOf(chars))} tokens per turn` : null
-  if (unit === 'turns') return joined([`${calls} turn${plural}`, estimate])
-  if (unit === 'agents') return joined([`${calls} agent${plural}`, ms > 0 ? duration(ms) : null, estimate])
-  return joined([`${calls} call${plural}`, ms > 0 ? duration(ms) : null, `${kilo(chars)} chars of context`])
+  const estimate = chars > 0 ? say().pane.perTurn(kilo(tokensOf(chars))) : null
+  if (unit === 'turns') return joined([say().pane.turnCount(calls), estimate])
+  if (unit === 'agents') return joined([say().pane.agentCount(calls), ms > 0 ? duration(ms) : null, estimate])
+  return joined([say().pane.callCount(calls), ms > 0 ? duration(ms) : null, say().pane.charsOfContext(kilo(chars))])
 }
 
 /** The details behind 'i': why, the fix, the summary, and the calls behind the claim. */
@@ -563,8 +581,8 @@ const detailRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): Rend
   const shown = card.evidence.slice(0, calls)
   const cols = callColumns(shown, cells)
   return [
-    gutterRow(ui, 'why', textBlock(ui, card.why, value, rows), cells),
-    gutterRow(ui, 'fix', textBlock(ui, card.fix, value, rows), cells),
+    gutterRow(ui, say().pane.why, textBlock(ui, card.why, value, rows), cells),
+    gutterRow(ui, say().pane.fixLabel, textBlock(ui, card.fix, value, rows), cells),
     ...(card.total.calls === 0 ? [] : [<Text dimColor wrap="truncate-end">{fit(totalText(card), cells)}</Text>]),
     ...shown.flatMap(e => callBlock(ui, e, cols, cells, isCompact)),
   ]
@@ -590,14 +608,14 @@ const steerRows = (ui: Ui, card: Card, draft: string | null, actions: Actions, c
           key={`card:${id}:text`}
           value={draft ?? ''}
           placeholder={card.fix}
-          submitLabel="send"
+          submitLabel={say().pane.send}
           autoFocus
           onInput={(text: string) => actions.steerDraft(text)}
           onSubmit={(text: string) => actions.steerSubmit(id, text)}
         />
       </Box>
     )),
-    glyphRow(ui, '', <Text dimColor wrap="truncate-end">{fit(STEER_HINT, value)}</Text>),
+    glyphRow(ui, '', <Text dimColor wrap="truncate-end">{fit(say().pane.steerHint, value)}</Text>),
   ]
 }
 
@@ -642,7 +660,7 @@ const cardRows = (
       glyphRow(ui, GLYPHS.fix, textBlock(ui, card.fix, cells - FIX_CELLS, isCompact ? COMPACT_ROWS : VALUE_ROWS, true)),
     ]
   const verbs = [
-    verbsRow(ui, card, actions),
+    verbsRow(ui, card, actions, cells),
     ...(isSteering ? steerRows(ui, card, model.steerDraft, actions, cells) : []),
   ]
   // Inline the verbs and the field come first, so what the seat cannot hold is detail rather than a verb.
@@ -676,7 +694,7 @@ const compactRow = (ui: Ui, card: Card, cells: number): RenderElement => {
   const { Text } = ui
   const first = card.stats.split(' · ')[0] ?? ''
   const hits = HITS.test(first) ? first : null   // only a hit count; another stats order degrades to nothing
-  const room = hits === null ? cells : Math.max(8, cells - hits.length - 3)
+  const room = hits === null ? cells : Math.max(8, cells - widthOf(hits) - 3)
   return (
     <Text dimColor wrap="truncate-end">{joined([fit(`${card.n} ${GLYPHS.live} ${card.kind}`, room), hits])}</Text>
   )
@@ -688,7 +706,7 @@ const emptySection = (ui: Ui, cells: number): RenderElement => {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box borderStyle="round" borderDimColor paddingX={CARD_PAD}>
-        <Text dimColor wrap="truncate-end">{fit(EMPTY_TEXT, cells - CARD_CHROME)}</Text>
+        <Text dimColor wrap="truncate-end">{fit(say().pane.empty, cells - CARD_CHROME)}</Text>
       </Box>
     </Box>
   )
@@ -726,29 +744,29 @@ const wastersSection = (
 /** What a decision is worth: a rate while it is only projected, a credit once the saving settled (D4). */
 const creditText = (row: DecidedRow): string => {
   if (row.savedPct === null || row.savedPct <= 0) return ''
-  return row.settled ? `saved ~${row.savedPct}%` : `~${row.savedPct}% per repeat`
+  return row.settled ? say().pane.savedCredit(row.savedPct) : say().pane.perRepeat(row.savedPct)
 }
 
 /** One decided pattern: what was done about it, the behaviour, what it is worth, and the sentence the user sent. */
 const decidedRow = (ui: Ui, row: DecidedRow, cells: number): RenderElement => {
   const { Box, Text } = ui
-  const right = row.ignored > 0 ? `ignored ${row.ignored}×` : creditText(row)
-  const value = Math.max(8, cells - right.length - CONTROL_GAP)
+  const right = row.ignored > 0 ? say().pane.ignoredTimes(row.ignored) : creditText(row)
+  const value = Math.max(8, cells - widthOf(right) - CONTROL_GAP)
   // The glyph alone left the reader to remember what it meant, so the row says the word too.
-  const lead = `${DECIDED_GLYPH[row.choice]} ${DECIDED_WORD[row.choice]}`
+  const lead = `${DECIDED_GLYPH[row.choice]} ${say().pane.decidedWord[row.choice]}`
   return (
     <Box flexDirection="column">
       <Box flexDirection="row" width={cells} justifyContent="space-between">
         <Box width={value}>
           <Text wrap="truncate-end">
             <Text color={row.choice === 'kill' ? TONES.good : undefined}>{lead}</Text>
-            {fit(` · ${row.kind}`, Math.max(1, value - lead.length))}
+            {fit(` · ${row.kind}`, Math.max(1, value - widthOf(lead)))}
           </Text>
         </Box>
         {right === ''
           ? null
           : (
-            <Box width={right.length}>
+            <Box width={widthOf(right)}>
               {/* A credit that landed is the one figure in the footer worth a tone; a rate stays dim. */}
               <Text dimColor={!row.settled || row.ignored > 0} color={row.settled && row.ignored === 0 ? TONES.good : undefined}>{right}</Text>
             </Box>
@@ -767,27 +785,44 @@ const decidedRow = (ui: Ui, row: DecidedRow, cells: number): RenderElement => {
 const artifactRow = (ui: Ui, artifact: Artifact, actions: Actions, cells: number): RenderElement => {
   const { Box, Text, Button } = ui
   const id = artifact.patternId
-  const kind = ` · ${ARTIFACT_LABEL[artifact.kind]}`
-  const value = Math.max(8, cells - RULES_CELLS - CONTROL_GAP)
+  const kind = ` · ${say().pane.artifact[artifact.kind]}`
+  const isTryable = TRYABLE.includes(artifact.kind)
+  const { write, tryOnce, skip } = say().pane
+  // Measured against the cells left once the title has kept its floor, so a long word gives back a glyph
+  // rather than pushing the controls past the row's right edge.
+  const row = isTryable
+    ? controlsFitting([write, tryOnce, skip], [GLYPHS.write, GLYPHS.tryOnce, GLYPHS.skip], CONTROL_GAP, cells - RULES_MIN_TITLE - CONTROL_GAP)
+    : controlsFitting([write, skip], [GLYPHS.write, GLYPHS.skip], CONTROL_GAP, cells - RULES_MIN_TITLE - CONTROL_GAP)
+  const [first = write, second = skip, third = skip] = row.labels
+  // Where three controls in their shortest form still leave the title nothing, they take a row of their
+  // own. Nothing is dropped and nothing is squeezed to an unreadable stub: the rules sit in the footer of
+  // the docked pane, which scrolls, so the row this spends is a row that was free. The inline pane never
+  // draws them — it draws one count line — so its seat is untouched.
+  const controls = controlCells(row)
+  const isStacked = controls + CONTROL_GAP + RULES_MIN_TITLE > cells
+  const value = isStacked ? cells : Math.max(RULES_MIN_TITLE, cells - controls - CONTROL_GAP)
   // A cut filename is a wrong filename: the kind label goes whole, and only the title is truncated.
-  const label = value < kind.length + RULES_MIN_TITLE ? '' : kind
-  return (
-    <Box flexDirection="row" width={cells} justifyContent="space-between">
-      <Box width={value}>
-        <Text wrap="truncate-end">
-          {fit(artifact.title, Math.max(1, value - label.length))}
-          <Text dimColor>{label}</Text>
-        </Text>
-      </Box>
-      <Box flexDirection="row" gap={CONTROL_GAP}>
-        <Button key={`write:${id}`} plain onPress={() => actions.write(artifact)}>{`${GLYPHS.write} Write`}</Button>
-        {TRYABLE.includes(artifact.kind)
-          ? <Button key={`try:${id}`} plain onPress={() => actions.tryOnce(artifact)}>{`${GLYPHS.tryOnce} Try`}</Button>
-          : null}
-        <Button key={`skip:${id}`} plain dimColor onPress={() => actions.skip(artifact)}>{`${GLYPHS.skip} Skip`}</Button>
-      </Box>
+  const label = value < widthOf(kind) + RULES_MIN_TITLE ? '' : kind
+  const title = (
+    <Box width={value}>
+      <Text wrap="truncate-end">
+        {fit(artifact.title, Math.max(1, value - widthOf(label)))}
+        <Text dimColor>{label}</Text>
+      </Text>
     </Box>
   )
+  const verbs = (
+    <Box flexDirection="row" gap={row.gap}>
+      <Button key={`write:${id}`} plain onPress={() => actions.write(artifact)}>{first}</Button>
+      {isTryable
+        ? <Button key={`try:${id}`} plain onPress={() => actions.tryOnce(artifact)}>{second}</Button>
+        : null}
+      <Button key={`skip:${id}`} plain dimColor onPress={() => actions.skip(artifact)}>{isTryable ? third : second}</Button>
+    </Box>
+  )
+  return isStacked
+    ? <Box flexDirection="column">{title}{verbs}</Box>
+    : <Box flexDirection="row" width={cells} justifyContent="space-between">{title}{verbs}</Box>
 }
 
 /** The footer: the decisions and the proposed rules, one row each; one count line when compact. */
@@ -806,7 +841,7 @@ const footerSection = (
         ? [
           blank(ui),
           <Text dimColor wrap="truncate-end">
-            {fit(joined([`${DECIDED_LABEL} ${model.decided.length}`, `Rules ${model.artifacts.length}`, FULL_PANE_HINT]), cells)}
+            {fit(joined([say().pane.decidedCount(model.decided.length), say().pane.rulesCount(model.artifacts.length), say().pane.fullPane]), cells)}
           </Text>,
         ]
         : [
@@ -814,14 +849,14 @@ const footerSection = (
             ? []
             : [
               blank(ui),
-              <Text dimColor wrap="truncate-end">{DECIDED_LABEL}</Text>,
+              <Text dimColor wrap="truncate-end">{say().pane.decided}</Text>,
               ...model.decided.map(row => decidedRow(ui, row, cells)),
             ]),
           ...(model.artifacts.length === 0
             ? []
             : [
               blank(ui),
-              <Text dimColor wrap="truncate-end">{fit(RULES_LABEL, cells)}</Text>,
+              <Text dimColor wrap="truncate-end">{fit(say().pane.rules, cells)}</Text>,
               ...model.artifacts.map(artifact => artifactRow(ui, artifact, actions, cells)),
             ]),
         ]}
@@ -831,11 +866,11 @@ const footerSection = (
 
 /** The keys the pane takes, and the verbs by number while a card wears one: the longest phrasing that fits. */
 const keysLine = (cells: number, hasCards: boolean): string => {
-  const lines = KEYS_LINES.map(parts => joined([...parts]))
+  const lines = keysLines().map(parts => joined([...parts]))
   const shortest = lines[lines.length - 1] ?? ''
   // The verbs by number are given back first, then one clause at a time; the chord itself is never dropped.
-  const wanted = [...(hasCards ? [joined([lines[0] ?? '', VERBS_HINT])] : []), ...lines]
-  return wanted.find(line => line.length <= cells) ?? fit(shortest, cells)
+  const wanted = [...(hasCards ? [joined([lines[0] ?? '', say().pane.verbsHint])] : []), ...lines]
+  return wanted.find(line => widthOf(line) <= cells) ?? fit(shortest, cells)
 }
 
 /** The pane's last row: how it is worked from the keyboard, since nothing else on screen says. */
@@ -850,54 +885,49 @@ const hintSection = (ui: Ui, cells: number, hasCards: boolean, isCompact: boolea
   )
 }
 
-/** '2 ways', '1 waster': the count and the word it takes. */
-const counted = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
-
 /**
  * What the waiting cards are worth, longest phrasing first: the row takes the first that fits, so a narrow
  * band gives back the time, then the sentence itself, and never a cut figure.
  */
 const foundLines = (model: BandModel): string[] => {
-  const whole = Math.round(model.costPct)   // a teaser needs no decimal
-  const pct = model.costPct > 0 ? `${whole >= 1 ? `~${whole}%` : 'under 1%'} of your context` : null
+  const pct = model.costPct > 0 ? say().band.costShare(model.costPct) : null
   // Seconds are no promise worth making, and a behavioural card carries no wall time at all.
   const time = model.costMs >= MINUTE_MS ? duration(model.costMs) : null
-  if (pct === null && time === null) return [`Found ${counted(model.fresh, 'thing')} worth a look`]
-  const save = `Found ${counted(model.fresh, 'way')} to save`
+  if (pct === null && time === null) return [say().band.foundWorthLook(model.fresh)]
   return [
-    ...(pct !== null && time !== null ? [`${save} ${pct} and ${time}`] : []),
-    `${save} ${pct ?? time}`,
-    `Found ${counted(model.fresh, 'waster')}`,
+    ...(pct !== null && time !== null ? [say().band.foundSavingBoth(model.fresh, pct, time)] : []),
+    say().band.foundSaving(model.fresh, pct ?? time ?? ''),
+    say().band.foundShort(model.fresh),
   ]
 }
 
 /** What the session got back: the figures in the good tone, the words around them dim. */
 const savedLine = (model: BandModel): BandSegment[] => [
-  { text: BAND_SAVED, isDim: true },
+  { text: say().band.saved, isDim: true },
   ...(model.savedPct > 0
-    ? [{ text: `${model.savedPct}%`, color: TONES.good }, { text: BAND_CONTEXT, isDim: true as const }]
+    ? [{ text: `${model.savedPct}%`, color: TONES.good }, { text: say().band.ofContext, isDim: true as const }]
     : []),
   ...(model.savedMs > 0
     ? [
       ...(model.savedPct > 0 ? [{ text: ' · ', isDim: true as const }] : []),
       { text: duration(model.savedMs), color: TONES.good },
-      { text: BAND_SESSION, isDim: true as const },
+      { text: say().band.thisSession, isDim: true as const },
     ]
     : []),
 ]
 
 /** How the last turn died and what to do about it; the fact alone where the advice does not fit. */
 const diedLines = (died: BandModel['died']): string[] => {
-  const fact = `${BAND_DIED}${died === 'refusal' ? DIED_WORD.refusal : DIED_WORD.error}`
-  return [joined([fact, BAND_CONTINUE]), fact]
+  const fact = say().band.died(died === 'refusal' ? say().band.diedRefusal : say().band.diedError)
+  return [joined([fact, say().band.diedContinue]), fact]
 }
 
 /** The workflow still going, longest phrasing first: the calls are given back first, then the stage, never the name. */
 const runningLines = (run: NonNullable<BandModel['running']>): string[] => {
-  const agents = counted(run.loops, 'agent')
+  const agents = say().band.agentCount(run.loops)
   return [
-    joined([run.name, run.label ?? BAND_RUNNING, agents, counted(run.calls, 'call')]),
-    joined([run.name, run.label ?? BAND_RUNNING, agents]),
+    joined([run.name, run.label ?? say().band.running, agents, say().band.callCount(run.calls)]),
+    joined([run.name, run.label ?? say().band.running, agents]),
     joined([run.name, agents]),
   ]
 }
@@ -905,23 +935,25 @@ const runningLines = (run: NonNullable<BandModel['running']>): string[] => {
 /** The teaser for the state the session is in, longest phrasing first. */
 const bandLines = (model: BandModel): BandSegment[][] => {
   if (model.state === 'died') return diedLines(model.died).map(text => [{ text }])
-  if (model.state === 'checking') return [[{ text: BAND_CHECKING, isDim: true }]]
+  if (model.state === 'checking') return [[{ text: say().band.checking, isDim: true }]]
   if (model.state === 'found') return foundLines(model).map(text => [{ text, color: TONES.accent }])
   if (model.state === 'saved') return [savedLine(model)]
   if (model.running !== null) return runningLines(model.running).map(text => [{ text, isDim: true }])
-  return [[{ text: model.calls === 0 ? BAND_WATCHING : joined([`${model.calls} ${BAND_WATCHED}`, BAND_QUIET]), isDim: true }]]
+  // Before the first row there is nothing to count.
+  const quiet = model.calls === 0 ? say().band.watching : joined([say().band.watched(model.calls), say().band.quiet])
+  return [[{ text: quiet, isDim: true }]]
 }
 
 /** The cells a teaser draws. */
-const lineCells = (line: readonly BandSegment[]): number => line.reduce((sum, segment) => sum + segment.text.length, 0)
+const lineCells = (line: readonly BandSegment[]): number => line.reduce((sum, segment) => sum + widthOf(segment.text), 0)
 
 /** The AbovePrompt band: the mark, one line that says where the session stands, and the pane's own button. */
 export function Band(props: BandProps): RenderElement {
   const { ui, model, site, actions } = props
   const { Box, Text, Button } = ui
-  const label = model.paneOpen ? 'Close' : 'Open'
+  const label = model.paneOpen ? say().band.close : say().band.open
   const cells = Math.max(MIN_CELLS, site.bodyColumns - BAND_RESERVE)   // the engine draws its own '[-]' past them
-  const room = cells - label.length - CONTROL_GAP
+  const room = cells - widthOf(label) - CONTROL_GAP
   const mark = BAND_MARK[model.state]
   const lines = bandLines(model)
   // The shortest phrasing is the floor; whatever a very narrow band still cannot hold, `truncate-end` takes.

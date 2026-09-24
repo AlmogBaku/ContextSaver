@@ -1,3 +1,4 @@
+import { say } from '../say'
 import { agentAliases, aliasOf, baseline, foldRows, rowsOf, sinks, sumOf } from './evidence'
 import { activeRuns, countRow } from './spawns'
 import { collapseWs, duration, instructionOf, killPrompt, median, pctOf } from './text'
@@ -385,11 +386,11 @@ const statsOf = (p: Pattern, state: State, rows: readonly Row[]): string => {
   const last = turns[turns.length - 1]
   // Zero segments are dropped whole: turn handles and rebuilt rows carry no duration, and `0s` would claim a suite that ran for minutes cost nothing.
   return [
-    `${p.hits.length}×`,
-    ...(pct > 0 ? [`~${pct}% of context`] : []),
+    say().pane.hits(p.hits.length),
+    ...(pct > 0 ? [say().pane.costShare(pct)] : []),
     ...(cost.ms > 0 ? [duration(cost.ms)] : []),
     // One turn is not a range: 'turns 1–1' reads as a bug.
-    ...(first === undefined || last === undefined ? [] : [first === last ? `turn ${first}` : `turns ${first}–${last}`]),
+    ...(first === undefined || last === undefined ? [] : [first === last ? say().pane.turnAt(first) : say().pane.turnRange(first, last)]),
   ].join(' · ')
 }
 
@@ -422,11 +423,11 @@ const ktokOf = (l: Loop): number => Math.round((l.tokens.input + l.tokens.cacheC
 // A cited loop, quoted as one line of evidence: its stage and model, dated by the turn that spawned it.
 const citedLoop = (state: State, aliases: ReadonlyMap<string, string>, l: Loop): Evidence => ({
   turn: l.firstTurn,
-  what: `${l.label ?? 'agent'} · ${l.model ?? '?'}`,
+  what: `${l.label ?? say().pane.loop} · ${l.model ?? '?'}`,
   agent: aliasOf(aliases, l.id),
   ms: l.ms,
   chars: 0,
-  head: `${ktokOf(l)}k tokens · ${l.edits} edits`,
+  head: say().pane.loopCost(ktokOf(l), l.edits),
 })
 
 const evidenceOf = (p: Pattern, state: State, rows: readonly Row[], aliases: ReadonlyMap<string, string>): Evidence[] => {
@@ -456,7 +457,7 @@ export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap
     patternId: p.id,
     n,
     category: p.category,
-    kind: p.ignored > 0 ? `ignored · ${p.kind}` : p.kind,
+    kind: p.ignored > 0 ? say().pane.ignored(p.kind) : p.kind,
     stats: statsOf(p, state, rows),
     why: p.why,
     fix: p.alternative,

@@ -1,5 +1,6 @@
 import type { ModelForkUsage } from 'claude-code'
 
+import { say } from '../say'
 import { agentsBlock, decisionsBlock, knownPatternsBlock, ledgerBlock, sinksBlock, statsLines, turnsBlock } from './blocks'
 import { agentAliases } from './evidence'
 import { totalTokens } from './patterns'
@@ -126,6 +127,8 @@ Three \`review:*\` loops of one run, each \`edits 0\` with outcome \`3 low\`, a 
 ## LEDGER — \`id | tool | key | cls | agent | turn | ms | chars | flags | paths\`, oldest first (a spawn row lands after the rows it caused: an agent's own calls finish before its Agent row does). Agents are named \`a1\`, \`a2\`… in order of first appearance; \`main\` is the main loop. \`ms\` is wall time and includes any wait on a permission prompt, so a long \`ms\` alone is not machine cost. A row flagged \`recovered\` was rebuilt from the transcript before this plugin joined the session: its \`ms\` is 0 and its agent reads \`main\`, so never reason about its duration or which loop ran it. flags: \`err\` \`denied\` \`dedup\` \`trunc\` \`bg\` \`timeout\` \`persist=<bytes>\` \`ask\` (an AskUserQuestion: its \`ms\` is the wait for the person) \`recommended\` (its options named a default) \`+adds/-dels\` \`agent=<type>/<model>/<status>/<tokens>tok/<edits>edits/<promptChars>pch\`, or \`-\`. Rows older than the window are folded into \`~ | tool | key | ×count | Σchars\` lines: no id, never citable, key usable as a signature only if it also appears in a full row.
 {{LEDGER}}
 
+{{LANGUAGE}}
+
 Return the JSON object only.
 `
 
@@ -168,8 +171,11 @@ export const costOf = (u: ModelForkUsage): number => spentOf(usageOf(u))
 export const judgeAliases = (state: State): ReadonlyMap<string, string> => agentAliases(state.rows, state.loops)
 
 /** Fills the judge prompt with this session's evidence blocks; `aliases` is the naming AGENTS and LEDGER print, so the caller can hand the same one to `parseReply`. */
-export const buildPrompt = (state: State, aliases: ReadonlyMap<string, string> = judgeAliases(state)): string =>
-  ([
+export const buildPrompt = (state: State, aliases: ReadonlyMap<string, string> = judgeAliases(state)): string => {
+  // The language paragraph and the blank line under it go together: English asks for nothing here, and the
+  // prompt it is handed is the one this file spells out, to the character.
+  const directive = say().judge.directive
+  return ([
     ['{{KNOWN_PATTERNS}}', knownPatternsBlock(state)],
     ['{{DECISIONS}}', decisionsBlock(state)],
     ['{{STATS}}', statsLines(state.rows, state.folded, aliases).join('\n')],
@@ -178,7 +184,9 @@ export const buildPrompt = (state: State, aliases: ReadonlyMap<string, string> =
     ['{{AGENTS}}', agentsBlock(state, aliases)],
     ['{{TURNS}}', turnsBlock(state)],
     ['{{LEDGER}}', ledgerBlock(state, aliases)],
+    ['{{LANGUAGE}}\n\n', directive === '' ? '' : `${directive}\n\n`],
   ] as const).reduce((text, [placeholder, value]) => text.split(placeholder).join(value), JUDGE_PROMPT)
+}
 
 const ID_SHAPE = /^[a-z-]+:[a-z0-9-]{1,40}$/
 
@@ -347,7 +355,10 @@ const findingOf = (value: unknown, state: State, visible: Row[], aliases: Readon
   if (!ID_SHAPE.test(id)) return `id ${cell(given, 40) || '(missing)'} is not <category>:<kebab-slug>`
   if (!isCategory(category)) return 'category is not one of the nine'
   if (id.slice(0, id.indexOf(':')) !== category) return `category ${category} does not match the id`
-  if (!kind.startsWith('Claude keeps ')) return 'kind must start with "Claude keeps "'
+  // The opening words are the language's, and the same string the prompt asked for: a reply in another
+  // language is a finding whose first words would never match, so the two are read off one key.
+  const prefix = say().judge.kindPrefix
+  if (!kind.startsWith(prefix)) return `kind must start with "${prefix}"`
   // A cap missed by a few characters is a sentence that ran long, not a wrong finding: the pane wraps, so it
   // is kept as returned and the run report notes the length. Twice the cap is a different answer, and dropped.
   if (kind.length > KIND_MAX * 2) return `kind is ${kind.length} chars, over twice ${KIND_MAX}`
@@ -438,8 +449,10 @@ const patternOf = (f: Finding): Pattern => ({
   hits: [...f.evidence], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0,
 })
 
+// The title is the finding's too: a pattern remembered from a session in another language would
+// otherwise keep its old words above a `why` and a fix written in the language chosen now.
 const updatedWith = (p: Pattern, f: Finding): Pattern => ({
-  ...p, why: f.why, alternative: f.alternative, proposal: f.proposal, confidence: f.confidence,
+  ...p, kind: f.kind, why: f.why, alternative: f.alternative, proposal: f.proposal, confidence: f.confidence,
   estTokensPerTurn: f.estTokensPerTurn, hits: unique([...p.hits, ...f.evidence]),
 })
 

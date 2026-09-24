@@ -1,3 +1,4 @@
+import { say } from '../say'
 import type { Usage, StoredPattern } from './types'
 
 /** Returns the median of the numbers; 0 when there are none. */
@@ -32,15 +33,62 @@ export const tokensOf = (chars: number): number => Math.round(chars / 4)
 export const kilo = (n: number): string =>
   n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${Math.round(n / 100) / 10}k` : `${n}`
 
-/** Truncates text to `cells` characters, ending it with '…' when it is cut and never a space before it. */
-export const fit = (text: string, cells: number): string =>
-  text.length <= cells ? text : `${text.slice(0, Math.max(0, cells - 1)).trimEnd()}…`
+// The code point blocks a terminal draws two cells wide (Unicode TR #11, East Asian Wide and Fullwidth):
+// the CJK ideographs, kana, Hangul, the fullwidth forms and the emoji that render as a pair. Everything
+// else is one cell, which is why a Latin bundle never noticed the difference — `widthOf` is `length` there.
+const WIDE: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff],
+  [0xa000, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f],
+  [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff],
+  [0x20000, 0x2fffd], [0x30000, 0x3fffd],
+]
 
-/** Returns a kebab-case slug of at most forty characters. */
+const codeCells = (code: number): number => (WIDE.some(([lo, hi]) => code >= lo && code <= hi) ? 2 : 1)
+
+/**
+ * The cells a string draws in, which is its `length` only while it is Latin.
+ *
+ * Every reserve, ladder and column in the drawing is a number of cells, so a bundle whose words are
+ * Chinese or Japanese would otherwise be measured at half its real width and run past whatever frames it.
+ */
+export const widthOf = (text: string): number => {
+  let cells = 0
+  for (const ch of text) cells += codeCells(ch.codePointAt(0) ?? 0)
+  return cells
+}
+
+/** Pads text to `cells` display cells; a wide character counts for the two it draws. */
+export const padCells = (text: string, cells: number, atStart = false): string => {
+  const pad = ' '.repeat(Math.max(0, cells - widthOf(text)))
+  return atStart ? `${pad}${text}` : `${text}${pad}`
+}
+
+/** Truncates text to `cells` display cells, ending it with '…' when it is cut and never a space before it. */
+export const fit = (text: string, cells: number): string => {
+  if (widthOf(text) <= cells) return text
+  const room = Math.max(0, cells - 1)   // the '…' takes the last cell
+  let kept = ''
+  let used = 0
+  for (const ch of text) {
+    const width = codeCells(ch.codePointAt(0) ?? 0)
+    if (used + width > room) break
+    kept += ch
+    used += width
+  }
+  return `${kept.trimEnd()}…`
+}
+
+/**
+ * Returns a kebab-case slug of at most forty characters, used as a filename.
+ *
+ * Any letter or digit survives, not the ASCII ones alone: a rule the judge titled in Japanese or in
+ * French would otherwise slug to nothing at all, and a skill would be written to `…/skills//SKILL.md`.
+ * For a Latin title this is exactly `[^a-z0-9]+` once the case is folded, so nothing about it moved.
+ */
 export const slug = (s: string): string =>
   s
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40)
 
@@ -68,10 +116,8 @@ export const gauge = (percent: number, width: number): string => {
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-/** Wraps a user instruction in the standard ContextSaver prefix. */
-export const instructionOf = (text: string): string =>
-  `Instruction from the user (via ContextSaver): ${text}`
+/** Wraps a user instruction in the standard ContextSaver prefix, in the session's language. */
+export const instructionOf = (text: string): string => say().judge.instruction(text)
 
-/** Produces the kill prompt for a stored pattern. */
-export const killPrompt = (p: StoredPattern): string =>
-  `Stop this behaviour for the rest of the session: ${p.kind}. From now on: ${p.alternative}`
+/** Produces the kill prompt for a stored pattern, in the session's language. */
+export const killPrompt = (p: StoredPattern): string => say().judge.kill(p.kind, p.alternative)

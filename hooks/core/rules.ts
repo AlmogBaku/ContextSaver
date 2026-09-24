@@ -18,10 +18,14 @@ export const appendedTo = (existing: string | null, content: string): string => 
   return base + glue + (base === '' ? content.replace(/^\n+/, '') : content)
 }
 
+// The name a written rule takes on disk. A title of nothing but punctuation slugs to nothing, and a file
+// with no name is a path with a hole in it, so the body answers for it and a constant answers for both.
+const nameOf = (p: Proposal): string => slug(p.title) || slug(p.body) || 'rule'
+
 /** Renders the file an artifact kind writes: where it goes, what it says, how it lands. */
 export const render = (kind: ArtifactKind, p: Proposal, cwd: string): Pick<Artifact, 'path' | 'content' | 'mode'> => {
-  if (kind === 'skill') return { path: `${cwd}/.claude/skills/${slug(p.title)}/SKILL.md`, content: skillDoc(p), mode: 'write' }
-  if (kind === 'agent-brief') return { path: `${cwd}/.claude/agents/${slug(p.title)}.md`, content: briefDoc(p), mode: 'write' }
+  if (kind === 'skill') return { path: `${cwd}/.claude/skills/${nameOf(p)}/SKILL.md`, content: skillDoc(p), mode: 'write' }
+  if (kind === 'agent-brief') return { path: `${cwd}/.claude/agents/${nameOf(p)}.md`, content: briefDoc(p), mode: 'write' }
   if (kind === 'settings-allow') return { path: `${cwd}/.claude/settings.json`, content: p.body, mode: 'merge-settings' }
   return { path: `${cwd}/CLAUDE.md`, content: `\n${CLAUDE_MD_HEADING}\n${bulletOf(p.body)}`, mode: 'append' }
 }
@@ -69,7 +73,7 @@ const titleOf = (body: string): string => {
 }
 
 const skillDoc = (p: Proposal): string =>
-  `${frontmatter([field('name', slug(p.title)), field('description', p.title)])}${prose(p.body)}`
+  `${frontmatter([field('name', nameOf(p)), field('description', p.title)])}${prose(p.body)}`
 
 const briefDoc = (p: Proposal): string => {
   const lines = p.body.split('\n')
@@ -77,7 +81,7 @@ const briefDoc = (p: Proposal): string => {
   const rest = lines.slice(head.length)
   const model = valueOf(head, 'model')
   const tools = valueOf(head, 'tools') ?? BRIEF_TOOLS
-  const fields = [field('name', slug(p.title)), field('description', p.title), ...(model === null ? [] : [field('model', model)]), field('tools', tools)]
+  const fields = [field('name', nameOf(p)), field('description', p.title), ...(model === null ? [] : [field('model', model)]), field('tools', tools)]
   return `${frontmatter(fields)}${prose([...without(without(head, 'model'), 'tools'), ...rest].join('\n'))}`
 }
 

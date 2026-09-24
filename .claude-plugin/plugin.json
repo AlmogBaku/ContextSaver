@@ -1,7 +1,17 @@
 {
   "name": "contextsaver",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Watches a session for wasted context and time, shows a one-click card when a waste behaviour repeats, and lets the user steer or stop it.",
   "author": { "name": "Almog Baku" },
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "The language ContextSaver reads in: the pane, the line above the prompt, what /saver answers, and the cards the audit writes — what Claude keeps doing, why, and the fix it offers. English is the complete one and every other language falls back to it line by line, so a half-finished translation shows its own words where it has them and English where it has not. It does not touch what you type: /saver and its subcommands (check, fix, ignore, debug, reset) keep their spelling whatever the language, and so do the pattern ids, the categories inside them and the evidence handles. Cards found before you changed it keep the language they were written in until the behaviour is found again.",
+      "required": false,
+      "default": "en",
+      "options": ["en", "fr", "es", "de", "zh-CN", "ja"]
+    }
+  }
 }

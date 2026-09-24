@@ -1,5 +1,8 @@
-// Dev replay (`bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--summary | --prompt | --judge]`):
+// Dev replay (`bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--lang <tag>] [--summary | --prompt | --judge]`):
 // feeds a recorded session through `reduce` and prints what the judge would have seen, and with `--judge` what it says.
+// `--lang` settles the bundle before anything is built, so `--prompt` shows the language paragraph the fork
+// would really be handed and `--judge` reads its answer back through that language's own `kindPrefix`:
+// replaying one recorded session under `en` and under `fr` is how a translation's findings are checked.
 // Not plugin code: outside tsconfig, never imported by hooks. Streams every file line by line (a main transcript reaches 16 MB).
 //
 // Spec §11.5. Facts of the transcript shape this reads, found in the acceptance corpus:
@@ -27,6 +30,8 @@ import { reduce } from '../hooks/core/patterns.ts'
 import { agentOf, parseJournal, runOf } from '../hooks/core/spawns.ts'
 import { initialState } from '../hooks/core/types.ts'
 import type { Action, Finding, JournalEntry, State, Tokens, TurnEnd } from '../hooks/core/types.ts'
+// `setSay` only: this file's own `say` writes to stderr and is a different thing entirely.
+import { DEFAULT_LANGUAGE, LANGUAGE_TAGS, setSay } from '../hooks/say/index.ts'
 
 const PROJECTS = join(homedir(), '.claude', 'projects')
 const DEFAULT_WINDOW = 1_000_000
@@ -410,11 +415,12 @@ const report = (state: State, at: number, mode: Mode, model: string): { state: S
   return { state: result.state, out: { at: iso, ...digest(state), judge: { model, error: result.error, returned: result.returned, focus: result.focus, time: result.time, context: result.context, kept, dropped: result.dropped } } }
 }
 
-const parseArgs = (argv: string[]): { inputs: string[]; ats: number[]; window: number; mode: Mode } => {
+const parseArgs = (argv: string[]): { inputs: string[]; ats: number[]; window: number; mode: Mode; lang: string } => {
   const inputs: string[] = []
   const ats: number[] = []
   let window = DEFAULT_WINDOW
   let mode: Mode = 'summary'
+  let lang = DEFAULT_LANGUAGE
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i] ?? ''
     if (arg === '--at') {
@@ -422,16 +428,23 @@ const parseArgs = (argv: string[]): { inputs: string[]; ats: number[]; window: n
       if (Number.isNaN(t)) throw new Error(`--at wants an ISO time, got ${argv[i]}`)
       ats.push(t)
     } else if (arg === '--window') window = Number(argv[++i]) || DEFAULT_WINDOW
-    else if (arg === '--summary' || arg === '--prompt' || arg === '--judge') mode = arg.slice(2) as Mode
+    else if (arg === '--lang') {
+      lang = argv[++i] ?? ''
+      // The plugin is silent about a tag it does not know, on purpose; a dev tool told to replay in a
+      // language that does not exist has misunderstood its operator and says so.
+      if (!LANGUAGE_TAGS.includes(lang)) throw new Error(`--lang wants one of ${LANGUAGE_TAGS.join(', ')}, got ${lang}`)
+    } else if (arg === '--summary' || arg === '--prompt' || arg === '--judge') mode = arg.slice(2) as Mode
     else if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`)
     else inputs.push(arg)
   }
-  if (inputs.length === 0) throw new Error('usage: bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--summary | --prompt | --judge]')
-  return { inputs, ats: ats.sort((a, b) => a - b), window, mode }
+  if (inputs.length === 0) throw new Error('usage: bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--lang <tag>] [--summary | --prompt | --judge]')
+  return { inputs, ats: ats.sort((a, b) => a - b), window, mode, lang }
 }
 
 const main = async (): Promise<void> => {
-  const { inputs, ats, window, mode } = parseArgs(process.argv.slice(2))
+  const { inputs, ats, window, mode, lang } = parseArgs(process.argv.slice(2))
+  // Before anything is built: the prompt, the cards and the parser all read the bundle this settles.
+  setSay(lang)
   const model = process.env['REPLAY_MODEL'] ?? 'sonnet'
   const t0 = performance.now()
   const { events, journals, cwd, files } = await collect(inputs)

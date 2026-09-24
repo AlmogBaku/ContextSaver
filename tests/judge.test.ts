@@ -381,11 +381,12 @@ describe('judge', () => {
 
   test('merge reuses a known id, extending its hits and refreshing its text', ($, _on) => {
     const state = judgeState({ patterns: [judgePattern()] })
-    const result = merge(state, [judgeFinding({ why: 'three runs, nothing shared changed' })])
+    const kind = 'Claude continue de relancer toute la suite après chaque modification'
+    const result = merge(state, [judgeFinding({ kind, why: 'three runs, nothing shared changed' })])
     expect(result.patterns.length).toBe(1)
     expect(result.patterns[0]?.hits).toEqual(['toolu_01', 'toolu_03', 'toolu_06'])
     expect(result.patterns[0]?.why).toBe('three runs, nothing shared changed')
-    expect(result.patterns[0]?.kind).toBe(judgePattern().kind)
+    expect(result.patterns[0]?.kind, 'a pattern remembered in English reads in the language chosen now').toBe(kind)
     expect(result.fresh, 'nobody has decided it, so the re-report is a card again').toEqual([SUITE_ID])
     expect(result.recurred).toEqual([])
   })
