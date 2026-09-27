@@ -1,12 +1,18 @@
 # ContextSaver — PRD
 
-**Stop Claude Code from wasting tokens doing useless shit, in realtime.**
+**Diagnoses wrong processes, wrong workflows and wrong habits in Claude Code sessions — and lets you fix them in one click.**
 
 A Claude Mod (function-hooks plugin). 2026-09-17. API facts and background research live with the build notes outside this repo; the build spec is `docs/SPEC.md`.
 
 ## Problem
 
-Long Claude Code sessions fill their context with waste that compounds while Claude works: the third full test-suite run, the fourth read of the same file, a log dumped into the window, the plan re-summarized every turn, two subagents editing one file. Context fills, compaction fires, Claude forgets. The user's only tools today are Esc and typing. Nothing watches behavior inside the session; compression proxies and log miners act after the fact and cannot stop a tool before it runs.
+Long Claude Code sessions waste time and tokens in two layers.
+
+The first layer is **process**: the wrong way to organise the work. Per-lane review and fix rounds stacked on a whole-branch review that already covers them. The premium model on mechanical stages — running checks, scribing, merging. Agents spawned for jobs a single shell command would do. The full check suite run after every merge, where once per batch would do. The orchestrator re-reading its own plan on every turn. The user types "why so slow?" and nothing hears it. The session ledger records every tool call but never asks whether the process itself was right.
+
+The second layer is **habit**: tool-level repetition that compounds on top of the wrong process. The same file read again after nothing changed it. The full test suite after a one-line edit. An unfiltered log dumped into context to find one line. Each of these had a shorter path to the same result — that gap is the waste.
+
+ContextSaver catches both layers. At moments that matter — an accepted plan, a Workflow launch, a pace complaint, every thirty minutes — it asks: given what the user asked, how would a lean expert run this work? Where does this session's process diverge from that, what has each divergence cost so far, and what is the one change? Process diagnosis is the primary job. Habit detection — continuous, lightweight, and now reaching every subagent — is the secondary one. The user's only tools today are Esc and typing; ContextSaver gives them one click more.
 
 ## What it does
 

@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
-  agentsBlock, aggregate, decisionsBlock, knownPatternsBlock, ledgerBlock, ledgerLine, sinksBlock, statsLines,
+  agentsBlock, aggregate, citableRows, decisionsBlock, knownPatternsBlock, ledgerBlock, ledgerLine, sinksBlock, statsLines,
   summaryLine, turnsBlock,
 } from '../hooks/core/blocks'
 import { agentAliases, pairKey } from '../hooks/core/evidence'
-import { AGENTS_ROWS, initialState } from '../hooks/core/types'
+import { AGENTS_ROWS, FOLD_LINES, JUDGE_AGENT_ROWS, JUDGE_LEDGER_ROWS, initialState } from '../hooks/core/types'
 import type { Folded, Row } from '../hooks/core/types'
+import { burstRows } from './fixtures/blocks/burstRows'
+import { manyKeys } from './fixtures/blocks/manyKeys'
 import { judgePattern } from './fixtures/judge/judgePattern'
 import { judgeState } from './fixtures/judge/judgeState'
 import { rows } from './fixtures/judge/rows'
@@ -268,6 +270,36 @@ describe('blocks', () => {
     expect(lines.slice(lines.indexOf('largest rows:') + 1).some(line => line.startsWith('r1 |')),
       'the largest row of the session is outside the window, so it is not offered as an id').toEqual(false)
     expect(lines[lines.indexOf('largest rows:') + 1]).toBe('r11 | Bash | read:cat notes.md | Σ100ch')
+  })
+
+  // A burst from one subagent used to fill the whole window, so the main loop's rows before it were citable nowhere.
+  test('citableRows caps one agent loop so the main loop and other agents keep their rows in the window', ($, _on) => {
+    const state = judgeState({ rows: burstRows() })
+    const window = citableRows(state)
+    expect(window.filter(r => r.agent === 'agent-1').length, 'the burst keeps only its newest rows').toBe(JUDGE_AGENT_ROWS)
+    expect(window.filter(r => r.agent === 'agent-1')[0]?.seq).toBe(300 - JUDGE_AGENT_ROWS + 1)
+    expect(window.filter(r => r.agent === 'main').length, 'the older main-loop rows survive it').toBe(10)
+    expect(window.filter(r => r.agent === 'agent-2').length, 'and so do the other agent\'s').toBe(10)
+    expect(window.map(r => r.seq), 'oldest first, as the LEDGER prints them').toEqual([...window.map(r => r.seq)].sort((a, b) => a - b))
+    expect(ledgerBlock(state), 'the LEDGER renders exactly those rows in full').toContain('r3 | Bash | test:bun test | test | main |')
+    expect(ledgerBlock(state), 'and folds the burst rows the cap dropped').not.toContain('r100 |')
+  })
+
+  test('citableRows leaves a main-loop-only ledger its newest JUDGE_LEDGER_ROWS rows', ($, _on) => {
+    const many = Array.from({ length: 160 }, (_, i) => filler(i + 1))
+    expect(citableRows(judgeState({ rows: many })).map(r => r.seq)).toEqual(many.slice(10).map(r => r.seq))
+    expect(citableRows(judgeState({ rows: many })).length).toBe(JUDGE_LEDGER_ROWS)
+  })
+
+  // Every older key used to print its own `~` line: a long session's prompt was mostly fold lines.
+  test('ledgerBlock keeps the FOLD_LINES largest fold lines by characters, then one remainder line', ($, _on) => {
+    const lines = ledgerBlock(judgeState({ rows: manyKeys(500) })).split('\n')
+    const folds = lines.filter(l => l.startsWith('~'))
+    expect(folds.length, 'forty fold lines and the remainder').toBe(FOLD_LINES + 1)
+    expect(folds[0], 'largest by characters first').toBe('~ | Bash | read:cat file-500.md | ×1 | Σ5000ch')
+    expect(folds[FOLD_LINES - 1]).toBe('~ | Bash | read:cat file-461.md | ×1 | Σ4610ch')
+    expect(folds[FOLD_LINES]).toBe('~ ×460 more')
+    expect(lines.length, 'then the window in full').toBe(FOLD_LINES + 1 + JUDGE_LEDGER_ROWS)
   })
 
   test('the blocks say (none) for an empty session', ($, _on) => {

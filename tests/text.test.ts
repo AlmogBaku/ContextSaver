@@ -94,6 +94,7 @@ describe('text', () => {
       proposal: null,
       estTokensPerTurn: null,
       lastDecision: null,
+      lean: null,
     }
     expect(killPrompt(p)).toBe(
       'Stop this behaviour for the rest of the session: Claude keeps running bun test. From now on: run only covering tests'

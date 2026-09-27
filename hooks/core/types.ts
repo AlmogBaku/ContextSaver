@@ -40,10 +40,23 @@ export const LOOP_CAP = 400                   // loops kept (oldest dropped)
 export const AGENTS_ROWS = 60                 // loop lines the AGENTS block renders in full; older ones fold per run
 export const RUN_REFRESH_MS = 10_000          // a running workflow's journal is re-read at most this often
 export const RUN_FRESH_MS = 600_000           // a run with no loop yet counts as active this long after its launch
+export const STORE_KEY_VERSION = 'v5'         // 0.5 starts fresh: a 0.4 `patterns:<cwd>` entry is never read
+export const storeKey = (cwd: string): string => `patterns.${STORE_KEY_VERSION}:${cwd}`
+export const FOLD_LINES = 40                  // `~` lines the LEDGER prints, largest by characters first; the rest become one `~ ×N more` line
+export const JUDGE_AGENT_ROWS = 40            // rows one agent loop may hold in the citable window, so no single loop fills it
+export const ASK_HEAD_MAX = 200               // characters of a typed prompt kept for the process digest; session-only, never stored
+export const DIGEST_MAX_CHARS = 40_000        // the PROCESS digest's ceiling; Shape is never the section cut
+export const PROCESS_CLOCK_MS = 1_800_000     // the process judge's clock: at most every thirty minutes, doubled past the budget share
+export const PROCESS_MIN_CONFIDENCE = 0.75    // a process finding below this is dropped
+export const MAX_PROCESS_FINDINGS = 3         // process findings kept per run
+export const DELIVERY_BURST_MS = 5_000        // subagent deliveries inside this window share one toast
 
 export type CommandClass = 'test' | 'lint' | 'format' | 'typecheck' | 'build' | 'install' | 'git' | 'read' | 'search' | 'other'
 export type Category = 'execution' | 'reading' | 'production' | 'behavior' | 'communication' | 'multi-agent' | 'environment' | 'process' | 'other'
 export type Choice = 'keep' | 'steer' | 'kill'
+export type ProcessTrigger = 'plan' | 'workflow' | 'pace' | 'clock'   // an accepted ExitPlanMode, a Workflow launch, a typed pace complaint, the clock
+/** One prompt the person typed (`composer` or `bridge` origin): the process judge's view of what was asked. Session-only. */
+export type Ask = { turn: number; at: number; head: string; pace: boolean }   // head: ≤ ASK_HEAD_MAX chars, control characters stripped; pace: it reads as a complaint about pace
 
 export type Row = {
   seq: number              // 1-based, monotonically increasing; the judge sees `r${seq}`
@@ -64,7 +77,7 @@ export type Tokens = { input: number; output: number; cacheRead: number; cacheCr
 export type Outcome = { kind: 'findings'; critical: number; high: number; medium: number; low: number } | { kind: 'report'; chars: number }
 export type Loop = { id: string; run: string | null; label: string | null; phase: string | null; model: string | null; turns: number; ms: number; tokens: Tokens; ended: TurnEnd | null; firstTurn: number; firstSeq: number; outcome: Outcome | null; calls: number; edits: number; checks: number; reads: number }   // one spawned agent loop: `id` is its agentId (the ledger's `agent`), `run` the workflow run that launched it, `ended` null while it runs; calls/edits/checks/reads count its own rows as they land, so the line stays whole once ROW_CAP drops them
 export type Folded = { tool: string; key: string; cls: CommandClass; agent: string; count: number; ms: number; chars: number; firstTurn: number; lastTurn: number; flags: { ask: number; recommended: number; err: number } }   // one (tool, key) pair's rows dropped past ROW_CAP: nothing citable, everything counted; `agent` is 'main' or the first loop seen
-export type Run = { id: string; name: string; dir: string | null; turn: number; seq: number; at: number; refreshedAt: number }   // at: clock at launch; refreshedAt: last journal read (0 never)
+export type Run = { id: string; name: string; dir: string | null; turn: number; seq: number; at: number; refreshedAt: number; phases: string[] }   // at: clock at launch; refreshedAt: last journal read (0 never); phases: the script's declared `meta.phases` titles, [] when unread or undeclared
 export type JournalEntry = { kind: 'started'; agentId: string; label: string | null; phase: string | null } | { kind: 'result'; agentId: string; outcome: Outcome }
 export type Signature = { tool: string; key: string }
 export type ArtifactKind = 'claude-md' | 'skill' | 'agent-brief' | 'settings-allow'
@@ -82,6 +95,7 @@ export type StoredPattern = {
   proposal: Proposal | null
   estTokensPerTurn: number | null  // judge's estimate for behavioural patterns; null when a signature exists
   lastDecision: Choice | null      // the most recent session's decision, for the judge's calibration
+  lean: string | null              // process findings only: how a lean expert would run it (the card's Lean line); `kind` is what the session does; null for a habit
 }
 /** Session-only fields. */
 export type Pattern = StoredPattern & {
@@ -91,6 +105,8 @@ export type Pattern = StoredPattern & {
   instruction: string | null       // the text sent for steer/kill
   openedAtTurn: number | null      // turn of the last steer/kill; settles saved (credited or ignored)
   ignored: number                  // times the instruction was ignored
+  sent: number                     // subagents its standing instruction reached this session (the card's "sent ×N")
+  cost?: { tokens: number; ms: number }   // process only: the newest run's claimed cost, clamped to its cited handles; absent, the card shows what they measured
 }
 
 /** What one fork of the judge cost, in the four token counts the API reports. */
@@ -116,6 +132,7 @@ export type Card = {
   stats: string
   why: string
   fix: string
+  lean: string | null      // process cards: the Lean line; null for a habit card
   total: { unit: 'calls' | 'turns' | 'agents'; calls: number; ms: number; chars: number }   // cited calls, their wall time and their context; `unit: 'turns'` when the pattern cites turns instead, so `calls` counts turns and `chars` is the per-turn estimate; `unit: 'agents'` when it cites loops, so `calls` counts loops and `ms` is their sum
   evidence: readonly Evidence[]                          // ≤ CARD_EVIDENCE cited calls, newest first
 }
@@ -143,6 +160,9 @@ export type State = {
   standing: string[]               // texts re-sent with every prompt this session
   written: string[]                // `${patternId}:${kind}` of artifacts written, tried or skipped this session; propose() omits them
   judge: { lastAtTokens: number; lastAtTurn: number; lastAtSeq: number; lastAtMs: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; focus: string | null; time: string | null; context: string | null; last: JudgeRun | null }   // lastAtSeq/lastAtMs: the mid-turn cadence; time/context: the judge's one-line explanations of where they went
+  asks: Ask[]                      // prompts the person typed, oldest first; session-only
+  process: { lastAtMs: number; lastAtSeq: number; lastAtTurn: number; running: boolean; runs: number; spent: number; backoff: number; error: string | null; last: JudgeRun | null }   // the process judge's own cadence and cost, beside `judge`
+  delivery: { agents: string[]; pending: number; lastToastAt: number }   // agent ids the standing instructions reached; spawns in flight (counted as reached); when the last delivery toast showed
   pendingCheck: boolean            // a check armed at load and not yet answered: a plugin that joined a session with history fires one there and retries it at every warm opportunity until a run answers (§6)
   paneOpen: boolean
   autoOpened: boolean              // the pane auto-opened once this session (like /diff on the first edit)
@@ -152,7 +172,9 @@ export type State = {
 
 export const initialState = (cwd: string, window: number): State => ({
   cwd, turn: 0, seq: 0, rows: [], folded: {}, turns: [], loops: [], runs: [], usage: { window }, overhead: null, compactions: [], patterns: [], cards: [], expanded: null, steering: null, steerDraft: null, notes: [], standing: [], written: [],
-  judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null }, pendingCheck: false, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
+  judge: { lastAtTokens: 0, lastAtTurn: 0, lastAtSeq: 0, lastAtMs: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, focus: null, time: null, context: null, last: null },
+  asks: [], process: { lastAtMs: 0, lastAtSeq: 0, lastAtTurn: 0, running: false, runs: 0, spent: 0, backoff: 1, error: null, last: null }, delivery: { agents: [], pending: 0, lastToastAt: 0 },
+  pendingCheck: false, paneOpen: false, autoOpened: false, columns: null, saved: { ms: 0, chars: 0 },
 })
 
 export type Action =
@@ -173,6 +195,14 @@ export type Action =
   | { type: 'decide'; patternId: string; choice: Choice; text?: string }   // text required for steer
   | { type: 'judge.start'; now: number; seq: number }        // when and at which ledger row the run began, for the mid-turn cadence
   | { type: 'judge.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; focus: string | null; time: string | null; context: string | null; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
+  | { type: 'ask'; ask: Ask }                                 // a prompt the person typed
+  | { type: 'run.phases'; runId: string; phases: string[] }   // the run's script declared these phases
+  | { type: 'process.start'; now: number; seq: number; trigger: ProcessTrigger }
+  | { type: 'process.cold'; was: Pick<State['process'], 'lastAtMs' | 'lastAtSeq' | 'lastAtTurn'> }   // the fork had no warm snapshot: the run never happened, so the cadence it spent is handed back
+  | { type: 'process.done'; patterns: Pattern[]; fresh: string[]; recurred: string[]; spent: number; error: string | null; returned: number; kept: number; dropped: readonly string[]; usage: JudgeUsage | null }
+  | { type: 'delivery.pending'; delta: 1 | -1 }               // an agent.spawn rewrite began (1) or finished (-1)
+  | { type: 'delivery.sent'; agentId: string; now: number }   // the standing instructions reached this agent, by spawn rewrite or on its first call
+  | { type: 'delivery.toasted'; now: number }
   | { type: 'check.arm' }                                      // the ledger a session.start adopted already passes the row floor: judge it there, and again at the next warm opportunity if that run answers nothing
   | { type: 'notes.drained' }
   | { type: 'standing.add'; text: string }
@@ -182,7 +212,7 @@ export type Action =
   | { type: 'reset' }
 
 /** Judge output after validation (section 5.3). */
-export type Finding = { id: string; category: Category; kind: string; evidence: string[]; signature: Signature | null; why: string; alternative: string; confidence: number; estTokensPerTurn: number | null; proposal: Proposal | null }
+export type Finding = { id: string; category: Category; kind: string; evidence: string[]; signature: Signature | null; why: string; alternative: string; confidence: number; estTokensPerTurn: number | null; proposal: Proposal | null; lean: string | null }   // lean: non-null for a process finding
 
 /** UI ↔ shell interface. */
 export type Ui = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Input' | 'Raster'>
@@ -227,6 +257,7 @@ export type DecidedRow = {
   settled: boolean          // the instruction was neither ignored nor still in flight, so the saving is real
   instruction: string | null   // the sentence the user sent, when it is not the fix the card offered
   ignored: number
+  sent: number              // subagents its standing instruction reached (the row's "sent ×N")
 }
 export type PaneModel = {
   header: Header

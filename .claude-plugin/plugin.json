@@ -1,7 +1,7 @@
 {
   "name": "contextsaver",
-  "version": "0.4.0",
-  "description": "Watches a session for wasted context and time, shows a one-click card when a waste behaviour repeats, and lets the user steer or stop it.",
+  "version": "0.5.0",
+  "description": "Diagnoses wrong processes, workflows and habits in Claude Code sessions: fires on plan acceptance, workflow launches, pace complaints and the clock, names the lean alternative with its measured cost, and lets the user fix it in one click.",
   "author": { "name": "Almog Baku" },
   "license": "MIT"
 }

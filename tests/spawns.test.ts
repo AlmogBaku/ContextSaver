@@ -1,13 +1,16 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { activeRuns, agentOf, countRow, journalPath, loopStats, parseJournal, runOf } from '../hooks/core/spawns'
+import { activeRuns, agentOf, countRow, journalPath, loopStats, parseJournal, phasesOf, runOf } from '../hooks/core/spawns'
 import { RUN_FRESH_MS, initialState } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
 import { agentCompleted } from './fixtures/ledger/agentCompleted'
 import { journalText } from './fixtures/spawns/journalText'
+import { proseAllNone, proseMixedNone } from './fixtures/spawns/proseNone'
+import { proseReview } from './fixtures/spawns/proseReview'
 import { sampleLoop } from './fixtures/spawns/sampleLoop'
 import { sampleRun } from './fixtures/spawns/sampleRun'
 import { workflowLaunched } from './fixtures/spawns/workflowLaunched'
+import { malformedScripts, workflowScript } from './fixtures/spawns/workflowScript'
 
 const row = (over: Partial<Row>): Row => ({
   seq: 1, id: 't1', tool: 'Bash', key: 'test:bun test', cls: 'test', agent: 'agent-1', turn: 4,
@@ -98,5 +101,29 @@ describe('spawns', () => {
   test('journalPath is the journal inside the run\'s transcript dir, and nothing without one', async () => {
     expect(journalPath(sampleRun())).toBe('/tmp/runs/w3/journal.jsonl')
     expect(journalPath(sampleRun({ dir: null }))).toBe(null)
+  })
+
+  test('a review written in prose counts its severities, so it no longer reads as a bare report', async () => {
+    const line = JSON.stringify({ type: 'result', agentId: 'agent-5', result: proseReview })
+    expect(parseJournal(line)).toEqual([{ kind: 'result', agentId: 'agent-5', outcome: { kind: 'findings', critical: 0, high: 1, medium: 0, low: 1 } }])
+    const named = ['**Critical**: data loss', '[Major] a race', 'Severity: medium', '- Nit: a typo', 'Low: spacing'].join('\n')
+    expect(parseJournal(JSON.stringify({ type: 'result', agentId: 'a', result: named }))[0], 'each spelling maps to one of the four')
+      .toEqual({ kind: 'result', agentId: 'a', outcome: { kind: 'findings', critical: 1, high: 1, medium: 1, low: 2 } })
+    expect(parseJournal(JSON.stringify({ type: 'result', agentId: 'a', result: 'This is critical work and the risk is low.' }))[0], 'a severity word in a sentence is not a finding')
+      .toEqual({ kind: 'result', agentId: 'a', outcome: { kind: 'report', chars: 'This is critical work and the risk is low.'.length } })
+  })
+
+  test('a severity labelled none is not a finding: only the labels with something after them are counted', async () => {
+    const outcome = (text: string): unknown => parseJournal(JSON.stringify({ type: 'result', agentId: 'a', result: text }))[0]
+    expect(outcome(proseMixedNone), 'none, n/a, -, 0 and nothing count nothing')
+      .toEqual({ kind: 'result', agentId: 'a', outcome: { kind: 'findings', critical: 0, high: 1, medium: 0, low: 1 } })
+    expect(outcome(proseAllNone), 'a review that found nothing stays a report')
+      .toEqual({ kind: 'result', agentId: 'a', outcome: { kind: 'report', chars: proseAllNone.length } })
+  })
+
+  test('phasesOf reads the declared phase titles from the meta literal, and never runs the script', async () => {
+    expect(phasesOf(workflowScript)).toEqual(['Implement', 'Review', 'Fix'])
+    expect(phasesOf("export const meta = { phases: ['Plan', 'Build'] }"), 'a phase may be a bare title').toEqual(['Plan', 'Build'])
+    for (const script of malformedScripts) expect(phasesOf(script), `nothing read from ${JSON.stringify(script.slice(0, 30))}`).toEqual([])
   })
 })

@@ -13,8 +13,8 @@ const row = (seq: number, ms: number, chars: number): Row => ({
 
 const pattern = (hits: string[]): Pattern => ({
   id: 'execution:full-suite', category: 'execution', kind: 'Claude keeps running bun test', signature: { tool: 'Bash', key: 'test:bun test' },
-  why: '', alternative: 'run only covering tests', confidence: 0.9, proposal: null, estTokensPerTurn: null, lastDecision: null,
-  hits, decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0,
+  why: '', alternative: 'run only covering tests', confidence: 0.9, proposal: null, estTokensPerTurn: null, lastDecision: null, lean: null,
+  hits, decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0, sent: 0,
 })
 
 describe('evidence', () => {

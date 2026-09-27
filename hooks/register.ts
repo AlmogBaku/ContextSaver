@@ -5,15 +5,16 @@ import { demoForkUsage, demoPatterns, demoRows, demoTurns, demoUsage } from './c
 import { buildPrompt, judgeAliases, merge, parseReply, shouldRun, spentOf, usageOf } from './core/judge'
 import { rowOf } from './core/ledger'
 import type { ToolEvent } from './core/ledger'
-import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce, toStored, usageLine } from './core/patterns'
+import { bandModel, debugDump, fromStored, mergeStored, paneModel, parseRegistry, processLine, reduce, storableOf, usageLine } from './core/patterns'
+import { buildProcessPrompt, isPace, mergeProcess, parseProcessReply, processAliases, shouldProcess } from './core/process'
 import { appendedTo, bulletOnly, mergeSettings, propose } from './core/rules'
-import { activeRuns, agentOf, journalPath, parseJournal, runOf } from './core/spawns'
-import { collapseWs, duration, fit, instructionOf, pctOf } from './core/text'
+import { activeRuns, agentOf, journalPath, parseJournal, phasesOf, runOf } from './core/spawns'
+import { collapseWs, duration, fit, instructionOf, isRecord, pctOf } from './core/text'
 import {
-  AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, JUDGE_MIN_ROWS, MAX_PATTERNS, PANE_ID,
-  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, RUN_REFRESH_MS, STEER_RING_TRIES, STEER_RING_WAIT_MS, initialState,
+  ASK_HEAD_MAX, AUTO_OPEN_MIN_COLUMNS, CLAUDE_MD_HEADING, COMMAND, DEBUG_MAX_DROPPED, DELIVERY_BURST_MS, JUDGE_MIN_ROWS, MAX_PATTERNS, PANE_ID,
+  PANE_INLINE_ROWS, PANE_TITLE, PLUGIN_NAME, RUN_REFRESH_MS, STEER_RING_TRIES, STEER_RING_WAIT_MS, initialState, storeKey,
 } from './core/types'
-import type { Action, Actions, Artifact, Choice, Run, State, Tokens, Ui } from './core/types'
+import type { Action, Actions, Artifact, Choice, ProcessTrigger, Run, State, Tokens, Ui } from './core/types'
 import type { Host } from './host'
 import { Band, Pane } from './ui'
 
@@ -24,6 +25,8 @@ const CHECKING_TEXT = 'ContextSaver: checking this session for waste…'
 const ALREADY_TEXT = 'ContextSaver: already checking'
 const ANSWER_HEAD = 100   // characters of the turn's answer kept as an evidence quote
 const CARD_KIND = 60      // characters of a card's behaviour quoted back in a command's reply
+const PLAN_TOOL = 'ExitPlanMode'   // its accepted result is a plan the process judge can weigh
+const TYPED: readonly string[] = ['composer', 'bridge']   // the origins a person typed: only these count as asks
 const DEMO_CONTEXT = [120_000, 190_000, 250_000, 320_000]   // `/saver demo`: the window filling up to the sample's own 32%, so the trend draws
 
 // What set one judge run going, as the debug log names it: the mid-turn cadence, the turn's end, the
@@ -52,6 +55,10 @@ export function register(on: On): void {
   // The load lane's one failure toast. Its arming survives every failure, so a toast per retry would be a
   // storm — but total silence reads exactly like a check that never fired, so the first failure speaks.
   let armedSpoke = false
+  // The process judge's own lock, beside `forking`: `process.start` lands one clock read after the decision.
+  let processing = false
+  // The loops a journal was re-read for once already: an id no journal names after that is the engine's own.
+  const probed = new Set<string>()
 
   const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -87,6 +94,7 @@ export function register(on: On): void {
   const resetSession = (): void => {
     dispatch({ type: 'reset' })
     armedSpoke = false
+    probed.clear()
   }
 
   // Inside a render hook: fold the action in with no redraw, since a redraw loops.
@@ -97,8 +105,8 @@ export function register(on: On): void {
   const persist = (): void => {
     const engine = host
     if (engine === null) return
-    const key = `patterns:${state.cwd}`
-    const mine = state.patterns.map(toStored)
+    const key = storeKey(state.cwd)
+    const mine = storableOf(state)
     void engine
       .storeGet(key)
       .then(value => engine.storeSet(key, mergeStored(parseRegistry(value), mine)))
@@ -277,6 +285,105 @@ export function register(on: On): void {
   const judgeAt = (now: number, cadence: JudgeReason): void => {
     if (!armedCheck() && shouldRun(state, now)) void runJudge(cadence).catch(() => undefined)
   }
+
+  // A process run that reported nothing: the failure is said, since a process judge that went quiet looks fine.
+  const processFailed = (failure: string): void => {
+    dispatch({ type: 'process.done', patterns: state.patterns, fresh: [], recurred: [], spent: 0, error: failure, returned: 0, kept: 0, dropped: [], usage: null })
+    host?.toast(`ContextSaver: process check failed — ${failure}`)
+  }
+
+  const processOnce = async (engine: Host, trigger: ProcessTrigger): Promise<void> => {
+    const now = await engine.now()
+    const { lastAtMs, lastAtSeq, lastAtTurn } = state.process
+    dispatch({ type: 'process.start', now, seq: state.seq, trigger })
+    // One alias table for the run, as the habit judge keeps: the reply cites the handles this digest printed.
+    const aliases = processAliases(state)
+    let reply: ModelForkResult | null = null
+    let failed: string | null = null
+    try {
+      reply = await engine.fork(buildProcessPrompt(state, aliases))
+    } catch (err) {
+      failed = messageOf(err)
+    }
+    // Every trigger is automatic, none asked for: a cold snapshot is no run and no failure, and the next trigger tries again.
+    if (reply === null) return failed === null ? dispatch({ type: 'process.cold', was: { lastAtMs, lastAtSeq, lastAtTurn } }) : processFailed(failed)
+    try {
+      const { findings, dropped, returned } = parseProcessReply(reply.text, state, aliases)
+      const merged = mergeProcess(state, findings)
+      const reasons = [...dropped, ...merged.evicted.map(id => `${id}: evicted, over MAX_PATTERNS (${MAX_PATTERNS})`)]
+      const kept = findings.length - merged.evicted.length
+      const usage = usageOf(reply.usage)
+      dispatch({
+        type: 'process.done', patterns: merged.patterns, fresh: merged.fresh, recurred: merged.recurred,
+        spent: spentOf(usage), error: null, returned, kept, dropped: reasons, usage,
+      })
+      if (isDebug) engine.log(`ContextSaver process: ${returned} returned · ${kept} kept · ${reasons.length} dropped · from ${trigger}`)
+      persist()
+      return autoOpen(merged.fresh.filter(id => state.cards.includes(id)))
+    } catch (err) {
+      // Whatever went wrong, the run is over: `running` may never stay true.
+      processFailed(messageOf(err))
+    }
+  }
+
+  /**
+   * Starts one detached process run when its gate lets it, answering whether it did.
+   *
+   * @param now the clock the gate reads
+   * @param trigger what asked: a plan, a launch, a pace complaint or the clock
+   * @param before what the run waits for before the digest is built (a launch's declared phases)
+   */
+  const processAt = (now: number, trigger: ProcessTrigger, before?: () => Promise<void>): boolean => {
+    const engine = host
+    if (engine === null || processing || !shouldProcess(state, now, trigger)) return false
+    processing = true
+    void (async () => {
+      try {
+        await before?.()
+        await processOnce(engine, trigger)
+      } finally {
+        processing = false
+      }
+    })().catch(() => undefined)
+    return true
+  }
+
+  // The phases a launch's script declares, read as a literal and never run; a script we cannot read declares none.
+  const readPhases = async (engine: Host, runId: string, value: unknown): Promise<void> => {
+    const path = isRecord(value) && typeof value['scriptPath'] === 'string' ? value['scriptPath'] : null
+    if (path === null) return
+    const script = await engine.readFile(path).catch(() => null)
+    if (script !== null) dispatch({ type: 'run.phases', runId, phases: phasesOf(script) })
+  }
+
+  // A burst of deliveries is said once: a workflow's agents start in a crowd, and a toast each is a storm.
+  const deliveredToast = (now: number): void => {
+    if (now - state.delivery.lastToastAt < DELIVERY_BURST_MS) return
+    host?.toast('ContextSaver: your fixes reached a new subagent')
+    dispatch({ type: 'delivery.toasted', now })
+  }
+
+  // A loop a journal or an `Agent` result named: the engine's own forks (compaction, memory) are named by neither.
+  const isNamed = (agentId: string): boolean => state.loops.some(l => l.id === agentId && (l.run !== null || l.label !== null))
+
+  // The standing fixes an agent the spawn rewrite missed is owed on its first call; a spawn in flight counts as reached.
+  const owedTo = async (engine: Host, agentId: string, now: number): Promise<string[]> => {
+    if (state.standing.length === 0 || state.delivery.pending > 0 || state.delivery.agents.includes(agentId)) return []
+    // A workflow agent calls before the journal that names it was re-read: it is read once more for that id.
+    if (!isNamed(agentId) && !probed.has(agentId) && activeRuns(state, now).length > 0) {
+      probed.add(agentId)
+      await refreshRuns(true).catch(() => undefined)
+    }
+    if (!isNamed(agentId) || state.delivery.agents.includes(agentId)) return []
+    const standing = [...state.standing]
+    dispatch({ type: 'delivery.sent', agentId, now })
+    if (isDebug) engine.log(`ContextSaver delivery: first call → ${agentId}`)
+    deliveredToast(now)
+    return standing
+  }
+
+  // What a typed prompt is kept as for the digest: one line, no control characters, at most ASK_HEAD_MAX.
+  const headOf = (text: string): string => collapseWs(text.replace(/\p{Cc}/gu, ' ')).slice(0, ASK_HEAD_MAX)
 
   const checkNow = (): string => {
     if (forking || state.judge.running) {
@@ -460,7 +567,7 @@ export function register(on: On): void {
       host = engine
       const u = await engine.usage({ breakdown: 'summary' })
       const now = await engine.now()
-      const stored = parseRegistry(await engine.storeGet(`patterns:${e.cwd}`))
+      const stored = parseRegistry(await engine.storeGet(storeKey(e.cwd)))
       state = { ...initialState(e.cwd, u.context.window), patterns: stored.map(fromStored) }
       dispatch({
         type: 'usage',
@@ -547,9 +654,18 @@ export function register(on: On): void {
       void refreshRuns(run !== null).catch(() => undefined)
       // One agentic turn can run for hours, so the cadence is judged here too, not only between turns.
       judgeAt(ended, 'tool.call')
-      const pending = state.notes
-      if (pending.length === 0 || result.deny !== undefined) return result
-      dispatch({ type: 'notes.drained' })
+      // A launch waits for the phases its script declares; a plan counts once the person accepted it.
+      const phases = (): Promise<void> => (run === null ? Promise.resolve() : readPhases(engine, run.id, result.result))
+      const planned = (e.tool as string) === PLAN_TOOL && result.deny === undefined && result.isError !== true
+      const launched = run !== null && processAt(ended, 'workflow', phases)
+      if (run !== null && !launched) void phases().catch(() => undefined)
+      if (!launched && !(planned && processAt(ended, 'plan'))) processAt(ended, 'clock')
+      if (result.deny !== undefined) return result
+      // A one-time note is the main loop's: the orchestrator is who re-plans, and a subagent is a random reader.
+      const main = e.agentId === undefined
+      const pending = main ? state.notes : await owedTo(engine, e.agentId ?? '', ended)
+      if (pending.length === 0) return result
+      if (main) dispatch({ type: 'notes.drained' })
       return { ...result, context: [...(result.context ?? []), ...pending] }
     } catch {
       return result
@@ -589,9 +705,32 @@ export function register(on: On): void {
       })
       if (seen !== null) dispatch({ type: 'usage', usage: { window: seen.context.window, tokens: seen.context.tokens, percent: seen.context.percent }, now })
       judgeAt(now, 'turn.complete')
+      processAt(now, 'clock')
       return next(e)
     } catch {
       return next(e)
+    }
+  })
+
+  // The standing habit fixes ride a new subagent's prompt; the engine's own forks inherit the parent's context.
+  on('agent.spawn', async ($, e, next) => {
+    const standing = [...state.standing]
+    if (host === null || e.fork || standing.length === 0) return next(e)
+    dispatch({ type: 'delivery.pending', delta: 1 })
+    try {
+      const started = await next({ ...e, prompt: `${e.prompt}\n\n${standing.join('\n')}` })
+      try {
+        const now = await host.now()
+        if (started.agentId === undefined) return started
+        dispatch({ type: 'delivery.sent', agentId: started.agentId, now })
+        if (isDebug) host.log(`ContextSaver delivery: spawn rewrite → ${started.agentId}`)
+        deliveredToast(now)
+      } catch {
+        // the subagent started with the fixes either way
+      }
+      return started
+    } finally {
+      dispatch({ type: 'delivery.pending', delta: -1 })
     }
   })
 
@@ -609,6 +748,13 @@ export function register(on: On): void {
     try {
       // `origin` is the engine's to stamp; read it defensively so an unstamped submission still carries the texts.
       if (e.origin?.kind === 'plugin' || e.text.trimStart().startsWith(`/${COMMAND.name}`)) return next(e)
+      // Only what the person typed is an ask: a task notification in the same words is nobody complaining.
+      if (host !== null && TYPED.includes(e.origin?.kind ?? '')) {
+        const now = await host.now()
+        const pace = isPace(e.text)
+        dispatch({ type: 'ask', ask: { turn: e.turnId !== undefined ? state.turn : state.turn + 1, at: now, head: headOf(e.text), pace } })
+        if (pace) processAt(now, 'pace')
+      }
       const extra = [...state.notes, ...state.standing.filter(text => !state.notes.includes(text))]
       if (extra.length > 0) dispatch({ type: 'notes.drained' })
       const carried = extra.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...extra] }
@@ -673,7 +819,9 @@ export function register(on: On): void {
       const [sub = ''] = args.split(/\s+/)
       if (sub === '' || sub === 'rules') {
         await togglePane()
-        return { text: state.paneOpen ? 'ContextSaver pane shown' : 'ContextSaver pane hidden' }
+        const process = processLine(state)
+        const shown = state.paneOpen ? 'ContextSaver pane shown' : 'ContextSaver pane hidden'
+        return { text: process === null ? shown : `${shown} · ${process}` }
       }
       if (sub === 'check') return { text: checkNow() }
       if (sub === 'fix') {

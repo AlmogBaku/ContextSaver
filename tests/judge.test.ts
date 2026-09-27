@@ -4,6 +4,7 @@ import { JUDGE_PROMPT, buildPrompt, costOf, judgeAliases, merge, parseReply, sho
 import { debugDump } from '../hooks/core/patterns'
 import { ALTERNATIVE_MAX, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, KIND_MAX, MAX_PATTERNS } from '../hooks/core/types'
 import type { Row } from '../hooks/core/types'
+import { burstRows } from './fixtures/blocks/burstRows'
 import { judgeFinding } from './fixtures/judge/judgeFinding'
 import { judgePattern } from './fixtures/judge/judgePattern'
 import { judgeState } from './fixtures/judge/judgeState'
@@ -512,6 +513,40 @@ describe('judge', () => {
     const noSignature = rawFinding()
     delete noSignature['signature']
     expect(parseReply(replyText([noSignature]), judgeState()).findings).toEqual([])
+  })
+
+  // The window the LEDGER renders and the one `parseReply` checks are the same list: a burst from one agent
+  // used to push the main loop's rows out of both, so the suite runs before it could not be cited at all.
+  test('an older main-loop row the burst-capped LEDGER renders can be cited, and parseReply accepts it', ($, _on) => {
+    const state = judgeState({ rows: burstRows(), seq: 300 })
+    const prompt = buildPrompt(state)
+    expect(prompt, 'the row is rendered in full').toContain('r3 | Bash | test:bun test | test | main |')
+    expect(prompt).toContain('r6 | Bash | test:bun test | test | main |')
+    const parsed = parseReply(replyText([rawFinding()]), state)
+    expect(parsed.dropped).toEqual([])
+    expect(parsed.findings[0]?.evidence).toEqual(['toolu_b3', 'toolu_b6'])
+    expect(parseReply(replyText([rawFinding({ evidence: ['r100', 'r101'] })]), state).findings,
+      'a burst row the cap folded is not citable').toEqual([])
+  })
+
+  test('the compaction exemption covers reading and re-deriving only, and a correction is a first occurrence', ($, _on) => {
+    expect(JUDGE_PROMPT, 'a compaction excuses re-reading and re-deriving, never repeated work')
+      .toContain('- Same side of a compaction, for reading only. TURNS lists the turns where a compaction happened; what it dropped must be re-acquired, so a read or a re-derivation after one is not a repeat of one before it. Repeated work is: a check, a build, a review round or an agent run again across a compaction counts on both sides.')
+    expect(JUDGE_PROMPT).toContain('- A re-read, or re-deriving what was settled, that a compaction made necessary. Compaction, prompt-cache reads and the host\'s own truncation are the harness working as designed; work repeated across a compaction is not excused by it.')
+    expect(JUDGE_PROMPT).not.toContain('Count only occurrences after the last compaction.')
+    expect(JUDGE_PROMPT, 'the process cue does not call what the exemption excuses waste').not.toContain('re-deriving after a compaction what was settled before it')
+    expect(JUDGE_PROMPT).toContain('- process — many tiny commits or amends on one change; work declared done with no check run. Not: docs- or config-only changes with no check to run, or a check the environment cannot run.')
+    expect(JUDGE_PROMPT, 'a correction or a saved feedback memory counts as the first occurrence')
+      .toContain('- A correction is the first occurrence. When the user corrected a behaviour this session, or a saved feedback memory in the transcript names it, that correction counts as its first occurrence: one unexcused occurrence after it is a finding, and `why` names the correction.')
+  })
+
+  test('parseReply keeps a one-handle finding whose why names the correction it repeats', ($, _on) => {
+    const corrected = rawFinding({ evidence: ['r6'], why: 'The user corrected the full-suite runs at turn 3; the suite ran in full again at turn 6.' })
+    expect(parseReply(replyText([corrected]), judgeState()).findings.length).toBe(1)
+    const feedback = rawFinding({ evidence: ['r6'], why: 'A saved feedback memory asks for scoped test runs; the suite ran in full at turn 6.' })
+    expect(parseReply(replyText([feedback]), judgeState()).findings.length).toBe(1)
+    expect(parseReply(replyText([rawFinding({ evidence: ['r6'], why: 'The suite ran in full at turn 6.' })]), judgeState()).findings,
+      'one handle with neither intent nor a correction is still one occurrence').toEqual([])
   })
 
   test('parseReply discards a signature finding that also cites a turn handle', ($, _on) => {

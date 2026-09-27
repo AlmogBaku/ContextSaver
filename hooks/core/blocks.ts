@@ -1,6 +1,6 @@
 import { SPAWN_SINK, agentAliases, aliasOf, pairKey, sinks } from './evidence'
 import { median } from './text'
-import { AGENTS_ROWS, JUDGE_LEDGER_ROWS } from './types'
+import { AGENTS_ROWS, FOLD_LINES, JUDGE_AGENT_ROWS, JUDGE_LEDGER_ROWS, MAIN_AGENT } from './types'
 import type { CommandClass, Folded, Loop, Outcome, Row, Run, Sink, State, TurnStat } from './types'
 
 // What one of the two blocks measures: wall time in milliseconds, or in-context size in characters.
@@ -21,6 +21,21 @@ export type KeyStat = {
 }
 
 const sum = (xs: number[]): number => xs.reduce((a, b) => a + b, 0)
+
+/** The rows the LEDGER renders in full and `parseReply` may cite: the newest JUDGE_LEDGER_ROWS, oldest first, with no one agent loop holding more than JUDGE_AGENT_ROWS of them, so a burst from one agent cannot push the main loop's rows out. */
+export const citableRows = (state: { rows: readonly Row[] }): Row[] => {
+  const held = new Map<string, number>()
+  const kept: Row[] = []
+  for (let i = state.rows.length - 1; i >= 0 && kept.length < JUDGE_LEDGER_ROWS; i -= 1) {
+    const row = state.rows[i]
+    if (row === undefined) continue
+    const n = held.get(row.agent) ?? 0
+    if (row.agent !== MAIN_AGENT && n >= JUDGE_AGENT_ROWS) continue
+    held.set(row.agent, n + 1)
+    kept.push(row)
+  }
+  return kept.reverse()
+}
 
 const unique = (xs: string[]): string[] => [...new Set(xs)]
 
@@ -186,9 +201,9 @@ export const sinksBlock = (rows: readonly Row[], measure: Measure, loops: readon
     `total ${amountCell(where.total, measure)}`,
     ...where.sinks.map(s => sinkLine(s, where.total, measure)),
     'largest rows:',
-    // Only rows the LEDGER window still shows: `parseReply` validates evidence against exactly those, so
-    // naming an older row here would offer the judge an id its own citation of it is discarded for.
-    ...largestLines(rows.slice(Math.max(0, rows.length - JUDGE_LEDGER_ROWS)), measure),
+    // Only rows the LEDGER renders in full: `parseReply` validates evidence against exactly those, so
+    // naming another row here would offer the judge an id its own citation of it is discarded for.
+    ...largestLines(citableRows({ rows }), measure),
   ])
 }
 
@@ -229,11 +244,18 @@ const factsLine = (state: State): string => {
 export const turnsBlock = (state: State): string =>
   [block(state.turns.map(turnLine)), factsLine(state)].join('\n')
 
-/** LEDGER: folded summaries of the older rows — the rows past the cap among them — then the newest JUDGE_LEDGER_ROWS in ascending order; `aliases` names the loops too, so a loop AGENTS lists and a row LEDGER shows agree. */
+// The `~` lines, largest by characters first: the top FOLD_LINES in full, the rest counted on one line.
+const foldLines = (rows: Row[], folded: Readonly<Record<string, Folded>>): string[] => {
+  const stats = aggregate(rows, folded)
+  const lines = stats.slice(0, FOLD_LINES).map(s => summaryLine(s.tool, s.key, s.count, s.chars))
+  return stats.length > FOLD_LINES ? [...lines, `~ ×${stats.length - FOLD_LINES} more`] : lines
+}
+
+/** LEDGER: folded summaries of the rows `citableRows` leaves out — the rows past the cap among them — then the citable rows in ascending order; `aliases` names the loops too, so a loop AGENTS lists and a row LEDGER shows agree. */
 export const ledgerBlock = (state: State, aliases: ReadonlyMap<string, string> = agentAliases(state.rows, state.loops)): string => {
-  const cut = Math.max(0, state.rows.length - JUDGE_LEDGER_ROWS)
-  const older = aggregate(state.rows.slice(0, cut), state.folded).map(s => summaryLine(s.tool, s.key, s.count, s.chars))
-  return block([...older, ...state.rows.slice(cut).map(row => ledgerLine(row, aliases))])
+  const citable = citableRows(state)
+  const shown = new Set(citable)
+  return block([...foldLines(state.rows.filter(r => !shown.has(r)), state.folded), ...citable.map(row => ledgerLine(row, aliases))])
 }
 
 const minutes = (ms: number): string => `${(ms / 60_000).toFixed(1)}m`
@@ -289,3 +311,4 @@ export const agentsBlock = (state: State, aliases: ReadonlyMap<string, string> =
     ...state.loops.slice(cut).map(l => loopLine(state, aliases, l)),
   ])
 }
+

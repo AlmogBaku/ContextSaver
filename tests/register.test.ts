@@ -2,10 +2,11 @@ import type { ModelForkResult, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { AUTO_OPEN_MIN_COLUMNS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_ROWS, RUN_FRESH_MS, RUN_REFRESH_MS, STEER_RING_TRIES, STEER_RING_WAIT_MS } from '../hooks/core/types'
+import { AUTO_OPEN_MIN_COLUMNS, DELIVERY_BURST_MS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_ROWS, RUN_FRESH_MS, RUN_REFRESH_MS, STEER_RING_TRIES, STEER_RING_WAIT_MS } from '../hooks/core/types'
 import { assistant } from './fixtures/adopt/assistant'
 import { bashUse } from './fixtures/adopt/bashUse'
 import { prompt } from './fixtures/adopt/prompt'
+import { processReply, rawProcessFinding } from './fixtures/process/processReply'
 import { rawFinding } from './fixtures/judge/rawFinding'
 import { replyText } from './fixtures/judge/replyText'
 import { agentAnswer } from './fixtures/register/agentAnswer'
@@ -20,12 +21,21 @@ import { paneRender } from './fixtures/register/paneRender'
 import { promptSubmit } from './fixtures/register/promptSubmit'
 import { saverRun } from './fixtures/register/saverRun'
 import { SESSION } from './fixtures/register/session'
+import { spawnInput } from './fixtures/register/spawnInput'
 import { startsSaver } from './fixtures/register/startsSaver'
 import { storedSuite } from './fixtures/register/storedSuite'
 import { usageAnswer } from './fixtures/register/usageAnswer'
 import { workflowAnswer } from './fixtures/register/workflowAnswer'
+import { workflowScript } from './fixtures/spawns/workflowScript'
 
 const SUITE_ID = 'execution:full-suite-after-each-edit'
+const PROCESS_ID = 'process:review-per-lane'
+const PROCESS_REPLY = processReply([rawProcessFinding({ evidence: ['run:w3'] })])
+const KILL_TEXT = 'Stop this behaviour for the rest of the session'
+const REPLAN_TEXT = 'Change the remaining work:'
+const WORKFLOW_CALL = { tool: 'Workflow', name: 'proxy-rewrite', script: 'export default async () => {}' } as const
+const PLAN_OK = { result: { plan: 'the plan' }, text: 'User has approved your plan' }
+const PLAN_DENIED = { deny: 'the user kept planning' }
 const CALL_MS = 8_000
 const OUT_CHARS = 9_000
 const TURN_USAGE = { input_tokens: 20_000, output_tokens: 1_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 1_000, model: 'claude-opus-4-6' }
@@ -54,6 +64,14 @@ const transcriptOf = (steps: number): SessionMessage[] =>
 const LONG_TRANSCRIPT = transcriptOf(JUDGE_MIN_NEW_ROWS)
 const JOINED_CALLS = 12
 
+// The process judge's prompt is told apart from the habit judge's by its digest header.
+const isProcessPrompt = (text: string): boolean => text.includes('## PROCESS DIGEST')
+
+// What a call inside a subagent's loop looks like to the hooks: the same call, with the loop's id on it.
+const inLoop = (agentId: string): never => ({ tool: 'Bash', command: 'ls', agentId }) as never
+
+const contextOf = (result: { context?: readonly string[] }): string => (result.context ?? []).join('\n')
+
 // Everything a plugin tree draws, flattened to the strings a person would read.
 const textOf = (value: unknown): string => {
   if (typeof value === 'string') return value
@@ -77,7 +95,7 @@ const runTurns = async ($: Engine, turns: number, callsPerTurn: number): Promise
 
 describe('register', () => {
   test('session.start binds the host, registers /saver, loads the registry and samples the usage', async ($, on) => {
-    const world = startsSaver(on, { 'patterns:/work': [storedSuite] })
+    const world = startsSaver(on, { 'patterns.v5:/work': [storedSuite] })
 
     await $.session.start(SESSION)
 
@@ -88,6 +106,14 @@ describe('register', () => {
     expect(debug.text).toContain('overhead memory 1200 · mcp 3400 · agents 800')
     expect(debug.text).toContain(`${SUITE_ID} · hits 0`)
     expect(debug.text).toContain('previous kill')
+  })
+
+  test('0.5 starts fresh: a 0.4 registry under the old key loads no pattern', async ($, on) => {
+    startsSaver(on, { 'patterns:/work': [storedSuite] })
+
+    await $.session.start(SESSION)
+
+    expect((await $.command.run(saverRun('debug'))).text, 'the 0.4 entry is never read').not.toContain(SUITE_ID)
   })
 
   test('session.start adopts the transcript of a session the plugin joined late', async ($, on) => {
@@ -483,7 +509,7 @@ describe('register', () => {
     await $.ui.press({ plugin: 'contextsaver', key: `card:${SUITE_ID}:keep` })
     await world.clock.settle()
 
-    expect(world.store['patterns:/work'], 'the decision was persisted for the next session')
+    expect(world.store['patterns.v5:/work'], 'the decision was persisted for the next session')
       .toEqual([expect.objectContaining({ id: SUITE_ID, lastDecision: 'keep' })])
 
     await $.command.run(CLEAR_RUN)
@@ -587,7 +613,9 @@ describe('register', () => {
     await $.turn.start({ text: 'rewrite the proxy', turnId: 't1' })
     await $.tool.call({ tool: 'Workflow', name: 'proxy-rewrite', script: 'export default async () => {}' })
     await world.clock.settle()
-    expect(reads, 'the launch reads the journal at once').toEqual(['/tmp/runs/w3/journal.jsonl'])
+    expect(reads, 'the launch reads its script\'s phases and the journal at once').toEqual(['/tmp/runs/w3/workflow.ts', '/tmp/runs/w3/journal.jsonl'])
+    reads.splice(0, 1)
+    prompts.splice(0, prompts.length)   // the launch's own process run: the habit judge's prompt is read below
 
     await $.turn.complete({ answer: 'implemented', durationMs: 300_000, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'agent-1', usage: TURN_USAGE })
     await $.tool.call({ tool: 'Bash', command: 'bun test' })
@@ -1112,7 +1140,7 @@ describe('register', () => {
   // What a real reload showed: the store handed back a pattern nobody had decided, the judge re-reported it
   // with fresh evidence, and the pane stayed empty — `/saver debug` read `1 returned · 1 kept · cards 0`.
   test('a waster the store remembered undecided is carded again when the judge cites it', async ($, on) => {
-    const world = startsSaver(on, { 'patterns:/work': [{ ...storedSuite, lastDecision: null }] })
+    const world = startsSaver(on, { 'patterns.v5:/work': [{ ...storedSuite, lastDecision: null }] })
     on('tool.call', () => bashAnswer(OUT_CHARS))
     on('model.fork', () => ({ value: forkAnswer(SUITE_REPLY) }))
     on('ui.render', ($, e) => {
@@ -1299,5 +1327,259 @@ describe('register', () => {
     expect(debug.text).toContain(`written 2: ${SUITE_ID}:claude-md, ${LOG_ID}:claude-md`)
     expect(debug.text, 'the tried rule is the sentence the note already sent, so it rides once').toContain('standing 2')
     expect(textOf(await $.ui.render(paneRender())), 'a rule once written or tried is not offered again').not.toContain('Write')
+  })
+
+  // Run 1 turn of four suite runs, check, and Fix card 1: the standing habit fix every later test starts from.
+  const fixedSuite = async ($: Engine, world: ReturnType<typeof startsSaver>): Promise<void> => {
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+    await $.command.run(saverRun('fix 1'))
+  }
+
+  test('a one-time note waits for the main loop: a subagent call leaves it queued and the next main-loop call carries it', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', ($, e) => ({ value: isProcessPrompt(e.prompt) ? null : forkAnswer(SUITE_REPLY) }))
+
+    await fixedSuite($, world)
+    const sub = await $.tool.call(inLoop('agent-5'))
+    expect(contextOf(sub), 'a loop nobody named is no place for the user\'s note').not.toContain(KILL_TEXT)
+    expect((await $.command.run(saverRun('debug'))).text).toContain('notes 1 · standing 1')
+
+    const main = await $.tool.call({ tool: 'Bash', command: 'ls' })
+    expect(contextOf(main)).toContain(KILL_TEXT)
+    expect((await $.command.run(saverRun('debug'))).text).toContain('notes 0 · standing 1')
+  })
+
+  test('a denied plan forks nothing and an accepted one forks one process run', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    let accepted = false
+    on('tool.call', ($, e) => ((e.tool as string) === 'ExitPlanMode' ? (accepted ? PLAN_OK : PLAN_DENIED) : bashAnswer(OUT_CHARS)) as never)
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: forkAnswer(processReply([])) }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'plan it', turnId: 't1' })
+    await $.tool.call({ tool: 'ExitPlanMode', plan: 'the plan' } as never)
+    await world.clock.settle()
+    expect(prompts.filter(isProcessPrompt), 'the person said no to the plan').toHaveLength(0)
+
+    accepted = true
+    await $.tool.call({ tool: 'ExitPlanMode', plan: 'the plan' } as never)
+    await world.clock.settle()
+    expect(prompts.filter(isProcessPrompt)).toHaveLength(1)
+    expect(world.toasts.join(' '), 'a run that found nothing stays quiet').not.toContain('process check failed')
+  })
+
+  test('a Workflow launch reads its declared phases and forks once however fast a second launch follows', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    const reads: string[] = []
+    on('tool.call', ($, e) => (e.tool === 'Workflow' ? workflowAnswer : bashAnswer(OUT_CHARS)))
+    on('fs.read', ($, e) => {
+      reads.push(e.path)
+      return { value: e.path.endsWith('workflow.ts') ? workflowScript : journalLines }
+    })
+    // The first run is still thinking when the second launch lands.
+    let release = (): void => undefined
+    const thinking = new Promise<void>(resolve => { release = resolve })
+    on('model.fork', async ($, e) => {
+      prompts.push(e.prompt)
+      await thinking
+      return { value: isProcessPrompt(e.prompt) ? forkAnswer(PROCESS_REPLY) : null }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy', turnId: 't1' })
+    await $.tool.call(WORKFLOW_CALL)
+    await world.clock.settle()
+    await $.tool.call(WORKFLOW_CALL)
+    release()
+    await world.clock.settle()
+
+    const forked = prompts.filter(isProcessPrompt)
+    expect(forked, 'one process run at a time').toHaveLength(1)
+    expect(reads).toContain('/tmp/runs/w3/workflow.ts')
+    expect(forked[0], 'the script\'s declared phases are in the digest').toContain('phases Implement → Review → Fix')
+    const drawn = textOf(await $.ui.render(paneRender()))
+    expect(drawn).toContain('Process · review per lane')
+    expect(drawn).toContain('Implement every lane, review the branch once, fix once')
+    expect((await $.command.run(saverRun(''))).text, '/saver says what the process judge has cost').toContain('process 1 run · 1.3k tokens')
+  })
+
+  test('a process Fix re-plans once on the main loop, never reaches a subagent, and offers a rule', async ($, on) => {
+    const world = startsSaver(on)
+    const spawned: string[] = []
+    on('tool.call', ($, e) => (e.tool === 'Workflow' ? workflowAnswer : bashAnswer(OUT_CHARS)))
+    on('fs.read', ($, e) => ({ value: e.path.endsWith('workflow.ts') ? workflowScript : journalLines }))
+    on('model.fork', ($, e) => ({ value: isProcessPrompt(e.prompt) ? forkAnswer(PROCESS_REPLY) : null }))
+    on('agent.spawn', ($, e) => {
+      spawned.push(e.prompt)
+      return { model: 'claude-sonnet-4-5', agentId: 'agent-7' }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy', turnId: 't1' })
+    await $.tool.call(WORKFLOW_CALL)
+    await world.clock.settle()
+    await $.ui.render(paneRender())
+    await $.ui.press({ plugin: 'contextsaver', key: `card:${PROCESS_ID}:kill` })
+    await world.clock.settle()
+
+    expect((await $.command.run(saverRun('debug'))).text).toContain('notes 1 · standing 0')
+    await $.agent.spawn(spawnInput('review the branch'))
+    expect(spawned[0], 'a re-plan is the orchestrator\'s alone').toBe('review the branch')
+    expect(contextOf(await $.tool.call(inLoop('agent-1'))), 'a workflow agent is not the orchestrator').not.toContain(REPLAN_TEXT)
+    expect(contextOf(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toContain(REPLAN_TEXT)
+    expect(contextOf(await $.tool.call({ tool: 'Bash', command: 'ls' })), 'once').not.toContain(REPLAN_TEXT)
+    expect(textOf(await $.ui.render(paneRender())), 'the lean way is offered as a rule for the next session').toContain('Write')
+  })
+
+  test('a cold snapshot on an accepted plan is not a failure: no toast, no run counted, and the next plan forks again', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    on('tool.call', ($, e) => ((e.tool as string) === 'ExitPlanMode' ? PLAN_OK : bashAnswer(OUT_CHARS)) as never)
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: prompts.filter(isProcessPrompt).length === 1 ? null : forkAnswer(processReply([])) }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'plan it', turnId: 't1' })
+    await $.tool.call({ tool: 'ExitPlanMode', plan: 'the plan' } as never)
+    await world.clock.settle()
+    expect(prompts.filter(isProcessPrompt), 'the accepted plan forked').toHaveLength(1)
+    expect(world.toasts.join(' '), 'a snapshot not yet warm is not a failure to report').not.toContain('process check failed')
+    const debug = (await $.command.run(saverRun('debug'))).text
+    expect(debug, 'no run counted, the trigger not spent').toContain('process runs 0 · spent 0 tokens · backoff 1 · running false · lastAt turn 0 / row 0 / 0ms · error -')
+
+    await $.tool.call({ tool: 'ExitPlanMode', plan: 'the plan' } as never)
+    await world.clock.settle()
+    expect(prompts.filter(isProcessPrompt), 'the next plan forks again').toHaveLength(2)
+    expect((await $.command.run(saverRun('debug'))).text).toContain('process runs 1')
+  })
+
+  test('a process fork that fails says so in a toast and leaves no card', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', ($, e) => (e.tool === 'Workflow' ? workflowAnswer : bashAnswer(OUT_CHARS)))
+    on('fs.read', ($, e) => ({ value: e.path.endsWith('workflow.ts') ? workflowScript : journalLines }))
+    on('model.fork', ($, e) => {
+      if (isProcessPrompt(e.prompt)) throw new Error('fork refused')
+      return { value: null }
+    })
+
+    await $.session.start(SESSION)
+    await $.turn.start({ text: 'rewrite the proxy', turnId: 't1' })
+    await $.tool.call(WORKFLOW_CALL)
+    await world.clock.settle()
+
+    expect(world.toasts.join(' ')).toContain('ContextSaver: process check failed')
+    expect(textOf(await $.ui.render(paneRender()))).not.toContain('Process ·')
+    expect((await $.command.run(saverRun('debug'))).text, 'the lock is released').toContain('running false')
+  })
+
+  test('only a typed pace complaint forks a process run, and what was typed is never stored or printed', async ($, on) => {
+    const world = startsSaver(on)
+    const prompts: string[] = []
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('model.fork', ($, e) => {
+      prompts.push(e.prompt)
+      return { value: forkAnswer(processReply([])) }
+    })
+
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'Bash', command: 'ls' })
+    await $.prompt.submit({ text: 'this is taking forever', wait: false, origin: { kind: 'task-notification' } })
+    await world.clock.settle()
+    expect(prompts.filter(isProcessPrompt), 'a notification is not the person complaining').toHaveLength(0)
+
+    await $.prompt.submit(promptSubmit('this is taking forever'))
+    await world.clock.settle()
+    const forked = prompts.filter(isProcessPrompt)
+    expect(forked).toHaveLength(1)
+    expect(forked[0], 'the fork reads what the person typed').toContain('this is taking forever')
+    const debug = (await $.command.run(saverRun('debug'))).text
+    expect(debug).toContain('asks 1 · pace 1')
+    expect(debug).not.toContain('taking forever')
+    expect(JSON.stringify(world.store)).not.toContain('taking forever')
+  })
+
+  test('a finding that quotes what was typed is stored without the quote, and one that does not is stored as it was', async ($, on) => {
+    const world = startsSaver(on)
+    const typed = 'this is taking forever and nobody asked for five review rounds'
+    const quote = 'The user wrote "Taking   FOREVER and nobody asked for five review" at turn 2.'
+    const habitQuoting = rawFinding({ evidence: ['r1', 'r4'], why: quote })
+    const kindQuoting = rawFinding({ id: 'execution:rounds', kind: 'Claude keeps running what nobody asked for five review rounds of', evidence: ['r2', 'r3'] })
+    const processQuoting = rawProcessFinding({ evidence: ['turn:1'], why: quote, cost_tokens: 1_000, cost_ms: 1_000 })
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('model.fork', ($, e) => ({
+      value: forkAnswer(isProcessPrompt(e.prompt) ? processReply([processQuoting]) : replyText([habitQuoting, kindQuoting, LOG_FINDING])),
+    }))
+
+    await $.session.start(SESSION)
+    await runTurns($, 1, 4)
+    await $.prompt.submit(promptSubmit(typed))
+    await world.clock.settle()
+    await $.command.run(saverRun('check'))
+    await world.clock.settle()
+
+    const stored = world.store['patterns.v5:/work'] as Array<Record<string, unknown>>
+    expect(stored.map(p => p['id']).sort(), 'a quote in the behaviour keeps the whole pattern session-only')
+      .toEqual([LOG_ID, SUITE_ID, PROCESS_ID].sort())
+    expect(JSON.stringify(world.store).toLowerCase(), 'no copy of what was typed').not.toContain('nobody asked for five')
+    expect(stored.find(p => p['id'] === SUITE_ID)?.['why'], 'a quoting why is blanked').toBe('')
+    expect(stored.find(p => p['id'] === PROCESS_ID)?.['why'], 'a process why is never stored').toBe('')
+    expect(stored.find(p => p['id'] === LOG_ID), 'a pattern that quotes nothing is stored as the judge wrote it')
+      .toMatchObject({ kind: LOG_FINDING['kind'], why: LOG_FINDING['why'], alternative: LOG_FINDING['alternative'] })
+  })
+
+  test('the spawn rewrite carries the standing fixes, and the agent it reached gets nothing more and counts once', async ($, on) => {
+    const world = startsSaver(on)
+    const spawned: string[] = []
+    on('tool.call', () => bashAnswer(OUT_CHARS))
+    on('model.fork', ($, e) => ({ value: isProcessPrompt(e.prompt) ? null : forkAnswer(SUITE_REPLY) }))
+    on('agent.spawn', ($, e) => {
+      spawned.push(e.prompt)
+      return { model: 'claude-sonnet-4-5', agentId: 'agent-7' }
+    })
+
+    await fixedSuite($, world)
+    await $.tool.call({ tool: 'Bash', command: 'ls' })   // the one-time note is spent on the main loop
+    const spoken = world.toasts.length
+    await $.agent.spawn(spawnInput('explore src'))
+    expect(spawned[0]).toContain('explore src')
+    expect(spawned[0], 'the subagent starts with the fix').toContain(KILL_TEXT)
+    expect(contextOf(await $.tool.call(inLoop('agent-7'))), 'reached already').not.toContain(KILL_TEXT)
+    expect(textOf(await $.ui.render(paneRender()))).toContain('sent ×1')
+    expect(world.toasts.slice(spoken).filter(t => t.includes('reached'))).toHaveLength(1)
+  })
+
+  test('a workflow agent the rewrite missed gets the standing fixes on its first call only, and an engine fork never does', async ($, on) => {
+    const world = startsSaver(on)
+    on('tool.call', ($, e) => (e.tool === 'Workflow' ? workflowAnswer : bashAnswer(OUT_CHARS)))
+    on('fs.read', ($, e) => ({ value: e.path.endsWith('workflow.ts') ? workflowScript : journalLines }))
+    on('model.fork', ($, e) => ({ value: isProcessPrompt(e.prompt) ? forkAnswer(processReply([])) : forkAnswer(SUITE_REPLY) }))
+
+    await fixedSuite($, world)
+    await $.tool.call({ tool: 'Bash', command: 'ls' })
+    await $.turn.start({ text: 'rewrite the proxy', turnId: 't2' })
+    await $.tool.call(WORKFLOW_CALL)
+    await world.clock.settle()
+    const spoken = world.toasts.length
+
+    expect(contextOf(await $.tool.call(inLoop('agent-1'))), 'its first call carries the fix').toContain(KILL_TEXT)
+    expect(contextOf(await $.tool.call(inLoop('agent-1'))), 'its second does not').not.toContain(KILL_TEXT)
+    expect(contextOf(await $.tool.call(inLoop('agent-2')))).toContain(KILL_TEXT)
+    expect(contextOf(await $.tool.call(inLoop('compact-fork'))), 'no journal names an engine fork').not.toContain(KILL_TEXT)
+    expect(world.toasts.slice(spoken).filter(t => t.includes('reached')), 'one toast for the burst').toHaveLength(1)
+    await world.clock.advance(DELIVERY_BURST_MS)
+    expect(textOf(await $.ui.render(paneRender()))).toContain('sent ×2')
   })
 })

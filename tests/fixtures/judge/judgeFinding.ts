@@ -12,5 +12,6 @@ export const judgeFinding = (over: Partial<Finding> = {}): Finding => ({
   confidence: 0.92,
   estTokensPerTurn: null,
   proposal: null,
+  lean: null,
   ...over,
 })

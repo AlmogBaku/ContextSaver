@@ -1,5 +1,6 @@
-// Dev replay (`bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--summary | --prompt | --judge]`):
+// Dev replay (`bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--summary | --prompt | --judge] [--process]`):
 // feeds a recorded session through `reduce` and prints what the judge would have seen, and with `--judge` what it says.
+// `--process` does the same for the process judge: its prompt's size against the cap, and with `--judge` its cards.
 // Not plugin code: outside tsconfig, never imported by hooks. Streams every file line by line (a main transcript reaches 16 MB).
 //
 // Spec §11.5. Facts of the transcript shape this reads, found in the acceptance corpus:
@@ -12,7 +13,8 @@
 // - a `<task-notification>` or an interrupt starts a turn of Claude's own, so its `turn_duration` lands with no prompt
 //   before it: TURNS then shows two lines with one turn number, as the plugin itself would (no prompt.submit fired).
 // Output: `--prompt` writes the prompt itself to stdout (for piping); the other modes a JSON array, one object per
-// checkpoint; the readable blocks and the judge's answer go to stderr.
+// checkpoint; the readable blocks and the judge's answer go to stderr. `--prompt` prints the whole prompt, the ASKS
+// heads of typed prompts included: dev only, never a plugin path.
 import { spawnSync } from 'node:child_process'
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -24,8 +26,11 @@ import { agentAliases } from '../hooks/core/evidence.ts'
 import { buildPrompt, merge, parseReply } from '../hooks/core/judge.ts'
 import { rowOf } from '../hooks/core/ledger.ts'
 import { reduce } from '../hooks/core/patterns.ts'
-import { agentOf, parseJournal, runOf } from '../hooks/core/spawns.ts'
-import { initialState } from '../hooks/core/types.ts'
+import { buildProcessPrompt, isPace, mergeProcess, parseProcessReply, processAliases } from '../hooks/core/process.ts'
+import { agentOf, parseJournal, phasesOf, runOf } from '../hooks/core/spawns.ts'
+import { collapseWs } from '../hooks/core/text.ts'
+import { ASK_HEAD_MAX, DIGEST_MAX_CHARS, initialState } from '../hooks/core/types.ts'
+import type { ProcessFinding } from '../hooks/core/process.ts'
 import type { Action, Finding, JournalEntry, State, Tokens, TurnEnd } from '../hooks/core/types.ts'
 
 const PROJECTS = join(homedir(), '.claude', 'projects')
@@ -37,7 +42,8 @@ type Rec = Record<string, unknown>
 
 // What the files yield, sorted by time before any of it reaches the reducer.
 type Ev =
-  | { t: number; kind: 'turn.start' }
+  | { t: number; kind: 'turn.start'; text: string }
+  | { t: number; kind: 'compact' }
   | { t: number; kind: 'row'; useAt: number; tool: string; id: string; input: Rec; text: string; isError: boolean; result: unknown; agentId: string | null }
   | { t: number; kind: 'turn.end'; ms: number; tokens: Tokens; answer: string; error: boolean; aborted: boolean }
   | { t: number; kind: 'loop.start'; agentId: string; description: string; model: string | null }
@@ -47,7 +53,7 @@ type Journal = { runId: string; entries: JournalEntry[]; agents: Set<string> }
 
 type Mode = 'summary' | 'prompt' | 'judge'
 
-const ORDER: Record<Ev['kind'], number> = { 'turn.start': 0, 'loop.start': 1, row: 2, 'loop.end': 3, 'turn.end': 4 }
+const ORDER: Record<Ev['kind'], number> = { compact: 0, 'turn.start': 1, 'loop.start': 2, row: 3, 'loop.end': 4, 'turn.end': 5 }
 
 const NO_TOKENS: Tokens = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 }
 
@@ -85,7 +91,8 @@ const blocksOf = (message: unknown): Rec[] => {
 
 // A prompt is what the person typed: string content or text blocks alone, not meta, not a command or a notification.
 const isPrompt = (v: Rec): boolean => {
-  if (v['isMeta'] === true) return false
+  // A compaction summary is written as a user line and quotes old prompts: counted, it re-fires every past complaint.
+  if (v['isMeta'] === true || v['isCompactSummary'] === true) return false
   const content = rec(v['message'])['content']
   const plain = typeof content === 'string' || (Array.isArray(content) && content.length > 0 && content.every(b => rec(b)['type'] === 'text'))
   if (!plain) return false
@@ -160,7 +167,7 @@ const scanMain = async (path: string, seen: Set<string>, out: Ev[]): Promise<{ c
         interrupted = true
         if (lastEnd !== null) lastEnd.aborted = true
       } else if (isPrompt(v)) {
-        out.push({ t, kind: 'turn.start' })
+        out.push({ t, kind: 'turn.start', text: textOf(rec(v['message'])['content']) })
         tokens = NO_TOKENS
         answer = ''
         error = false
@@ -181,6 +188,11 @@ const scanMain = async (path: string, seen: Set<string>, out: Ev[]): Promise<{ c
         if (block['type'] === 'tool_use') pairing.use(t, block)
         if (block['type'] === 'text' && (str(block['text']) ?? '') !== '') answer = str(block['text']) ?? ''
       }
+      return
+    }
+    // A compaction leaves a boundary line in the main transcript: the plugin sees it as session.compact.
+    if (type === 'system' && v['subtype'] === 'compact_boundary') {
+      out.push({ t, kind: 'compact' })
       return
     }
     if (type === 'system' && v['subtype'] === 'turn_duration') {
@@ -213,6 +225,7 @@ const scanAgent = async (path: string, out: Ev[]): Promise<void> => {
   let first = NaN
   let last = NaN
   let error = false
+  let model: string | null = null
   await eachLine(path, v => {
     const t = timeOf(v)
     if (Number.isNaN(t)) return
@@ -231,12 +244,15 @@ const scanAgent = async (path: string, out: Ev[]): Promise<void> => {
         tokens = add(tokens, tokensOf(message['usage']))
       }
       error = v['isApiErrorMessage'] === true
+      // The model that answered, as the engine reports it; an API error line names none worth keeping.
+      const answered = str(message['model'])
+      if (answered !== null && !error && !answered.startsWith('<')) model = answered
       for (const block of blocksOf(message)) if (block['type'] === 'tool_use') pairing.use(t, block)
     }
   })
   if (Number.isNaN(last)) return
-  out.push({ t: first, kind: 'loop.start', agentId, description: meta.description, model: meta.model })
-  out.push({ t: last, kind: 'loop.end', agentId, model: meta.model, ms: last - first, tokens, ended: error ? 'error' : 'answer' })
+  out.push({ t: first, kind: 'loop.start', agentId, description: meta.description, model: meta.model ?? model })
+  out.push({ t: last, kind: 'loop.end', agentId, model: model ?? meta.model, ms: last - first, tokens, ended: error ? 'error' : 'answer' })
 }
 
 const journalOf = (path: string): Journal => {
@@ -305,13 +321,28 @@ const journalActions = (state: State, journals: Journal[], agentId: string, now:
     }),
   }))
 
+const headOf = (text: string): string => collapseWs(text.replace(/\p{Cc}/gu, ' ')).slice(0, ASK_HEAD_MAX)
+
+// The phases a launched run's script declares, read as the shell reads them: parsed as a literal, never run.
+const phasesActions = (runId: string, result: unknown): Action[] => {
+  const path = str(rec(result)['scriptPath'])
+  if (path === null || !existsSync(path)) return []
+  return [{ type: 'run.phases', runId, phases: phasesOf(readFileSync(path, 'utf8')) }]
+}
+
 // The loops whose first row has landed, so the journal is read once at that moment and not at every row.
 const started = new Set<string>()
 
 const actionsOf = (state: State, ev: Ev, journals: Journal[]): Action[] => {
   switch (ev.kind) {
-    case 'turn.start':
-      return [{ type: 'turn.start', now: ev.t }]
+    case 'turn.start': {
+      // The replay reads only prompts the person typed (isPrompt), so each is an ask, as a composer prompt is.
+      const next = reduce(state, { type: 'turn.start', now: ev.t })
+      const ask = { turn: next.turn, at: ev.t, head: headOf(ev.text), pace: isPace(ev.text) }
+      return [{ type: 'turn.start', now: ev.t }, { type: 'ask', ask }]
+    }
+    case 'compact':
+      return [{ type: 'compact' }]
     case 'row': {
       const event = { ...ev.input, tool: ev.tool, tool_use_id: ev.id, ...(ev.agentId === null ? {} : { agentId: ev.agentId }) }
       const row = rowOf(event, { result: ev.result, text: ev.text, ...(ev.isError ? { isError: true } : {}) }, Math.max(0, ev.t - ev.useAt), state.turn)
@@ -321,7 +352,7 @@ const actionsOf = (state: State, ev: Ev, journals: Journal[]): Action[] => {
       if (ev.agentId !== null) started.add(ev.agentId)
       return [
         { type: 'row', row },
-        ...(run === null ? [] : [{ type: 'run.start', run, now: ev.t } as const]),
+        ...(run === null ? [] : [{ type: 'run.start', run, now: ev.t } as const, ...phasesActions(run.id, ev.result)]),
         ...(agent === null ? [] : [{ type: 'agent.start', ...agent } as const]),
         // The journal is read as the shell would: when a loop's first row lands, with the loop now in the state.
         ...(fresh && ev.agentId !== null ? journalActions(reduce(state, { type: 'row', row }), journals, ev.agentId, ev.t) : []),
@@ -356,23 +387,30 @@ const blocksOfState = (state: State): Record<string, string> => ({
   TURNS: turnsBlock(state),
 })
 
-const digest = (state: State): Record<string, number> =>
-  ({ turn: state.turn, rows: state.rows.length, loops: state.loops.length, runs: state.runs.length, patterns: state.patterns.length })
+const digest = (state: State): Record<string, number> => ({
+  turn: state.turn, rows: state.rows.length, loops: state.loops.length, runs: state.runs.length, patterns: state.patterns.length,
+  compactions: state.compactions.length, asks: state.asks.length, pace: state.asks.filter(a => a.pace).length,
+})
 
 const say = (text: string): void => { process.stderr.write(`${text}\n`) }
 
-// The judge, as the plugin runs it but through `claude -p`: the reply's `result` is the text `parseReply` reads.
-const judge = (state: State, model: string): { state: State; findings: Finding[]; dropped: string[]; focus: string | null; time: string | null; context: string | null; returned: number; error: string | null } => {
-  const prompt = buildPrompt(state)
+// One prompt through `claude -p`: the reply's `result` is the text a parser reads, and a non-zero exit is the error.
+const claude = (prompt: string, model: string): { text: string; error: string | null } => {
   const run = spawnSync('claude', ['-p', '--model', model, '--output-format', 'json'], { input: prompt, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   const stdout = run.stdout ?? ''
   let text = stdout
   try {
     text = str(rec(JSON.parse(stdout))['result']) ?? stdout
   } catch {
-    // not JSON: parseReply reads what it can
+    // not JSON: the parser reads what it can
   }
   const error = run.status === 0 ? null : `claude -p exited ${run.status ?? 'null'}: ${(run.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`
+  return { text, error }
+}
+
+// The judge, as the plugin runs it but through `claude -p`.
+const judge = (state: State, model: string): { state: State; findings: Finding[]; dropped: string[]; focus: string | null; time: string | null; context: string | null; returned: number; error: string | null } => {
+  const { text, error } = claude(buildPrompt(state), model)
   const reply = parseReply(text, state)
   const merged = merge(state, reply.findings)
   const done = reduce(state, {
@@ -380,6 +418,43 @@ const judge = (state: State, model: string): { state: State; findings: Finding[]
     spent: 0, error, returned: reply.returned, kept: reply.findings.length, dropped: [...reply.dropped, ...merged.evicted.map(id => `${id}: evicted by the pattern cap`)], usage: null,
   })
   return { state: done, findings: reply.findings, dropped: reply.dropped, focus: reply.focus, time: reply.time, context: reply.context, returned: reply.returned, error }
+}
+
+// The process judge, as the plugin runs it but through `claude -p`, its cadence recorded as a run so the next checkpoint's digest follows it.
+const processJudge = (state: State, prompt: string, aliases: ReadonlyMap<string, string>, model: string, at: number): { state: State; findings: ProcessFinding[]; dropped: string[]; returned: number; error: string | null } => {
+  const { text, error } = claude(prompt, model)
+  const reply = parseProcessReply(text, state, aliases)
+  const merged = mergeProcess(state, reply.findings)
+  const begun = reduce(state, { type: 'process.start', now: at, seq: state.seq, trigger: 'clock' })
+  const done = reduce(begun, {
+    type: 'process.done', patterns: merged.patterns, fresh: merged.fresh, recurred: merged.recurred, spent: 0, error, returned: reply.returned,
+    kept: reply.findings.length, dropped: [...reply.dropped, ...merged.evicted.map(id => `${id}: evicted by the pattern cap`)], usage: null,
+  })
+  return { state: done, findings: reply.findings, dropped: reply.dropped, returned: reply.returned, error }
+}
+
+const processLine = (f: ProcessFinding): string =>
+  `- ${f.id} (${f.confidence}) — ${f.kind}\n    evidence: ${f.evidence.join(', ')}\n    lean: ${f.lean ?? '-'}\n    fix: ${f.alternative}\n    cost so far: ${f.cost.tokens} tokens · ${Math.round(f.cost.ms / 60_000)}m`
+
+// The process checkpoint: the prompt's size against the digest cap, and with `--judge` the cards it yields.
+const reportProcess = (state: State, at: number, mode: Mode, model: string): { state: State; out: Rec } => {
+  const aliases = processAliases(state)
+  const prompt = buildProcessPrompt(state, aliases)
+  say(`process prompt ${prompt.length} chars · digest cap ${DIGEST_MAX_CHARS}`)
+  const size = { chars: prompt.length, cap: DIGEST_MAX_CHARS }
+  if (mode === 'prompt') {
+    process.stdout.write(`${prompt}\n`)
+    return { state, out: { at: new Date(at).toISOString(), ...digest(state), process: size } }
+  }
+  if (mode !== 'judge') return { state, out: { at: new Date(at).toISOString(), ...digest(state), process: size } }
+  say(`process judging with ${model}…`)
+  const result = processJudge(state, prompt, aliases, model, at)
+  if (result.error !== null) say(`error: ${result.error}`)
+  say(`returned ${result.returned}, kept ${result.findings.length}`)
+  for (const f of result.findings) say(processLine(f))
+  for (const d of result.dropped) say(`  dropped: ${d}`)
+  const kept = result.findings.map(f => ({ id: f.id, kind: f.kind, lean: f.lean, alternative: f.alternative, evidence: f.evidence, confidence: f.confidence, cost: f.cost }))
+  return { state: result.state, out: { at: new Date(at).toISOString(), ...digest(state), process: { ...size, model, error: result.error, returned: result.returned, kept, dropped: result.dropped } } }
 }
 
 const findingLine = (f: Finding): string =>
@@ -410,11 +485,12 @@ const report = (state: State, at: number, mode: Mode, model: string): { state: S
   return { state: result.state, out: { at: iso, ...digest(state), judge: { model, error: result.error, returned: result.returned, focus: result.focus, time: result.time, context: result.context, kept, dropped: result.dropped } } }
 }
 
-const parseArgs = (argv: string[]): { inputs: string[]; ats: number[]; window: number; mode: Mode } => {
+const parseArgs = (argv: string[]): { inputs: string[]; ats: number[]; window: number; mode: Mode; processMode: boolean } => {
   const inputs: string[] = []
   const ats: number[] = []
   let window = DEFAULT_WINDOW
   let mode: Mode = 'summary'
+  let processMode = false
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i] ?? ''
     if (arg === '--at') {
@@ -423,15 +499,16 @@ const parseArgs = (argv: string[]): { inputs: string[]; ats: number[]; window: n
       ats.push(t)
     } else if (arg === '--window') window = Number(argv[++i]) || DEFAULT_WINDOW
     else if (arg === '--summary' || arg === '--prompt' || arg === '--judge') mode = arg.slice(2) as Mode
+    else if (arg === '--process') processMode = true
     else if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`)
     else inputs.push(arg)
   }
-  if (inputs.length === 0) throw new Error('usage: bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--summary | --prompt | --judge]')
-  return { inputs, ats: ats.sort((a, b) => a - b), window, mode }
+  if (inputs.length === 0) throw new Error('usage: bun run scripts/replay.ts <session-id | main.jsonl>… [--at <ISO>]… [--window <n>] [--summary | --prompt | --judge] [--process]')
+  return { inputs, ats: ats.sort((a, b) => a - b), window, mode, processMode }
 }
 
 const main = async (): Promise<void> => {
-  const { inputs, ats, window, mode } = parseArgs(process.argv.slice(2))
+  const { inputs, ats, window, mode, processMode } = parseArgs(process.argv.slice(2))
   const model = process.env['REPLAY_MODEL'] ?? 'sonnet'
   const t0 = performance.now()
   const { events, journals, cwd, files } = await collect(inputs)
@@ -447,7 +524,7 @@ const main = async (): Promise<void> => {
     while (to < events.length && (events[to]?.t ?? Infinity) <= at) to += 1
     state = feed(state, events.slice(from, to), journals)
     from = to
-    const done = report(state, at, mode, model)
+    const done = processMode ? reportProcess(state, at, mode, model) : report(state, at, mode, model)
     state = done.state
     outs.push(done.out)
   }

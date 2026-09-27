@@ -56,8 +56,9 @@ const artifactsOf = (state: State, p: Pattern): Artifact[] => {
 // when the judge attached a proposal; and a kill's permanent line is the scoped alternative, never its kill prompt.
 const proposalOf = (p: Pattern): Proposal | null => {
   if (p.decision === null || p.decision === 'keep') return null
-  if (p.proposal !== null) return p.proposal
-  const body = p.decision === 'kill' ? p.alternative : (p.instruction ?? p.alternative)
+  // A process finding has no permission to grant, and its lasting line is the lean way, not the one-time re-plan.
+  if (p.proposal !== null && (p.lean === null || p.proposal.kind !== 'settings-allow')) return p.proposal
+  const body = p.lean ?? (p.decision === 'kill' ? p.alternative : (p.instruction ?? p.alternative))
   // The label is the rule, never the waste: a row offering `Write` reads as what would be written.
   return { kind: 'claude-md', title: titleOf(body) || p.id, body }
 }
