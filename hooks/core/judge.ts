@@ -1,14 +1,14 @@
 import type { ModelForkUsage } from 'claude-code'
 
-import { agentsBlock, decisionsBlock, knownPatternsBlock, ledgerBlock, sinksBlock, statsLines, turnsBlock } from './blocks'
+import { agentsBlock, citableRows, decisionsBlock, knownPatternsBlock, ledgerBlock, sinksBlock, statsLines, turnsBlock } from './blocks'
 import { agentAliases } from './evidence'
 import { totalTokens } from './patterns'
-import { collapseWs, median } from './text'
+import { cell, citedTurns, collapseWs, evidenceOf, groundedCap, isRecord, median, parseObject, proposalOf, short, str, unique } from './text'
 import {
-  ALTERNATIVE_MAX, JUDGE_LEDGER_ROWS, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_NEW_TOKENS,
+  ALTERNATIVE_MAX, JUDGE_MIN_GAP_MS, JUDGE_MIN_NEW_ROWS, JUDGE_MIN_NEW_TOKENS,
   JUDGE_MIN_ROWS, JUDGE_MIN_TURNS, KIND_MAX, MAX_BEHAVIORAL_FINDINGS, MAX_FINDINGS, MAX_PATTERNS,
 } from './types'
-import type { ArtifactKind, Category, Finding, JudgeUsage, Loop, Pattern, Proposal, Row, Signature, State } from './types'
+import type { Category, Finding, JudgeUsage, Pattern, Row, Signature, State } from './types'
 
 /** The judge prompt (build spec Appendix A, verbatim) with the eight evidence placeholders. */
 export const JUDGE_PROMPT = `You are auditing THIS session for wasted context and wasted time. The transcript above is your own: read it for intent — what the user asked for, what you were told, what you already decided. The blocks below are the only evidence of what actually ran; nothing outside them exists for this audit.
@@ -31,7 +31,8 @@ You are writing an interruption. Every finding can put a card in front of the us
 ## Counting — what makes two occurrences a repeat
 - Separated by other work. Two occurrences of the same behaviour count as two decisions when at least one other row sits between them — an edit, a read, another command — whether in the same turn or a later one; a run after an edit is a second decision, not a second call in one batch — whether it is excused is the category's own question. Calls issued together with nothing between them are one batch and count once: a parallel set of Reads, or a fan-out of subagents launched at once, is one choice however wide. Breadth is one decision; weight is not: every stage of a workflow (each \`label\` in AGENTS) is a decision of its own, and the same role recurring stage after stage — a check loop per chunk, a review round after every fix — is a repeat.
 - Both unexcused. An occurrence the "Never report" list excuses does not count and may not be cited. Subtract the excused ones first; if fewer than two remain, there is no finding. A baseline suite run at the start plus the check before a commit is zero findings.
-- Same side of a compaction. TURNS lists the turns where a compaction happened; content dropped by it must be re-acquired. Count only occurrences after the last compaction.
+- Same side of a compaction, for reading only. TURNS lists the turns where a compaction happened; what it dropped must be re-acquired, so a read or a re-derivation after one is not a repeat of one before it. Repeated work is: a check, a build, a review round or an agent run again across a compaction counts on both sides.
+- A correction is the first occurrence. When the user corrected a behaviour this session, or a saved feedback memory in the transcript names it, that correction counts as its first occurrence: one unexcused occurrence after it is a finding, and \`why\` names the correction.
 - Same behaviour, not the same shape. For a signature finding that means the same \`key\`; two Read keys differing only in \`:offset-limit\` are different slices, not a repeat. For a null-signature finding you must name one behaviour and show it in each cited turn; do not staple unrelated expensive turns together.
 - Agents are loops of their own. The \`agent\` column names the loop; a repeat inside one agent's rows counts exactly like a repeat in the main loop, and the main loop re-doing after an agent returns what that agent's rows show it already did (the same Read key, the same check) is a repeat across loops.
 - Short ledgers. With fewer than about 12 rows or fewer than 4 turns, report only behaviours with three or more surviving occurrences, or one plus explicit stated intent.
@@ -45,7 +46,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - communication — turns with \`calls 0\` and large \`answerChars\` that restate the plan or recap finished work; stopping to ask what the transcript, the repo or your instructions already answer; an \`ask\` row that held the turn for minutes while no agent ran (no rows between it and the next prompt) and whose options carried a recommended default (\`recommended\`) — proceed on the default and ask beside the work. Not: the turn that answers a question the user asked; a plan or explanation you were asked for; the session's last turn; plan mode, where making no tool call is required; a question whose answer the transcript shows changed the plan. \`out\` includes thinking, so point at the restated content, not the token shape.
 - multi-agent — parallel agents each re-reading the same large file the parent already had; agents with a thin brief (small \`promptChars\`, large \`tokens\`); results never read; agents spawned again after a limit error; mechanical agents on the premium model (\`agent=\` flag shows the resolved model and \`edits\`); the main loop re-reading files or re-running checks an agent's rows already covered, after it returned; a brief that pastes in whole files (large \`promptChars\`) to an agent whose rows then Read the same paths anyway; a workflow whose later agents re-read what earlier agents read (the same Read keys under successive \`agent\` values, spread over turns); a loop whose rows are only checks that passed, with \`edits 0\` and a report as its outcome (AGENTS \`checks\` > 0) — a shell step given a model; review or verify loops with \`edits 0\` whose outcome carries no medium, high or critical finding, recurring stage after stage; two or more verifier loops per finding; a run whose tokens per edit are several times the others'; a fix loop followed by a review whose outcome carries a new high in the same stage, twice (regression chasing: stop the loop and re-plan). Not: agents with disjoint file sets each reading one shared spec; two agents touching one path unless the ledger shows a conflict (an errored edit right after another agent's edit, or a re-edit in the main loop after they returned); a re-read whose brief the transcript shows is a review or verification pass; every agent reading the one spec its brief names; the parent reading an agent's result; one review per stage that found a medium or higher; a loop that edited; a fan-out's breadth on its own.
 - environment — installs repeated with no manifest edit; Bash used where Read/Grep/Edit is cheaper; fixed per-turn overhead (memory files, agent descriptions, MCP schemas in the facts line) larger than the work. Not: the user's own denials (\`denied\`); a single approval prompt.
-- process — many tiny commits or amends on one change; work declared done with no check run; re-deriving after a compaction what was settled before it. Not: docs- or config-only changes with no check to run, or a check the environment cannot run.
+- process — many tiny commits or amends on one change; work declared done with no check run. Not: docs- or config-only changes with no check to run, or a check the environment cannot run.
 - other — a repetition none of the above names. Name it plainly.
 
 ## Never report
@@ -53,7 +54,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - A single long call that was needed once, however long it ran: the largest row in TIME or CONTEXT is a fact to explain, never a finding on its own.
 - Orientation: the first look at any file, directory or log, an unfamiliar area, or a scope the user left open ("audit every call site", "review the repo").
 - Parallelism: calls issued together with nothing between them are one decision, and agents on disjoint scopes launched at once are one decision — one, not none: their weight is judged under multi-agent.
-- Occurrences a compaction separates, and any re-read a compaction made necessary. Compaction, prompt-cache reads and the host's own truncation are the harness working as designed.
+- A re-read, or re-deriving what was settled, that a compaction made necessary. Compaction, prompt-cache reads and the host's own truncation are the harness working as designed; work repeated across a compaction is not excused by it.
 - A denied call (\`denied\`): the user or a policy said no, never your waste. The only reportable version is re-running an unchanged command already declined twice, and then the fix is a \`settings-allow\` proposal, not a rebuke.
 - A file change you cannot see: the \`paths\` column records only Edit/Write and Bash calls the host diffed, and nothing for a staged edit. Treat an intervening formatter, codegen, migration, install, \`git checkout|stash|pull|apply\`, \`sed -i\`, MCP edit or another agent's edit as having changed the file.
 - Volume alone. A large read is waste only when a cheaper call would have answered the same question for the same purpose; if the output was the deliverable (the diff under review, the log you were asked to explain, a file about to be rewritten) it is not a finding.
@@ -190,31 +191,9 @@ const lowerSlug = (id: string): string => {
   return at < 0 ? id : `${id.slice(0, at)}:${id.slice(at + 1).toLowerCase()}`
 }
 
-const unique = (xs: string[]): string[] => [...new Set(xs)]
-
-const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
-
 const isCategory = (v: unknown): v is Category =>
   typeof v === 'string' &&
   ['execution', 'reading', 'production', 'behavior', 'communication', 'multi-agent', 'environment', 'process', 'other'].includes(v)
-
-const isArtifactKind = (v: unknown): v is ArtifactKind =>
-  typeof v === 'string' && ['claude-md', 'skill', 'agent-brief', 'settings-allow'].includes(v)
-
-const parseObject = (text: string): Record<string, unknown> | null => {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end < start) return null
-  try {
-    const value: unknown = JSON.parse(text.slice(start, end + 1))
-    return isRecord(value) ? value : null
-  } catch {
-    return null
-  }
-}
 
 // undefined = the key is absent or malformed, or no visible row carries the pair: the finding is discarded.
 const signatureOf = (value: unknown, visible: Row[]): Signature | null | undefined => {
@@ -225,106 +204,15 @@ const signatureOf = (value: unknown, visible: Row[]): Signature | null | undefin
   return visible.some(r => r.tool === tool && r.key === key) ? { tool, key } : undefined
 }
 
-const short = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max)}…`)
-
-// The model's own text quoted inside a one-line drop reason: whitespace collapsed first, so a
-// heredoc key or a multi-line id can never break the one-reason-per-line contract `debugDump` keeps.
-const cell = (value: unknown, max: number): string => short(collapseWs(str(value)), max)
-
 const signatureDrop = (value: unknown): string =>
   isRecord(value)
     ? `signature (${cell(value['tool'], 20)}, ${cell(value['key'], 40)}) matches no row`
     : 'signature must be a (tool, key) pair or null'
 
-const AGENT_HANDLE = /^agent:(.+)$/
-
-// Handles that name no single row: a turn of the main loop, or a whole agent loop.
-const isWide = (handle: string): boolean => /^turn:\d+$/.test(handle) || AGENT_HANDLE.test(handle)
-
-const handleDrop = (value: unknown, signature: Signature | null): string => {
-  const handle = cell(value, 40)
-  if (handle.length === 0) return 'evidence handle is not a string'
-  if (isWide(handle) && signature !== null) return `evidence ${handle} needs signature null`
-  return AGENT_HANDLE.test(handle) ? `evidence ${handle} not in AGENTS` : `evidence ${handle} not in the ledger`
-}
-
-// The loop an `agent:<alias>` handle names, under the alias table AGENTS and LEDGER printed — the one the
-// prompt was built with, not today's: a judge run takes minutes, and a new agent's first row landing in
-// that time (or an old agent's last row falling off ROW_CAP) renumbers every loop the rows never showed.
-const loopOf = (state: State, aliases: ReadonlyMap<string, string>, alias: string): Loop | undefined =>
-  state.loops.find(l => aliases.get(l.id) === alias)
-
-const handleOf = (value: unknown, state: State, visible: Row[], aliases: ReadonlyMap<string, string>, signature: Signature | null): string | null => {
-  const handle = str(value)
-  const alias = /^r(\d+)$/.exec(handle)
-  if (alias !== null) {
-    const row = visible.find(r => r.seq === Number(alias[1] ?? ''))
-    return row !== undefined ? row.id : null
-  }
-  if (signature !== null) return null
-  const turn = /^turn:(\d+)$/.exec(handle)
-  if (turn !== null) {
-    const n = Number(turn[1] ?? '')
-    return state.turns.some(t => t.turn === n) ? `turn:${n}` : null
-  }
-  const agent = AGENT_HANDLE.exec(handle)
-  if (agent !== null) {
-    const loop = loopOf(state, aliases, agent[1] ?? '')
-    // Stored by id, not alias: the alias is a naming of the rows in hand and can renumber between runs.
-    return loop !== undefined ? `agent:${loop.id}` : null
-  }
-  return null
-}
-
-// A string is the reason the evidence cannot be used; the array is the handles it maps to.
-const evidenceOf = (value: unknown, state: State, visible: Row[], aliases: ReadonlyMap<string, string>, signature: Signature | null): string[] | string => {
-  if (!Array.isArray(value) || value.length === 0) return 'evidence must be a non-empty array of row ids'
-  const handles = value.map(h => handleOf(h, state, visible, aliases, signature))
-  const badAt = handles.indexOf(null)
-  if (badAt >= 0) return handleDrop(value[badAt], signature)
-  return unique(handles.filter((h): h is string => h !== null))
-}
-
-const citedLoops = (state: State, evidence: string[]): Loop[] =>
-  evidence.flatMap(handle => {
-    const agent = AGENT_HANDLE.exec(handle)
-    const loop = agent === null ? undefined : state.loops.find(l => l.id === agent[1])
-    return loop !== undefined ? [loop] : []
-  })
-
-const citedTurns = (state: State, evidence: string[]): number[] =>
-  evidence.flatMap(handle => {
-    const turn = /^turn:(\d+)$/.exec(handle)
-    if (turn !== null) return [Number(turn[1] ?? '')]
-    if (AGENT_HANDLE.test(handle)) return citedLoops(state, [handle]).map(l => l.firstTurn)
-    const row = state.rows.find(r => r.id === handle)
-    return row !== undefined ? [row.turn] : []
-  })
-
-const loopTokens = (l: Loop): number => l.tokens.input + l.tokens.cacheCreate + l.tokens.output
-
-// What one avoided loop would have cost when the finding cites loops alone; else the cited turns' answers.
-const groundedCap = (state: State, evidence: string[]): number => {
-  const loops = citedLoops(state, evidence)
-  if (loops.length > 0 && !evidence.some(h => /^turn:\d+$/.test(h))) return Math.floor(median(loops.map(loopTokens)))
-  const turns = citedTurns(state, evidence)
-  return Math.floor(median(state.turns.filter(t => turns.includes(t.turn)).map(t => t.answerChars)) / 4)
-}
-
 const estOf = (value: unknown, state: State, signature: Signature | null, evidence: string[]): number | null => {
   if (signature !== null) return null
   const claimed = typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0
   return Math.min(claimed, groundedCap(state, evidence))
-}
-
-const proposalOf = (value: unknown): Proposal | null => {
-  if (!isRecord(value)) return null
-  const kind = value['kind']
-  const title = collapseWs(str(value['title']))
-  const body = str(value['body']).trim()
-  if (!isArtifactKind(kind) || title.length === 0 || body.length === 0) return null
-  if (kind === 'settings-allow' && !/^[A-Za-z][A-Za-z0-9_]*\(.+\)$/.test(body)) return null
-  return { kind, title, body }
 }
 
 const sameSignature = (a: Signature | null, b: Signature | null): boolean =>
@@ -333,6 +221,9 @@ const sameSignature = (a: Signature | null, b: Signature | null): boolean =>
 const isKept = (state: State, id: string, signature: Signature | null): boolean =>
   state.patterns.some(p =>
     p.decision === 'keep' && (p.id === id || sameSignature(p.signature, signature)))
+
+// One cited occurrence is a finding only after a first the ledger cannot show: stated intent, a user correction or a saved feedback memory.
+const FIRST_OCCURRENCE = /intent|\bcorrect(?:ed|ion)\b|\bfeedback\b/i
 
 // A string is the one short reason the finding was dropped; the object is the finding itself.
 const findingOf = (value: unknown, state: State, visible: Row[], aliases: ReadonlyMap<string, string>): Finding | string => {
@@ -359,11 +250,12 @@ const findingOf = (value: unknown, state: State, visible: Row[], aliases: Readon
   if (isKept(state, id, signature)) return 'kept this session'
   const evidence = evidenceOf(value['evidence'], state, visible, aliases, signature)
   if (typeof evidence === 'string') return evidence
-  if (evidence.length < 2 && !why.includes('intent')) return 'one handle and no stated intent in why'
+  if (evidence.length < 2 && !FIRST_OCCURRENCE.test(why)) return 'one handle and no stated intent or correction in why'
   return {
     id, category, kind, evidence, signature, why, alternative, confidence,
     estTokensPerTurn: estOf(value['est_tokens_per_turn'], state, signature, evidence),
     proposal: proposalOf(value['proposal']),
+    lean: null,
   }
 }
 
@@ -420,7 +312,7 @@ export const parseReply = (text: string, state: State, aliases: ReadonlyMap<stri
   const said = { time: explanationOf(root['time']), context: explanationOf(root['context']) }
   const overlong = [...explanationDrop('time', root['time']), ...explanationDrop('context', root['context'])]
   if (!Array.isArray(raw)) return { findings: [], focus, ...said, dropped: [...overlong, 'findings was not an array'], returned: 0 }
-  const visible = state.rows.slice(Math.max(0, state.rows.length - JUDGE_LEDGER_ROWS))
+  const visible = citableRows(state)
   const reviewed: Reviewed[] = raw.map((value, i) => {
     const label = labelOf(value, i)
     const result = findingOf(value, state, visible, aliases)
@@ -434,8 +326,8 @@ export const parseReply = (text: string, state: State, aliases: ReadonlyMap<stri
 const patternOf = (f: Finding): Pattern => ({
   id: f.id, category: f.category, kind: f.kind, signature: f.signature, why: f.why,
   alternative: f.alternative, confidence: f.confidence, proposal: f.proposal,
-  estTokensPerTurn: f.estTokensPerTurn, lastDecision: null,
-  hits: [...f.evidence], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0,
+  estTokensPerTurn: f.estTokensPerTurn, lastDecision: null, lean: f.lean,
+  hits: [...f.evidence], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0, sent: 0,
 })
 
 const updatedWith = (p: Pattern, f: Finding): Pattern => ({

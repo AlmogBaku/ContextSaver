@@ -12,11 +12,13 @@ export const judgePattern = (over: Partial<Pattern> = {}): Pattern => ({
   proposal: null,
   estTokensPerTurn: null,
   lastDecision: null,
+  lean: null,
   hits: ['toolu_01'],
   decision: null,
   decidedAtTurn: null,
   instruction: null,
   openedAtTurn: null,
   ignored: 0,
+  sent: 0,
   ...over,
 })

@@ -13,6 +13,7 @@ export const decidedPane: PaneModel = {
       settled: true,
       instruction: 'read src/auth.ts once and keep the summary',
       ignored: 0,
+      sent: 0,
     },
     {
       patternId: 'process:plan-resummary',
@@ -22,6 +23,7 @@ export const decidedPane: PaneModel = {
       settled: false,
       instruction: null,
       ignored: 1,
+      sent: 0,
     },
   ],
   artifacts: [

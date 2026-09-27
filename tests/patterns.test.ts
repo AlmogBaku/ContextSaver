@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { agentAliases } from '../hooks/core/evidence'
 import {
-  bandModel, cardOf, debugDump, fromStored, mergeStored, paneModel, parseRegistry, reduce,
+  bandModel, cardOf, debugDump, processLine, fromStored, mergeStored, paneModel, parseRegistry, reduce,
   tokensToCompaction, toStored, totalTokens, turnsToCompaction,
 } from '../hooks/core/patterns'
 import { parseJournal } from '../hooks/core/spawns'
@@ -12,6 +12,7 @@ import type { Action, Card, Loop, Pattern, Row, State } from '../hooks/core/type
 import { chattyPattern } from './fixtures/patterns/chattyPattern'
 import { claudeMdArtifact } from './fixtures/patterns/claudeMdArtifact'
 import { junkRegistry } from './fixtures/patterns/junkRegistry'
+import { processPattern } from './fixtures/patterns/processPattern'
 import { seedState } from './fixtures/patterns/seedState'
 import { suitePattern } from './fixtures/patterns/suitePattern'
 import { testRow } from './fixtures/patterns/testRow'
@@ -422,6 +423,15 @@ describe('patterns', () => {
     expect(measured.judge.backoff, 'and 24k of a 10k session is over the budget').toBe(2)
   })
 
+  test('process.done keeps why a process reply was dropped, and debug prints it', async () => {
+    const done = reduce(seedState({ turn: 3 }), { type: 'process.done', patterns: [], fresh: [], recurred: [], spent: 0, error: null, returned: 0, kept: 0, dropped: ['reply was not JSON'], usage: null })
+    const dump = debugDump(done)
+    expect(dump, 'a process reply that never parsed is visible in debug, not only as a count').toContain('process last: 0 returned · 0 kept · 1 dropped')
+    expect(dump).toContain('  reply was not JSON')
+    const costed = reduce(done, { type: 'process.done', patterns: [], fresh: [], recurred: [], spent: 0, error: null, returned: 0, kept: 0, dropped: [], usage: { input: 10, output: 8, cacheRead: 0, cacheCreate: 0 } })
+    expect(debugDump(costed), 'what the process fork cost is labelled as the process fork').toContain('process usage: in 10 · out 8')
+  })
+
   test('judge.done stores what the run returned, kept, dropped and cost, and debug prints it', async () => {
     const dropped = [
       'execution:full-suite: evidence r99 not in the ledger',
@@ -591,8 +601,8 @@ describe('patterns', () => {
   test('toStored drops the session fields, fromStored revives them, mergeStored lets b win', async () => {
     const live: Pattern = { ...suitePattern, hits: ['r-1'], decision: 'kill', decidedAtTurn: 5, lastDecision: 'kill', instruction: 'x', openedAtTurn: 5, ignored: 1 }
     const stored = toStored(live)
-    expect(Object.keys(stored).sort()).toEqual(['alternative', 'category', 'confidence', 'estTokensPerTurn', 'id', 'kind', 'lastDecision', 'proposal', 'signature', 'why'])
-    expect(fromStored(stored)).toEqual({ ...stored, hits: [], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0 })
+    expect(Object.keys(stored).sort()).toEqual(['alternative', 'category', 'confidence', 'estTokensPerTurn', 'id', 'kind', 'lastDecision', 'lean', 'proposal', 'signature', 'why'])
+    expect(fromStored(stored)).toEqual({ ...stored, hits: [], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0, sent: 0 })
     const merged = mergeStored(
       [toStored(suitePattern), toStored(chattyPattern)],
       [{ ...toStored(suitePattern), lastDecision: 'keep' }, { ...toStored(chattyPattern), id: 'reading:unfiltered-log-dump' }],
@@ -629,6 +639,7 @@ describe('patterns', () => {
       stats: '2× · ~2.3% of context · 1m 45s · turns 5–8',
       why: suitePattern.why,
       fix: suitePattern.alternative,
+      lean: null,
       total: { unit: 'calls', calls: 2, ms: 105_000, chars: 18_600 },
       evidence: [
         { turn: 8, what: 'bun test', agent: null, ms: 45_000, chars: 9_600, head: '✓ 212 passed' },
@@ -738,8 +749,8 @@ describe('patterns', () => {
     expect(model).toMatchObject({ expanded: waster.id, steering: waster.id, steerDraft: 'draft' })
     expect(model.decided).toEqual([
       // Ignored once, so the figure is still a projection: only a settled instruction is a credit (D4).
-      { patternId: steeredLog.id, choice: 'steer', kind: steeredLog.kind, savedPct: 5, settled: false, instruction: 'grep it', ignored: 1 },
-      { patternId: keptChat.id, choice: 'keep', kind: keptChat.kind, savedPct: null, settled: false, instruction: null, ignored: 0 },
+      { patternId: steeredLog.id, choice: 'steer', kind: steeredLog.kind, savedPct: 5, settled: false, instruction: 'grep it', ignored: 1, sent: 0 },
+      { patternId: keptChat.id, choice: 'keep', kind: keptChat.kind, savedPct: null, settled: false, instruction: null, ignored: 0, sent: 0 },
     ])
     const quiet = paneModel({ ...state, patterns: [{ ...steeredLog, ignored: 0 }] }, [])
     expect(quiet.decided[0], 'nothing ignored it and nothing is in flight: the saving settled')
@@ -846,5 +857,55 @@ describe('patterns', () => {
       expect(reduce(state, action)).not.toBe(state)
       expect(JSON.stringify(state)).toBe(before)
     }
+  })
+})
+
+describe('process patterns', () => {
+  const lanes = (over: Partial<State> = {}): State =>
+    seedState({ turn: 6, runs: [sampleRun()], loops: [sampleLoop()], patterns: [processPattern()], cards: [processPattern().id], ...over })
+
+  test('a process card carries its lean and what the cited run cost so far, not a habit\'s repeat count', async () => {
+    const state = lanes()
+    const card = cardIn(processPattern(), state, 1)
+    expect(card.lean).toBe('Implement every lane, review the branch once, fix once')
+    expect(card.stats, 'the run\'s loops are what the process cost: 5 minutes and 48k new tokens').toBe('5m · 48k tokens')
+    expect(cardIn(suitePattern, state, 1).lean, 'a habit card has no Lean line').toBeNull()
+  })
+
+  test('Fix sends the re-plan once as a note, never as a standing instruction a subagent would inherit', async () => {
+    const killed = reduce(lanes(), { type: 'decide', patternId: processPattern().id, choice: 'kill' })
+    expect(killed.notes).toEqual([instructionOf(`Change the remaining work: ${processPattern().alternative}`)])
+    expect(killed.standing, 'a re-plan is the orchestrator\'s, once').toEqual([])
+    expect(killed.patterns[0]).toMatchObject({ decision: 'kill', instruction: processPattern().alternative })
+    const text = 'Change the remaining work: skip the lane reviews'
+    const steered = reduce(lanes(), { type: 'decide', patternId: processPattern().id, choice: 'steer', text })
+    expect(steered.notes, 'a note that already says it is not said twice').toEqual([instructionOf(text)])
+    expect(steered.standing).toEqual([])
+    const kept = reduce(lanes(), { type: 'decide', patternId: processPattern().id, choice: 'keep' })
+    expect(kept.notes).toEqual([])
+    expect(kept.standing).toEqual([])
+  })
+
+  test('a reached agent counts once on every standing habit fix and never on a process fix', async () => {
+    const habit = reduce(seedState({ patterns: [suitePattern, processPattern()] }), { type: 'decide', patternId: suitePattern.id, choice: 'kill' })
+    const both = reduce(habit, { type: 'decide', patternId: processPattern().id, choice: 'kill' })
+    const once = reduce(both, { type: 'delivery.sent', agentId: 'agent-1', now: 5 })
+    const twice = reduce(once, { type: 'delivery.sent', agentId: 'agent-1', now: 6 })
+    expect(twice.patterns.map(p => [p.id, p.sent])).toEqual([[suitePattern.id, 1], [processPattern().id, 0]])
+    expect(twice.delivery.agents).toEqual(['agent-1'])
+  })
+
+  test('debug prints the process cadence and the asks it counts, never what was typed', async () => {
+    const state = seedState({
+      asks: [{ turn: 1, at: 1, head: 'why is this taking forever', pace: true }, { turn: 2, at: 2, head: 'ship it', pace: false }],
+      process: { ...seedState().process, runs: 2, spent: 4_200, lastAtTurn: 2 },
+    })
+    const dump = debugDump(state)
+    expect(dump).toContain('process runs 2 · spent 4200 tokens')
+    expect(dump).toContain('asks 2 · pace 1')
+    expect(dump).not.toContain('taking forever')
+    expect(dump).not.toContain('ship it')
+    expect(processLine(state), 'what /saver says of the process judge').toBe('process 2 runs · 4.2k tokens')
+    expect(processLine(seedState())).toBeNull()
   })
 })

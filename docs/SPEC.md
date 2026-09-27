@@ -433,7 +433,7 @@ export const killPrompt = (p: StoredPattern): string => `Stop this behaviour for
   - STATS: `statsLines(state.rows)` (section 5.1) — whole-session aggregates so the judge reads "×847 · 41m · 2.1M chars · edits-between 3" instead of counting rows.
   - TIME and CONTEXT: `sinksBlock(state.rows, 'ms')` and `sinksBlock(state.rows, 'chars')` — where the wall-clock and the window went, so the judge can answer "what took so long" instead of only "what repeated".
   - TURNS: one line per `TurnStat` `turn | in | out | cacheCreate | calls | ms | answerChars` (aborted turns suffixed `aborted`); then the facts line `window=<n> overhead: memory=<n> mcp=<n> agents=<n> compactions at turns: <list or none>`.
-  - LEDGER: newest `JUDGE_LEDGER_ROWS` rows as `ledgerLine`s in ascending order, preceded by `summaryLine`s for older rows grouped by `(tool, key)`.
+  - LEDGER: the `citableRows` as `ledgerLine`s in ascending order — the newest `JUDGE_LEDGER_ROWS` (150) rows, walking back from the newest, with no one subagent loop holding more than `JUDGE_AGENT_ROWS` (40) of them (the main loop is not capped), so a burst from one agent cannot push the main loop's rows out — preceded by `summaryLine`s for every row `citableRows` leaves out, `ROW_CAP`'s folded rows among them, grouped by `(tool, key)`: the top `FOLD_LINES` (40) by characters in full, largest first, and the rest counted on one `~ ×N more` line.
 - `parseReply(text, state): { findings: Finding[]; focus: string | null; time: string | null; context: string | null; dropped: string[]; returned: number }` — `time` and `context` are the judge's two explanations, whitespace collapsed, kept when they are non-empty strings and cut to 200 characters with an ellipsis when they run longer (the first 200 still say where the time went; anything but a non-empty string is null, because a number is no sentence to draw); neither is ever a finding, but a sentence that had to be cut is named in `dropped` as `time: 340 chars, trimmed to 200`, so a prompt problem never reads like a quiet session. Then: slice first `{` to last `}`; `JSON.parse` in try/catch; validate field by field; never throws. `returned` is how many findings the reply carried (0 on both root failures, so the debug line never claims a reply it could not read returned one). Every reason quoting the model's own text collapses its whitespace first, so a key with a newline in it cannot break the one-line-per-reason contract `debugDump` keeps. `dropped` carries one short reason per finding that did not survive, labelled by the finding's `id` when the id itself validates, else by its place in the reply (`#2`): e.g. `execution:full-suite: evidence r99 not in the ledger`, `#2: kind must start with "Claude keeps "`, `reading:log-dump: signature (Bash, read:cat api.log) matches no row`, `#4: kept this session`, `#7: over MAX_FINDINGS (6)`. A reply that is not JSON is the single reason `reply was not JSON`; a `findings` that is not an array is `findings was not an array`. Every drop path names itself, so a silent run is readable. Per finding: `id` matches `/^[a-z-]+:[a-z0-9-]{1,40}$/` and its category prefix equals `category` (one of the nine); `kind` ≤ `KIND_MAX` and starts with `Claude keeps `; `alternative` ≤ `ALTERNATIVE_MAX`; `evidence` handles are `r<seq>` aliases of rows present in `state.rows` (mapped to `tool_use_id`) or `turn:<n>` with `n` in `state.turns` (only when `signature === null`); ≥ 2 handles unless `why` contains the word "intent"; `signature` is null or a `(tool, key)` pair matching one row; `confidence` in [0.5, 1]; `estTokensPerTurn` coerced to null when a signature exists, else clamped to the median `answerChars / 4` of the cited turns; `proposal` null or `{ kind ∈ ArtifactKind, title non-empty, body non-empty }`, and for `settings-allow` the body must match `/^[A-Za-z][A-Za-z0-9_]*\(.+\)$/`; a finding whose `(tool,key)` belongs to a pattern with a session `keep` is dropped. Keep the first `MAX_FINDINGS`, at most `MAX_BEHAVIORAL_FINDINGS` with `signature: null`.
 - `merge(state, findings): { patterns: Pattern[]; fresh: string[]; recurred: string[]; evicted: string[] }` — returns the **complete** registry: existing patterns carried through with session fields intact; an existing id updated in `why/alternative/proposal/confidence/estTokensPerTurn`, its `hits` extended with the cited handles; it is `recurred` when it has a steer/kill decision and any cited row's turn > `decidedAtTurn`; a new id becomes a `Pattern` with `hits` = the cited handles only (no back-fill); `fresh` is every cited id the merged registry holds with `decision === null` that is not already in `state.cards` — an undecided pattern re-reported with evidence is queued again, whether the id is new, remembered by the store or found by an earlier run of this session; capped at `MAX_PATTERNS` (drop lowest-confidence undecided patterns first). `evicted` names the findings the cap pushed out: they never become cards, so the shell counts them as dropped, not kept.
 - Tests: cadence gates incl. backoff and the mid-turn gate (rows alone, gap alone, both, and a backoff doubling the rows it wants); the prompt's three opening questions, its legitimacy ladder, the single-long-call excuse, the two `[]` examples and the two reserved reply keys; `sinksBlock` inside `buildPrompt`, with the spawn row named outside the total; `parseReply` keeping the two sentences, cutting an essay to one and refusing a number; `buildPrompt` contains the contract block, the seven block headers, STATS lines with counts, ledger aliases, summary lines, the keep line in DECISIONS; parser on valid / prose-wrapped / broken JSON, an unknown alias, a completed (untruncated) key, a `(tool,key)` mismatch, an over-large `estTokensPerTurn`, a prose `settings-allow` body, a kept key under a new id; one `dropped` reason per drop path (unknown alias, `(tool,key)` mismatch, bad `kind` prefix, kept key, over the cap, a reply that is not JSON, a key with a newline in it that stays one line); the prompt's Counting sentence and its agent example; the LEDGER header's alias sentence, with a subagent's row rendered `a1` and no raw id anywhere in the prompt; merge reuse vs new, a known undecided id queued again unless its card is already up, `recurred`, cap, `evicted`, decisions preserved.
@@ -718,6 +718,107 @@ Agent facts in the pane header; a size for a spawn whose loop never reaches `tur
 
 ---
 
+## 12. v0.5 — The judge diagnoses the process
+
+### 12.0 Why
+
+ContextSaver 0.5 adds a **process judge** as the plugin's primary job. The habit judge (v0.3–0.4) stays as the secondary job, with its verified blind spots repaired (§12.8).
+
+The process judge asks a different question: given what the user asked, how would a lean expert run this work? Where does this session's process diverge from that, what has each divergence cost so far, and what is the one change? It returns at most three findings, each naming a counterfactual cost.
+
+### 12.1 Triggers and locks (`hooks/core/process.ts`, `hooks/register.ts`)
+
+The process judge runs on **four triggers**:
+- **plan**: the user accepted an `ExitPlanMode` result.
+- **workflow**: a `Workflow` tool result launched a run.
+- **pace**: a typed prompt (`composer` or `bridge` origin) reads as a complaint about pace (`isPace`).
+- **clock**: 30 minutes of wall time have passed since the last run (or the session's first ask).
+
+**Gate before any run** (`shouldProcess`):
+- `state.process.running` blocks a second concurrent run (the habit judge's lock is separate).
+- `state.seq <= state.process.lastAtSeq`: nothing new has happened since the last run — silent.
+- For the **clock** trigger only, or when the budget backoff is > 1: the gap since the last run (or first ask) must be at least `PROCESS_CLOCK_MS × backoff` (30 min × backoff). Event triggers (`plan`, `workflow`, `pace`) do not wait for the clock when the backoff is 1.
+
+**Pace detection** (`isPace`): a typed prompt matches one of the pace-complaint patterns — "taking forever", "why so slow", "hurry up", etc. Task notifications, peer messages, SDK and scheduled prompts are never pace complaints. A misfire only triggers a run, never a card.
+
+**A cold snapshot** (the fork answers null without throwing): every trigger is automatic, so it is no run and no failure — no toast, `runs` unchanged — and `process.cold` hands back the `lastAtMs`/`lastAtSeq`/`lastAtTurn` that `process.start` set and clears `running`, so the next trigger forks again. A fork that throws, or a reply that cannot be read, is a failure: `process.done` with the error, and a toast `ContextSaver: process check failed — <reason>`.
+
+**Budget backoff** (`state.process.backoff`): when the process judge has spent more than `JUDGE_BUDGET_SHARE` (3%) of the session's tokens, `backoff` doubles and event triggers also wait for the doubled interval.
+
+### 12.2 PROCESS digest (`hooks/core/process.ts: digestOf`)
+
+The digest is the process judge's only evidence — deterministic, capped at `DIGEST_MAX_CHARS` ≈ 40k characters. Five sections:
+
+| Section | What it contains |
+|---|---|
+| **ASKS** | Heads of typed prompts (≤ `ASK_HEAD_MAX` = 200 chars), elapsed minutes, `pace` flag when the prompt complained. The first ask is pinned and never cut. |
+| **SHAPE** | One row per workflow run: declared phases (from `meta.phases` in the script), loops, models, time, tokens, edits, merges and checks-after-merge. Per-phase rows. Direct agents. Whole-session roles-by-model tally. |
+| **CADENCE** | Turns, session span, compactions, pace complaints; check runs, merges, checks after a merge, commits; the longest idle waits. |
+| **ARTIFACTS** | Edits, written paths, re-read paths (≥ 3 reads), memory files by name and path only — their content is never read. |
+| **INTERVENTIONS** | Every process finding already raised (open ones included, with their `kind`) and every decided pattern, with sent counts; then counts of pending items and reached agents. The next process run reads it to reuse an id rather than raise a second card. |
+
+**Cap and cut order**: over the cap, sections are trimmed in this order: oldest ASKS (never the first), then ARTIFACTS, INTERVENTIONS, CADENCE, and SHAPE last. Each cut ends with a `~ ×N lines cut` marker. SHAPE is never the first section cut.
+
+**Agent aliases**: the digest prints short aliases (`a1`, `a2` …) built from the same `processAliases` table that `parseProcessReply` uses to validate cited handles.
+
+### 12.3 Reply contract and clamps (`hooks/core/process.ts: parseProcessReply`)
+
+The process judge replies with one JSON object (no prose, no code fence). Fields per finding:
+
+- `id`: `process:<kebab-slug, ≤ 40 chars>`. Lowercased before validation.
+- `kind`: one sentence ≤ `KIND_MAX` (120) chars, stating what the session does.
+- `lean`: one sentence ≤ `ALTERNATIVE_MAX` (200) chars, stating how a lean expert runs it.
+- `alternative`: one imperative sentence ≤ 200 chars, addressed to Claude — the one change.
+- `evidence`: non-empty array of handles the digest printed (`run:<id>`, `agent:<alias>`, `turn:<n>`). A handle not in the digest discards the finding whole.
+- `cost_tokens`, `cost_ms`: what the cited handles measured, clamped to that total. A claim above the measured total is cut down to it. Never a projection.
+- `confidence`: 0.75–1.0. Below `PROCESS_MIN_CONFIDENCE` (0.75): finding dropped.
+- `proposal`: null, or `{kind, title, body}` for a fix that should outlive the session.
+
+**Drop rules**: unknown handle, confidence < 0.75, `id` already kept this session, or more than `MAX_PROCESS_FINDINGS` (3) findings → dropped with a reason. `kind` or `alternative` over twice their max → dropped; over the max but under twice: kept, noted in the run report.
+
+### 12.4 Process cards and the one-time Fix (`hooks/core/patterns.ts`, `hooks/core/rules.ts`, `hooks/register.ts`)
+
+A process finding becomes a **process card** alongside habit cards, showing:
+- **Is** (`kind`): what this session does.
+- **Lean** (`lean`): how a lean expert runs it.
+- Cost so far (tokens and wall time): the newest run's claim, clamped to what its cited handles measured; what they measured when the session holds no claim (a pattern revived from the store).
+- Three verbs: **Fix**, **Fix…**, **Ignore**.
+
+**Fix** (choice `kill`): sends `"Change the remaining work: <alternative>"` **once, to the main loop only**. **Fix…** (choice `steer`) sends the person's own text the same way, once, prefixed with `Change the remaining work: ` unless it already opens with it. The text goes into `state.notes` and is drained only when a tool call has no `agentId` or when `prompt.submit` fires — a subagent's call leaves it queued. After the note is sent, the finding appears in the Rules pane as a proposed artifact (`claude-md`, `skill` or `agent-brief` per `proposal.kind`). No standing instruction is added for a process finding; the re-plan is sent once.
+
+**Ignore** (choice `keep`): nothing is sent; the card disappears for the session.
+
+### 12.5 Subagent delivery (`hooks/register.ts`)
+
+Habit fixes (standing instructions) reach every new subagent through two paths, deduped per agent:
+
+1. **Spawn rewrite** (`agent.spawn`): the hook appends standing instructions to the new agent's prompt. A spawn in flight counts as reached immediately.
+2. **First-call context** (fallback): when an agent's first tool call arrives and it was not reached at spawn, the instructions are added as context on that tool result. The second call gets nothing.
+
+The card's **sent ×N** count increments once per agent reached by either path. Toasts are grouped: deliveries within `DELIVERY_BURST_MS` (5 s) share one toast. Engine forks never receive standing instructions. Process fixes (one-time notes) never reach subagents by either path.
+
+### 12.6 Fresh store key (`hooks/core/types.ts`)
+
+`STORE_KEY_VERSION = 'v5'`. Store key: `patterns.v5:<cwd>`. A 0.4.x entry is never read — the store starts fresh for every 0.5 session, and nothing is migrated.
+
+### 12.7 What never leaves the session
+
+- **Prompt heads** (`Ask.head`): ≤ `ASK_HEAD_MAX` chars of a typed prompt, control characters stripped. Session-only: never stored in `$.store`, never in a persisted `why`, never printed by `/saver debug`, never sent to the habit judge. `storableOf` enforces it where the registry is persisted: a process pattern is stored with `why` `''`, a habit `why` quoting 24+ consecutive characters of a head (case and whitespace aside) is stored as `''`, and a pattern whose `kind`, `alternative` or `lean` quotes one is not stored at all.
+- **Memory contents**: ARTIFACTS names memory files by path and file name only. Their content is never read.
+- **Workflow scripts**: the script file is parsed as a literal to extract `meta.phases`; it is never executed.
+- **Process digest**: lives in session state and the fork prompt only. Not persisted.
+
+### 12.8 Habit judge repairs (D6)
+
+Verified causes of missed findings, fixed in 0.5:
+- **Fold cap**: LEDGER fold lines capped at `FOLD_LINES` (40), largest by characters first; the rest become one `~ ×N more` line.
+- **Citable rows window**: per-agent cap `JUDGE_AGENT_ROWS` (40 rows) so no single agent fills the window. One shared `citableRows` list is used by rendering, citation checking and the sinks.
+- **Prose review severities**: `(Important)` → `high`, `Minor:` → `low`; parsed from outcome text, not only from `findings[]` JSON.
+- **Compaction exemption**: applies only to reading and re-deriving, not to check or build runs.
+- **First occurrence**: a user correction or a saved feedback memory counts as the first occurrence.
+
+---
+
 ## Appendix A — The judge prompt (verbatim; `JUDGE_PROMPT` in `core/judge.ts`)
 
 Merged from the synthesized draft and both critics' revisions; every column it names exists in `Row`/`TurnStat`/`KeyStat` (sections 4, 5.1) and is rendered by `buildPrompt` (section 5.3). Static part ≈ 3,050 words (whitespace-separated) / ≈ 19 kB.
@@ -743,7 +844,8 @@ You are writing an interruption. Every finding can put a card in front of the us
 ## Counting — what makes two occurrences a repeat
 - Separated by other work. Two occurrences of the same behaviour count as two decisions when at least one other row sits between them — an edit, a read, another command — whether in the same turn or a later one; a run after an edit is a second decision, not a second call in one batch — whether it is excused is the category's own question. Calls issued together with nothing between them are one batch and count once: a parallel set of Reads, or a fan-out of subagents launched at once, is one choice however wide. Breadth is one decision; weight is not: every stage of a workflow (each `label` in AGENTS) is a decision of its own, and the same role recurring stage after stage — a check loop per chunk, a review round after every fix — is a repeat.
 - Both unexcused. An occurrence the "Never report" list excuses does not count and may not be cited. Subtract the excused ones first; if fewer than two remain, there is no finding. A baseline suite run at the start plus the check before a commit is zero findings.
-- Same side of a compaction. TURNS lists the turns where a compaction happened; content dropped by it must be re-acquired. Count only occurrences after the last compaction.
+- Same side of a compaction, for reading only. TURNS lists the turns where a compaction happened; what it dropped must be re-acquired, so a read or a re-derivation after one is not a repeat of one before it. Repeated work is: a check, a build, a review round or an agent run again across a compaction counts on both sides.
+- A correction is the first occurrence. When the user corrected a behaviour this session, or a saved feedback memory in the transcript names it, that correction counts as its first occurrence: one unexcused occurrence after it is a finding, and `why` names the correction.
 - Same behaviour, not the same shape. For a signature finding that means the same `key`; two Read keys differing only in `:offset-limit` are different slices, not a repeat. For a null-signature finding you must name one behaviour and show it in each cited turn; do not staple unrelated expensive turns together.
 - Agents are loops of their own. The `agent` column names the loop; a repeat inside one agent's rows counts exactly like a repeat in the main loop, and the main loop re-doing after an agent returns what that agent's rows show it already did (the same Read key, the same check) is a repeat across loops.
 - Short ledgers. With fewer than about 12 rows or fewer than 4 turns, report only behaviours with three or more surviving occurrences, or one plus explicit stated intent.
@@ -757,7 +859,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - communication — turns with `calls 0` and large `answerChars` that restate the plan or recap finished work; stopping to ask what the transcript, the repo or your instructions already answer; an `ask` row that held the turn for minutes while no agent ran (no rows between it and the next prompt) and whose options carried a recommended default (`recommended`) — proceed on the default and ask beside the work. Not: the turn that answers a question the user asked; a plan or explanation you were asked for; the session's last turn; plan mode, where making no tool call is required; a question whose answer the transcript shows changed the plan. `out` includes thinking, so point at the restated content, not the token shape.
 - multi-agent — parallel agents each re-reading the same large file the parent already had; agents with a thin brief (small `promptChars`, large `tokens`); results never read; agents spawned again after a limit error; mechanical agents on the premium model (`agent=` flag shows the resolved model and `edits`); the main loop re-reading files or re-running checks an agent's rows already covered, after it returned; a brief that pastes in whole files (large `promptChars`) to an agent whose rows then Read the same paths anyway; a workflow whose later agents re-read what earlier agents read (the same Read keys under successive `agent` values, spread over turns); a loop whose rows are only checks that passed, with `edits 0` and a report as its outcome (AGENTS `checks` > 0) — a shell step given a model; review or verify loops with `edits 0` whose outcome carries no medium, high or critical finding, recurring stage after stage; two or more verifier loops per finding; a run whose tokens per edit are several times the others'; a fix loop followed by a review whose outcome carries a new high in the same stage, twice (regression chasing: stop the loop and re-plan). Not: agents with disjoint file sets each reading one shared spec; two agents touching one path unless the ledger shows a conflict (an errored edit right after another agent's edit, or a re-edit in the main loop after they returned); a re-read whose brief the transcript shows is a review or verification pass; every agent reading the one spec its brief names; the parent reading an agent's result; one review per stage that found a medium or higher; a loop that edited; a fan-out's breadth on its own.
 - environment — installs repeated with no manifest edit; Bash used where Read/Grep/Edit is cheaper; fixed per-turn overhead (memory files, agent descriptions, MCP schemas in the facts line) larger than the work. Not: the user's own denials (`denied`); a single approval prompt.
-- process — many tiny commits or amends on one change; work declared done with no check run; re-deriving after a compaction what was settled before it. Not: docs- or config-only changes with no check to run, or a check the environment cannot run.
+- process — many tiny commits or amends on one change; work declared done with no check run. Not: docs- or config-only changes with no check to run, or a check the environment cannot run.
 - other — a repetition none of the above names. Name it plainly.
 
 ## Never report
@@ -765,7 +867,7 @@ You are writing an interruption. Every finding can put a card in front of the us
 - A single long call that was needed once, however long it ran: the largest row in TIME or CONTEXT is a fact to explain, never a finding on its own.
 - Orientation: the first look at any file, directory or log, an unfamiliar area, or a scope the user left open ("audit every call site", "review the repo").
 - Parallelism: calls issued together with nothing between them are one decision, and agents on disjoint scopes launched at once are one decision — one, not none: their weight is judged under multi-agent.
-- Occurrences a compaction separates, and any re-read a compaction made necessary. Compaction, prompt-cache reads and the host's own truncation are the harness working as designed.
+- A re-read, or re-deriving what was settled, that a compaction made necessary. Compaction, prompt-cache reads and the host's own truncation are the harness working as designed; work repeated across a compaction is not excused by it.
 - A denied call (`denied`): the user or a policy said no, never your waste. The only reportable version is re-running an unchanged command already declined twice, and then the fix is a `settings-allow` proposal, not a rebuke.
 - A file change you cannot see: the `paths` column records only Edit/Write and Bash calls the host diffed, and nothing for a staged edit. Treat an intervening formatter, codegen, migration, install, `git checkout|stash|pull|apply`, `sed -i`, MCP edit or another agent's edit as having changed the file.
 - Volume alone. A large read is waste only when a cheaper call would have answered the same question for the same purpose; if the output was the deliverable (the diff under review, the log you were asked to explain, a file about to be rewritten) it is not a finding.
@@ -1008,3 +1110,50 @@ top of `hooks/ui.tsx` rather than in `hooks/core/types.ts`: they are private to 
 `types.ts` is the shared contract, which carries no cells. Constants that more than one module reads —
 the row and debug caps, the CLAUDE.md heading, the agent brief's default tools — do live in
 `types.ts`.
+
+---
+
+## Appendix E — The process judge prompt (verbatim; `PROCESS_PROMPT` in `core/process.ts`)
+
+Built from the plan's locked brief; every handle it names is printed by `digestOf` and validated by `parseProcessReply`. Static part ≈ 350 words / ≈ 2.1 kB.
+
+```text
+This message is not a step of the task. The work is paused while you answer one review question: you cannot call tools, and do not continue, retry or resume anything the transcript was doing. Your whole reply is the JSON object described below.
+
+You are reviewing HOW this session is being run, not what it produced. The transcript above is your own: read it for what the user asked for and what was decided. The digest below is the measured shape of the work so far; nothing outside it is evidence for this review.
+
+Answer one question: given what the user asked, how would a lean expert run this work? Then say where this session's process diverges from that, what each divergence has cost so far, and what the one change to the remaining work is. Look at the shape, not at single calls: review and fix rounds stacked on a review that already covers them; the heaviest model on mechanical stages; an agent spawned for a job one command would do; the full check suite after every merge where once per batch would do; the same plan or file re-read over and over; the pace the user complained about.
+
+Prefer silence to a guess. A wrong "lean" suggestion is worse than none: report a divergence only when the digest measures its cost and the lean alternative plainly reaches the same result for less. Anything the user asked for is not a divergence, and a long session is not a wasteful one. At most three findings; fewer and bigger is better, and `"findings": []` is a correct and common answer. INTERVENTIONS lists every process finding already raised. The same divergence under another id is the same finding: return its id. One the person ignored is never reported again.
+
+## Evidence
+`evidence`: handles the digest prints, copied exactly — `run:<id>` (a SHAPE run row), `agent:<alias>` (a loop SHAPE lists, as `agent:a3`), `turn:<n>` (a turn ASKS or CADENCE names). A finding citing any other handle is discarded whole. Cite every run, loop or turn the cost comes from.
+
+## Cost
+`cost_tokens` and `cost_ms`: what the divergence has cost so far, measured from the cited handles — a run's or a loop's tokens and minutes, a turn's. A claim above what the cited handles total is cut down to it. Never a projection: what it would cost if unchanged belongs in `why`.
+
+## Confidence
+`confidence` runs 0.75 to 1.0. 0.9+: the digest shows the divergence repeated and costed, and nothing in the transcript asked for it. 0.75-0.9: plain and costed, and no legitimate reason is visible. Below 0.75: say nothing; it is discarded.
+
+## Contract — the shape of your reply, stated once (documentation, not a template to echo)
+```json
+{"findings": [{"id": "process:<kebab-slug, at most 40 chars>",
+  "kind": "<one sentence, at most 120 chars: what this session does>",
+  "lean": "<one sentence, at most 200 chars: how a lean expert runs it>",
+  "alternative": "<one imperative sentence, at most 200 chars, addressed to Claude: the one change to the remaining work>",
+  "why": "<one or two sentences: the measured cost, and the reason for it you considered and ruled out>",
+  "evidence": ["run:<id>", "agent:<alias>", "turn:<n>"],
+  "cost_tokens": 0,
+  "cost_ms": 0,
+  "confidence": 0.85,
+  "proposal": null}]}
+```
+`proposal`: null unless the change should outlive the session. Otherwise `{"kind","title","body"}` where body is, per kind: `claude-md` one imperative rule line; `skill` the workflow as the body of a SKILL.md; `agent-brief` the brief, whose first line may be `model: haiku` or `model: sonnet`.
+
+Reply with one JSON object: first character `{`, last character `}`, no prose before or after, no code fence.
+
+## PROCESS DIGEST
+{{DIGEST}}
+
+Return the JSON object only.
+```

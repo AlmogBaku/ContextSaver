@@ -12,10 +12,12 @@ export const suitePattern: Pattern = {
   proposal: { kind: 'claude-md', title: 'Targeted tests', body: 'Run only the tests covering the files you changed.' },
   estTokensPerTurn: null,
   lastDecision: null,
+  lean: null,
   hits: [],
   decision: null,
   decidedAtTurn: null,
   instruction: null,
   openedAtTurn: null,
   ignored: 0,
+  sent: 0,
 }

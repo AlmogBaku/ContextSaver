@@ -12,10 +12,12 @@ export const chattyPattern: Pattern = {
   proposal: null,
   estTokensPerTurn: 1_200,
   lastDecision: null,
+  lean: null,
   hits: ['turn:14', 'turn:15'],
   decision: null,
   decidedAtTurn: null,
   instruction: null,
   openedAtTurn: null,
   ignored: 0,
+  sent: 0,
 }

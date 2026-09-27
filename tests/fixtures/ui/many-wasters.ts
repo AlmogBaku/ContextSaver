@@ -10,6 +10,7 @@ const seated: Card = {
   stats: '2× · ~2% of context · 6s · turns 15–17',
   why: 'the check ran twice in a row with no edited path between the two runs',
   fix: 'run a check again only after editing what it covers',
+  lean: null,
   total: { unit: 'calls', calls: 2, ms: 6_000, chars: 16_000 },
   evidence: [
     { turn: 17, what: 'bunx tsc --noEmit', agent: null, ms: 3_000, chars: 8_000, head: 'Found 0 errors.' },

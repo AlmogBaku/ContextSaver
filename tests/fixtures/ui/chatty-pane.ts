@@ -14,6 +14,7 @@ export const chattyPane: PaneModel = {
       stats: '2× · turns 14–15',
       why: 'turns 14 and 15 made no call and restated the plan already agreed',
       fix: 'State the result in one or two lines and take the next action; do not restate the plan.',
+      lean: null,
       total: { unit: 'turns', calls: 2, ms: 0, chars: 4_800 },
       evidence: [
         { turn: 15, what: NO_CALLS, agent: null, ms: 0, chars: 6_100, head: 'To recap the plan before I touch anything' },

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { appendedTo, bulletOf, bulletOnly, mergeSettings, propose, render } from '../hooks/core/rules'
 import { killPrompt } from '../hooks/core/text'
+import type { Pattern } from '../hooks/core/types'
 import { rulePattern } from './fixtures/rules/pattern'
 import { ruleProposals } from './fixtures/rules/proposals'
 import { existingSettings } from './fixtures/rules/settings'
@@ -157,5 +158,23 @@ describe('rules', () => {
     expect(mergeSettings('{ "permissions": ', rule)).toBe(fresh)
     expect(mergeSettings('[1, 2]', rule)).toBe(fresh)
     expect(mergeSettings('{"permissions": {"allow": "Bash(ls:*)"}}', rule)).toBe(fresh)
+  })
+
+  test('a process Fix is offered as a CLAUDE.md line, a skill or a brief, never a permission rule', async () => {
+    const lean = 'Implement every lane, review the branch once, fix once'
+    const process = (over: Partial<Pattern>): Pattern => rulePattern({
+      id: 'process:review-per-lane', category: 'process', signature: null, hits: ['run:w3'], lean,
+      alternative: 'Change the remaining work: drop the per-lane reviews.', decision: 'kill', decidedAtTurn: 14, ...over,
+    })
+    const [fallback] = propose(ruleState([process({})]))
+    expect(fallback?.kind).toBe('claude-md')
+    expect(fallback?.content, 'the lasting line is how a lean run goes, not the one-time re-plan').toBe(`\n## ContextSaver\n- ${lean}\n`)
+    const steered = propose(ruleState([process({ decision: 'steer', instruction: 'Change the remaining work: skip the lane reviews' })]))
+    expect(steered[0]?.content).toBe(`\n## ContextSaver\n- ${lean}\n`)
+    const allow = propose(ruleState([process({ proposal: { kind: 'settings-allow', title: 'Allow reviews', body: 'Bash(bun test:*)' } })]))
+    expect(allow.map(a => a.kind), 'a process finding has no permission to grant').toEqual(['claude-md'])
+    const skill = propose(ruleState([process({ proposal: { kind: 'skill', title: 'Lean workflow', body: lean } })]))
+    expect(skill.map(a => a.kind)).toEqual(['skill'])
+    expect(propose(ruleState([process({ decision: 'keep' })]))).toEqual([])
   })
 })

@@ -12,4 +12,5 @@ export const storedSuite: StoredPattern = {
   proposal: null,
   estTokensPerTurn: null,
   lastDecision: 'kill',
+  lean: null,
 }

@@ -1,6 +1,7 @@
 import { agentAliases, aliasOf, baseline, foldRows, rowsOf, sinks, sumOf } from './evidence'
+import { measuredCost } from './process'
 import { activeRuns, countRow } from './spawns'
-import { collapseWs, duration, instructionOf, killPrompt, median, pctOf } from './text'
+import { collapseWs, duration, instructionOf, killPrompt, kilo, median, pctOf } from './text'
 import {
   ALTERNATIVE_MAX, CARD_EVIDENCE, DEBUG_MAX_DROPPED, DEBUG_MAX_LINES, DEBUG_MAX_PATTERNS, FILE_TOOLS,
   JUDGE_BUDGET_SHARE, JUDGE_MAX_BACKOFF, KEY_MAX, KIND_MAX, LOOP_CAP, MAIN_AGENT, MAX_PATTERNS, NO_CALLS, ROW_CAP,
@@ -161,7 +162,7 @@ const applyAgentStart = (state: State, a: Extract<Action, { type: 'agent.start' 
 const applyRunStart = (state: State, run: { id: string; name: string; dir: string | null }, now: number): State =>
   state.runs.some(r => r.id === run.id)
     ? state   // a resume: the run is the one already known, dated at its first launch
-    : { ...state, runs: [...state.runs, { ...run, turn: state.turn, seq: state.seq, at: now, refreshedAt: 0 }] }
+    : { ...state, runs: [...state.runs, { ...run, turn: state.turn, seq: state.seq, at: now, refreshedAt: 0, phases: [] }] }
 
 // A `started` entry names the loop's run and stage; a `result` entry what it returned. Either creates the loop.
 const applyEntry = (state: State, runId: string, loops: readonly Loop[], entry: JournalEntry): Loop[] =>
@@ -244,15 +245,22 @@ const applyUsage = (state: State, usage: State['usage'], now: number): State => 
   judge: state.judge.lastAtMs === 0 && now > 0 ? { ...state.judge, lastAtMs: now } : state.judge,
 })
 
+const REPLAN = 'Change the remaining work: '
+
+// The one-time re-plan a process Fix sends, said once even when the finding's own words already say it.
+const replanOf = (text: string): string => (text.trimStart().toLowerCase().startsWith(REPLAN.toLowerCase()) ? text.trim() : `${REPLAN}${text.trim()}`)
+
 const applyDecide = (state: State, id: string, choice: Choice, text: string | undefined): State => {
   const p = patternById(state.patterns, id)
   if (p === undefined) return state
-  const instruction = choice === 'kill' ? killPrompt(p) : (text ?? '')
+  const process = p.lean !== null
+  // A process Fix sends the lean alternative itself: `killPrompt` stops a behaviour, a re-plan changes the work.
+  const instruction = choice === 'kill' ? (process ? p.alternative : killPrompt(p)) : (text ?? '')
   if (choice !== 'keep' && instruction.trim() === '') return state
   const sending = choice !== 'keep'
   // Fix rides the same wrapper as Fix… (§5.2 "same with killPrompt(p)", Appendix C 5c "the same way"):
   // Claude reads `Instruction from the user (via ContextSaver): Stop this behaviour …`.
-  const note = instructionOf(instruction)
+  const note = instructionOf(process ? replanOf(instruction) : instruction)
   const decided: Pattern = {
     ...p,
     decision: choice,
@@ -269,9 +277,42 @@ const applyDecide = (state: State, id: string, choice: Choice, text: string | un
     steering: null,
     steerDraft: null,
     notes: sending ? pushUnique(state.notes, note) : [...state.notes],
-    standing: sending ? pushUnique(state.standing, note) : [...state.standing],
+    // A re-plan is the orchestrator's, once (D3): standing would hand it to every subagent spawned after.
+    standing: sending && !process ? pushUnique(state.standing, note) : [...state.standing],
   }
 }
+
+// A process run's patterns join the registry beside the habit judge's; its cadence and cost are its own.
+const applyProcessDone = (state: State, a: Extract<Action, { type: 'process.done' }>): State => {
+  const patterns = [...a.patterns, ...state.patterns.filter(p => patternById(a.patterns, p.id) === undefined)]
+  const wanted = a.fresh.filter(id => patternById(patterns, id)?.decision === null && !state.cards.includes(id))
+  const total = totalTokens(state)
+  const spent = state.process.spent + a.spent
+  return {
+    ...state,
+    patterns,
+    cards: [...wanted, ...state.cards],
+    process: {
+      ...state.process,
+      running: false,
+      runs: state.process.runs + 1,
+      spent,
+      backoff: total > 0 && spent > JUDGE_BUDGET_SHARE * total ? state.process.backoff * 2 : state.process.backoff,
+      error: a.error,
+      last: { returned: a.returned, kept: a.kept, dropped: a.dropped, usage: a.usage },
+    },
+  }
+}
+
+// One agent reached by the standing instructions: counted once, on every pattern whose instruction is standing.
+const applyDeliverySent = (state: State, agentId: string): State =>
+  state.delivery.agents.includes(agentId)
+    ? state
+    : {
+        ...state,
+        delivery: { ...state.delivery, agents: [...state.delivery.agents, agentId] },
+        patterns: state.patterns.map(p => (p.lean === null && p.instruction !== null && state.standing.some(t => t.includes(p.instruction ?? '')) ? { ...p, sent: p.sent + 1 } : p)),
+      }
 
 const applyJudgeDone = (state: State, a: Extract<Action, { type: 'judge.done' }>): State => {
   const recurred = (p: Pattern): boolean => a.recurred.includes(p.id) && isSent(p.decision)
@@ -356,6 +397,22 @@ export const reduce = (state: State, action: Action): State => {
       return { ...state, judge: { ...state.judge, running: true, lastAtMs: action.now, lastAtSeq: action.seq } }
     case 'judge.done':
       return applyJudgeDone(state, action)
+    case 'ask':
+      return { ...state, asks: [...state.asks, action.ask] }
+    case 'run.phases':
+      return { ...state, runs: state.runs.map(r => (r.id === action.runId ? { ...r, phases: [...action.phases] } : r)) }
+    case 'process.start':
+      return { ...state, process: { ...state.process, running: true, lastAtMs: action.now, lastAtSeq: action.seq, lastAtTurn: state.turn } }
+    case 'process.done':
+      return applyProcessDone(state, action)
+    case 'process.cold':
+      return { ...state, process: { ...state.process, ...action.was, running: false } }
+    case 'delivery.pending':
+      return { ...state, delivery: { ...state.delivery, pending: Math.max(0, state.delivery.pending + action.delta) } }
+    case 'delivery.sent':
+      return applyDeliverySent(state, action.agentId)
+    case 'delivery.toasted':
+      return { ...state, delivery: { ...state.delivery, lastToastAt: action.now } }
     case 'check.arm':
       return { ...state, pendingCheck: true }
     case 'notes.drained':
@@ -449,6 +506,12 @@ const totalOf = (p: Pattern, state: State, rows: readonly Row[]): Card['total'] 
   return { unit: 'turns', calls: citedTurnStats(p, state).length, ms: 0, chars }
 }
 
+// A process card's Cost so far: the newest run's claim, clamped to its cited handles; what they measured when none is held.
+const costSoFar = (state: State, p: Pattern): string => {
+  const cost = p.cost ?? measuredCost(state, p.hits)
+  return `${duration(cost.ms)} · ${kilo(cost.tokens)} tokens`
+}
+
 /** Derives the waster card in seat `n` from a pattern, the evidence it cites and the ledger's loop aliases. */
 export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap<string, string>): Card => {
   const rows = rowsOf(state, p)
@@ -457,9 +520,10 @@ export const cardOf = (p: Pattern, state: State, n: number, aliases: ReadonlyMap
     n,
     category: p.category,
     kind: p.ignored > 0 ? `ignored · ${p.kind}` : p.kind,
-    stats: statsOf(p, state, rows),
+    stats: p.lean === null ? statsOf(p, state, rows) : costSoFar(state, p),
     why: p.why,
     fix: p.alternative,
+    lean: p.lean,
     total: totalOf(p, state, rows),
     evidence: evidenceOf(p, state, rows, aliases),
   }
@@ -512,6 +576,7 @@ const decidedRowOf = (state: State, p: Decided): DecidedRow => ({
     ? p.instruction
     : null,
   ignored: p.ignored,
+  sent: p.sent,
 })
 
 /** Builds everything the pane renders: header, wasters, decisions and rules. */
@@ -648,7 +713,9 @@ const storedOf = (v: unknown): StoredPattern | null => {
   if (estTokensPerTurn !== null && !(typeof estTokensPerTurn === 'number' && Number.isFinite(estTokensPerTurn) && estTokensPerTurn >= 0)) return null
   if (lastDecision !== null && !isOneOf(lastDecision, ['keep', 'steer', 'kill'])) return null
   if (signature === undefined || proposal === undefined) return null
-  return { id, category, kind, signature, why, alternative, confidence, proposal, estTokensPerTurn, lastDecision }
+  const lean = o['lean'] ?? null
+  if (lean !== null && !isText(lean, ALTERNATIVE_MAX)) return null
+  return { id, category, kind, signature, why, alternative, confidence, proposal, estTokensPerTurn, lastDecision, lean }
 }
 
 /** Reads a stored registry from the plugin store, dropping every entry that does not validate. */
@@ -674,11 +741,32 @@ export const toStored = (p: Pattern): StoredPattern => ({
   proposal: p.proposal,
   estTokensPerTurn: p.estTokensPerTurn,
   lastDecision: p.lastDecision,
+  lean: p.lean,
 })
+
+const QUOTE_MIN = 24   // consecutive characters of a typed ask that make a stored text a quote of it
+
+// Whether `text` carries QUOTE_MIN consecutive characters of any head, case and whitespace aside.
+const quotesAsk = (text: string, heads: readonly string[]): boolean => {
+  const t = collapseWs(text).toLowerCase()
+  return heads.some(h => Array.from({ length: Math.max(0, h.length - QUOTE_MIN + 1) }, (_, i) => h.slice(i, i + QUOTE_MIN)).some(q => t.includes(q)))
+}
+
+/**
+ * What this session persists: every pattern stored, never a typed prompt. A process `why` is not stored at
+ * all, a habit `why` quoting an ask is blanked, and a pattern whose kind, fix or lean quotes one stays in the session.
+ */
+export const storableOf = (state: State): StoredPattern[] => {
+  const heads = state.asks.map(a => collapseWs(a.head).toLowerCase())
+  return state.patterns.map(toStored).flatMap(s =>
+    [s.kind, s.alternative, s.lean ?? ''].some(t => quotesAsk(t, heads))
+      ? []
+      : [{ ...s, why: s.lean !== null || quotesAsk(s.why, heads) ? '' : s.why }])
+}
 
 /** Revives a stored pattern with empty session fields. */
 export const fromStored = (s: StoredPattern): Pattern => ({
-  ...s, hits: [], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0,
+  ...s, hits: [], decision: null, decidedAtTurn: null, instruction: null, openedAtTurn: null, ignored: 0, sent: 0,
 })
 
 // What a stored entry is worth when the registry overflows: a decision outranks any confidence.
@@ -718,17 +806,17 @@ const patternLines = (state: State): string[] => {
 }
 
 /** What one judge fork cost, one line: the same text `/saver debug` and the debug log both print. */
-export const usageLine = (u: JudgeUsage): string =>
-  `judge usage: in ${u.input} · out ${u.output} · cache read ${u.cacheRead} · cache create ${u.cacheCreate}`
+export const usageLine = (u: JudgeUsage, label = 'judge'): string =>
+  `${label} usage: in ${u.input} · out ${u.output} · cache read ${u.cacheRead} · cache create ${u.cacheCreate}`
 
 // What the last run reported, and why anything it returned never reached the user.
-const judgeRunLines = (run: JudgeRun | null): string[] =>
+const judgeRunLines = (run: JudgeRun | null, label = 'judge'): string[] =>
   run === null
     ? []
     : [
-        `judge last: ${run.returned} returned · ${run.kept} kept · ${run.dropped.length} dropped`,
+        `${label} last: ${run.returned} returned · ${run.kept} kept · ${run.dropped.length} dropped`,
         ...run.dropped.slice(0, DEBUG_MAX_DROPPED).map(reason => `  ${reason}`),
-        ...(run.usage === null ? [] : [usageLine(run.usage)]),
+        ...(run.usage === null ? [] : [usageLine(run.usage, label)]),
       ]
 
 // The audit a load owes a session it joined late: fired at `session.start` over the adopted rows, retried at
@@ -741,6 +829,12 @@ const loadCheckLine = (state: State, spoke: boolean): string => {
 // Where a budget went, as the pane's Time and Context rows no longer spell out: the total and the largest sinks.
 const sinkLine = (label: string, unit: string, budget: Sinks | null): string =>
   `${label} sinks: ${budget === null ? '-' : [`${budget.total}${unit} total`, ...budget.sinks.map(s => `${s.label} ${s.amount} ×${s.count}`)].join(' · ')}`
+
+// The process judge's cadence and the asks it counts: how many and how many read as pace, never what was typed.
+const processDebugLine = (state: State): string => {
+  const p = state.process
+  return `process runs ${p.runs} · spent ${p.spent} tokens · backoff ${p.backoff} · running ${p.running} · lastAt turn ${p.lastAtTurn} / row ${p.lastAtSeq} / ${p.lastAtMs}ms · error ${p.error ?? '-'} · asks ${state.asks.length} · pace ${state.asks.filter(a => a.pace).length}`
+}
 
 /** Renders the whole state, and whether the load lane has reported yet, for `/saver debug` in ≤ 40 lines. */
 export const debugDump = (state: State, spoke = false): string => {
@@ -760,7 +854,9 @@ export const debugDump = (state: State, spoke = false): string => {
     `judge runs ${j.runs} · spent ${j.spent} tokens (${share === null ? '-' : `${share}%`} of the session) · backoff ${j.backoff} · running ${j.running} · lastAt ${j.lastAtTokens} tokens / turn ${j.lastAtTurn} / row ${j.lastAtSeq} / ${j.lastAtMs}ms · error ${j.error ?? '-'} · focus ${oneLine(j.focus)}`,
     `judge time: ${oneLine(j.time)}`,
     `judge context: ${oneLine(j.context)}`,
+    processDebugLine(state),
     ...judgeRunLines(j.last),
+    ...judgeRunLines(state.process.last, 'process'),
     loadCheckLine(state, spoke),
     `usage ${u.percent ?? '-'}% · ${u.tokens ?? '-'} / ${u.window} tokens · compactAt ${u.compactAt ?? '-'} · toCompaction ${tokensToCompaction(state) ?? '-'} · turnsLeft ${turnsToCompaction(state) ?? '-'} · session ${totalTokens(state)} new`,
     `overhead ${o === null ? '-' : `memory ${o.memory} · mcp ${o.mcp} · agents ${o.agents}`}`,
@@ -769,3 +865,7 @@ export const debugDump = (state: State, spoke = false): string => {
     `saved ${duration(state.saved.ms)} · ~${pctOf(state.saved.chars, u.window)}% · ${state.saved.chars} chars`,
   ].slice(0, DEBUG_MAX_LINES).join('\n')
 }
+
+/** What `/saver` says of the process judge: its runs and their spend; null before its first run. */
+export const processLine = (state: State): string | null =>
+  state.process.runs === 0 ? null : `process ${state.process.runs} run${state.process.runs === 1 ? '' : 's'} · ${kilo(state.process.spent)} tokens`

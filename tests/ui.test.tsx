@@ -23,6 +23,7 @@ import { fullPane } from './fixtures/ui/full-pane'
 import { manyWasters } from './fixtures/ui/many-wasters'
 import { millionPane } from './fixtures/ui/million-pane'
 import { overrunPane } from './fixtures/ui/overrun-pane'
+import { processPane } from './fixtures/ui/process-pane'
 import { quietPane } from './fixtures/ui/quiet-pane'
 import { steeringPane } from './fixtures/ui/steering-pane'
 import { twoWasters } from './fixtures/ui/two-wasters'
@@ -821,7 +822,7 @@ describe('ui', () => {
 
     const ui: Ui | null = resolved
     if (ui === null) throw new Error('the pane drew no elements')
-    const models = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, quietPane, millionPane, fillingPane, fullPane, manyWasters]
+    const models = [emptyPane, twoWasters, expandedPane, chattyPane, steeringPane, decidedPane, overrunPane, awaitingPane, quietPane, millionPane, fillingPane, fullPane, manyWasters, processPane]
     for (const model of models) {
       for (const columns of [40, 56, 60, 70, 80, 100, 120, 160]) {
         const site = { bodyColumns: columns, maxRows: 30 }
@@ -965,5 +966,31 @@ describe('ui', () => {
     expect(holds(pane, 'Claude keeps running the whole')).toEqual(true)
     expect(drawnRows(pane)).toContain('✓ Fix')
     expect(cellsOf(pane)).toBeLessThanOrEqual(PANE_PROPS.bodyColumns)
+  })
+
+  test('a process card says what the session does, the lean way and its cost so far, with the same three verbs', async ($, on) => {
+    const { actions } = recorder()
+    on('ui.render', { component: 'CommandOutput', surface: 'terminal' }, ($, e) =>
+      Pane({ ui: $.ui.resolve(e), model: processPane, site: WIDE_SITE, placement: 'dock', actions }))
+
+    const tree = await $.ui.render(PANE_HOST)
+    const texts = drawnRows(tree)
+    const id = 'process:review-per-lane'
+
+    expect(holds(tree, 'Process · review per lane'), 'the title marks it a process finding').toEqual(true)
+    expect(texts).toContain('Is')
+    expect(texts).toContain('Lean')
+    expect(texts).toContain('Cost so far')
+    expect(holds(tree, 'Each lane runs Implement → Review → Fix')).toEqual(true)
+    expect(holds(tree, 'Implement every lane, review the branch once, fix once')).toEqual(true)
+    expect(texts).toContain('25m · 310k tokens')
+    expect(texts, 'the tag would only repeat the title').not.toContain('process')
+    expect(keysOf(tree)).toContain(`card:${id}:kill`)
+    expect(keysOf(tree)).toContain(`card:${id}:steer`)
+    expect(keysOf(tree)).toContain(`card:${id}:keep`)
+    expect(texts).toContain('✓ Fix')
+    expect(texts).toContain('✎ Fix…')
+    expect(texts).toContain('– Ignore')
+    expect(texts, 'a habit fix says how many subagents it reached').toContain('sent ×2')
   })
 })

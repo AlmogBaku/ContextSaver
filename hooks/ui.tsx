@@ -33,6 +33,8 @@ const TONES = { accent: 'suggestion', good: 'success', warm: 'warning', hot: 'er
 const GAUGE_WARM = 70         // the fill turns warm at this share of the window, and hot past GAUGE_HOT
 const GAUGE_HOT = 90
 const GUTTER = 10             // cells of the dim label column inside an opened card
+const PROCESS_GUTTER = 13     // the label column of a process card, wide enough for 'Cost so far'
+const PROCESS_ROWS = 3        // Is, Lean and Cost so far: the rows of a folded process card
 const NUMBER_CELLS = 3        // the card's dim number and the space after it (two digits and their space fit)
 const GLYPH_CELLS = 2         // the waster's '●' and the space after it
 const CALL_GAP = 3            // cells between the columns of an evidence row
@@ -192,12 +194,12 @@ const textBlock = (ui: Ui, text: string, cells: number, rows: number, isDim?: tr
 const gutterValue = (cells: number): number => Math.max(TITLE_MIN, cells - GUTTER)
 
 /** One row of an opened card: a dim label in the 10-cell gutter, the value in the content column. */
-const gutterRow = (ui: Ui, label: string, value: RenderElement, cells: number): RenderElement => {
+const gutterRow = (ui: Ui, label: string, value: RenderElement, cells: number, gutter = GUTTER): RenderElement => {
   const { Box, Text } = ui
   return (
     <Box flexDirection="row">
-      <Box width={GUTTER}><Text dimColor wrap="truncate-end">{label}</Text></Box>
-      <Box flexDirection="column" width={gutterValue(cells)}>{value}</Box>
+      <Box width={gutter}><Text dimColor wrap="truncate-end">{label}</Text></Box>
+      <Box flexDirection="column" width={Math.max(TITLE_MIN, cells - gutter)}>{value}</Box>
     </Box>
   )
 }
@@ -425,7 +427,14 @@ const headerSection = (
 }
 
 /** The category tag a title row wears, dropped whole once the card is narrower than TAG_MIN_CELLS. */
-const tagOf = (card: Card, cells: number): string => (cells < TAG_MIN_CELLS ? '' : card.category)
+const tagOf = (card: Card, cells: number): string => (cells < TAG_MIN_CELLS || isProcess(card) ? '' : card.category)
+
+/** A card of the process judge: it names a way of working, not a habit. */
+const isProcess = (card: Card): boolean => card.lean !== null
+
+/** A card's bold title: the behaviour, or for a process card `Process · ` and the finding's own name. */
+const titleText = (card: Card): string =>
+  isProcess(card) ? `Process · ${card.patternId.slice(card.patternId.indexOf(':') + 1).replace(/-/g, ' ')}` : card.kind
 
 /** The cells a title row keeps once its tag, the 'i' Button and the gaps around them are reserved. */
 const titleValue = (cells: number, tag: string): number =>
@@ -447,7 +456,7 @@ const titleRow = (ui: Ui, card: Card, actions: Actions, cells: number): RenderEl
         <Box width={NUMBER_CELLS}><Text dimColor wrap="truncate-end">{`${card.n}`}</Text></Box>
         <Box width={GLYPH_CELLS}><Text color={TONES.accent}>{GLYPHS.live}</Text></Box>
         <Box flexDirection="column" width={title}>
-          {linesOf(card.kind, title, TITLE_ROWS).map(line => (
+          {linesOf(titleText(card), title, TITLE_ROWS).map(line => (
             <Text bold wrap="truncate-end">{line}</Text>
           ))}
         </Box>
@@ -601,17 +610,29 @@ const steerRows = (ui: Ui, card: Card, draft: string | null, actions: Actions, c
   ]
 }
 
+/** A folded process card: what the session does, how a lean run would go, and what it has cost so far. */
+const processRows = (ui: Ui, card: Card, cells: number, isCompact: boolean): RenderElement[] => {
+  const { Text } = ui
+  const value = Math.max(TITLE_MIN, cells - PROCESS_GUTTER)
+  const rows = isCompact ? COMPACT_ROWS : VALUE_ROWS
+  return [
+    gutterRow(ui, 'Is', textBlock(ui, card.kind, value, rows), cells, PROCESS_GUTTER),
+    gutterRow(ui, 'Lean', textBlock(ui, card.lean ?? '', value, rows), cells, PROCESS_GUTTER),
+    gutterRow(ui, 'Cost so far', <Text wrap="truncate-end">{fit(card.stats, value)}</Text>, cells, PROCESS_GUTTER),
+  ]
+}
+
 /** Content rows an inline card would draw were the seat wide enough: its details, or its stats and fix. */
 const cardContentRows = (card: Card, model: PaneModel): number =>
   model.expanded === card.patternId
     ? DETAIL_ROWS + Math.min(card.evidence.length, COMPACT_ROWS)
-    : STAT_ROWS
+    : isProcess(card) ? PROCESS_ROWS : STAT_ROWS
 
 /** Rows an inline card spends on everything but its content: the border, the title, the verbs, the field. */
 const cardFixedRows = (card: Card, model: PaneModel, cells: number): number =>
   CARD_BORDER_ROWS
   + linesOf(
-    card.kind,
+    titleText(card),
     titleValue(cells - CARD_CHROME, tagOf(card, cells - CARD_CHROME)) - NUMBER_CELLS - GLYPH_CELLS,
     TITLE_ROWS,
   ).length
@@ -637,7 +658,9 @@ const cardRows = (
   const spacer = isCompact ? [] : [blank(ui)]
   const content = isExpanded
     ? detailRows(ui, card, cells, isCompact)
-    : [
+    : isProcess(card)
+      ? processRows(ui, card, cells, isCompact)
+      : [
       <Text dimColor wrap="truncate-end">{fit(card.stats, cells)}</Text>,
       glyphRow(ui, GLYPHS.fix, textBlock(ui, card.fix, cells - FIX_CELLS, isCompact ? COMPACT_ROWS : VALUE_ROWS, true)),
     ]
@@ -678,7 +701,7 @@ const compactRow = (ui: Ui, card: Card, cells: number): RenderElement => {
   const hits = HITS.test(first) ? first : null   // only a hit count; another stats order degrades to nothing
   const room = hits === null ? cells : Math.max(8, cells - hits.length - 3)
   return (
-    <Text dimColor wrap="truncate-end">{joined([fit(`${card.n} ${GLYPHS.live} ${card.kind}`, room), hits])}</Text>
+    <Text dimColor wrap="truncate-end">{joined([fit(`${card.n} ${GLYPHS.live} ${titleText(card)}`, room), hits])}</Text>
   )
 }
 
@@ -732,7 +755,9 @@ const creditText = (row: DecidedRow): string => {
 /** One decided pattern: what was done about it, the behaviour, what it is worth, and the sentence the user sent. */
 const decidedRow = (ui: Ui, row: DecidedRow, cells: number): RenderElement => {
   const { Box, Text } = ui
-  const right = row.ignored > 0 ? `ignored ${row.ignored}×` : creditText(row)
+  const worth = row.ignored > 0 ? `ignored ${row.ignored}×` : creditText(row)
+  // How many subagents the standing fix reached: D4's delivery, stated beside what it is worth.
+  const right = joined([row.sent > 0 ? `sent ×${row.sent}` : null, worth === '' ? null : worth])
   const value = Math.max(8, cells - right.length - CONTROL_GAP)
   // The glyph alone left the reader to remember what it meant, so the row says the word too.
   const lead = `${DECIDED_GLYPH[row.choice]} ${DECIDED_WORD[row.choice]}`
